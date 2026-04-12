@@ -1,0 +1,503 @@
+{
+  "info": {
+    "_postman_id": "4bc79a47-c633-4cc8-a997-ddaea8c579d8",
+    "name": "Api Gate",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "52596126"
+  },
+  "item": [
+    {
+      "name": "Dashboard",
+      "item": [
+        {
+          "name": "ai-status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/dashboard/ai-status",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "dashboard",
+                "ai-status"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Kpi",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/dashboard/kpis",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "dashboard",
+                "kpis"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "active-vehicles",
+          "request": {
+            "method": "GET",
+            "header": []
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Alerts",
+      "item": [
+        {
+          "name": "stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/alerts/stats",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "alerts",
+                "stats"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "alerts",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/alerts",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "alerts"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "resolve",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/alerts/3/resolve",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "alerts",
+                "3",
+                "resolve"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete alart",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/alerts/7",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "alerts",
+                "7"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "export",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/alerts/export/csv",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "alerts",
+                "export",
+                "csv"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "vehicles",
+      "item": [
+        {
+          "name": "Add vehicles",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"plate_number\": \"ABC-123\",\r\n    \"owner_name\": \"Ahmed Mohamed\",\r\n    \"employee_id\": \"EMP-001\",\r\n    \"vehicle_type\": \"Sedan\",\r\n    \"title\": \"Eng.\",\r\n    \"notes\": \"Parks in B1\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{sys3}}/vehicles/",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "vehicles",
+                ""
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "kpis",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/vehicles/kpis",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "vehicles",
+                "kpis"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "All vehicles",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/vehicles/",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "vehicles",
+                ""
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update The vehicles",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"plate_number\": \"Bcf-123\",\r\n    \"owner_name\": \"Ahmed Mohamed\",\r\n    \"employee_id\": \"EMP-001\",\r\n    \"vehicle_type\": \"Sedan\",\r\n    \"title\": \"Eng.\",\r\n    \"notes\": \"Parks in B1\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{sys3}}/vehicles/1",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "vehicles",
+                "1"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete the vehicles",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/vehicles/1",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "vehicles",
+                "1"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Export",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/vehicles/export/csv",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "vehicles",
+                "export",
+                "csv"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Entry/Exit",
+      "item": [
+        {
+          "name": "kpis",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/entry-exit/kpis",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "entry-exit",
+                "kpis"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "entry-exit",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/entry-exit/",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "entry-exit",
+                ""
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "traffic",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/entry-exit/traffic?period=monthly",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "entry-exit",
+                "traffic"
+              ],
+              "query": [
+                {
+                  "key": "period",
+                  "value": "monthly"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "export",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/entry-exit/export/csv",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "entry-exit",
+                "export",
+                "csv"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "occupancy",
+      "item": [
+        {
+          "name": "kpis",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/occupancy/kpis",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "occupancy",
+                "kpis"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "zones",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/occupancy/zones",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "occupancy",
+                "zones"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "slots",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{sys3}}/occupancy/slots",
+              "host": [
+                "{{sys3}}"
+              ],
+              "path": [
+                "occupancy",
+                "slots"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{sys3}}/health",
+          "host": [
+            "{{sys3}}"
+          ],
+          "path": [
+            "health"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Stream Alerts",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{sys3}}/alerts/stream",
+          "host": [
+            "{{sys3}}"
+          ],
+          "path": [
+            "alerts",
+            "stream"
+          ]
+        }
+      },
+      "response": []
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "packages": {},
+        "requests": {},
+        "exec": [
+          ""
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "packages": {},
+        "requests": {},
+        "exec": [
+          ""
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "sys1",
+      "value": ""
+    },
+    {
+      "key": "sys2",
+      "value": ""
+    },
+    {
+      "key": "sys3",
+      "value": ""
+    }
+  ]
+}
