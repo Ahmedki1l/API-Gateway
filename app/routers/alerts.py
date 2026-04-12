@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
  
 from app.database import get_db, rows, scalar
 from app.services.upstream import iter_system1_alert_events, iter_system2_alert_events
+from app.services.bus import alerts_bus
 from app.shared import build_paged, stream_csv
  
 router = APIRouter(prefix="/alerts", tags=["Alerts"])
@@ -245,13 +246,47 @@ async def get_alerts(
     return build_paged(items, total or 0, page, page_size)
  
  
+ALERT_TEMPLATES = [
+    {"alert_type": "violence", "severity": "critical", "description": "Suspicious activity detected in Zone A"},
+    {"alert_type": "intrusion", "severity": "critical", "description": "Unauthorized person in restricted area"},
+    {"alert_type": "vehicle_intrusion", "severity": "critical", "description": "Unknown vehicle entered restricted zone"},
+    {"alert_type": "vehicle_violation", "severity": "critical", "description": "Illegal parking maneuver detected"},
+    {"alert_type": "unknown_vehicle", "severity": "warning", "description": "Unregistered plate detected: ABC-123", "plate_number": "ABC-123"},
+    {"alert_type": "named_slot_violation", "severity": "warning", "description": "Visitor parked in CEO slot", "slot_id": "CEO-01", "slot_name": "CEO Reserved"},
+    {"alert_type": "overstay", "severity": "warning", "description": "Vehicle exceeded 24h limit", "plate_number": "XYZ-999"},
+    {"alert_type": "capacity_exceeded", "severity": "info", "description": "Floor 1 is at 95% capacity", "floor": "1"},
+]
+
+
 @router.get("/stream")
 async def stream_alerts():
     async def event_stream():
-        queue: asyncio.Queue = asyncio.Queue()
+        client_queue: asyncio.Queue = asyncio.Queue()
+        bus_queue = alerts_bus.subscribe()
+        
+        async def _bus_pump():
+            try:
+                while True:
+                    event = await bus_queue.get()
+                    await client_queue.put(("test_system", event))
+            except asyncio.CancelledError:
+                pass
+            finally:
+                alerts_bus.unsubscribe(bus_queue)
+
+        async def _heartbeat():
+            try:
+                while True:
+                    await asyncio.sleep(15)
+                    await client_queue.put(("gateway", "heartbeat"))
+            except asyncio.CancelledError:
+                pass
+
         tasks = [
-            asyncio.create_task(_pump("pms_ai", iter_system1_alert_events(), queue)),
-            asyncio.create_task(_pump("video_analytics", iter_system2_alert_events(), queue)),
+            asyncio.create_task(_pump("pms_ai", iter_system1_alert_events(), client_queue)),
+            asyncio.create_task(_pump("video_analytics", iter_system2_alert_events(), client_queue)),
+            asyncio.create_task(_bus_pump()),
+            asyncio.create_task(_heartbeat()),
         ]
         finished = 0
  
@@ -272,11 +307,15 @@ async def stream_alerts():
                 "is_alert":      False,
             }) + "\n\n"
  
-            while finished < len(tasks):
-                source_system, payload = await queue.get()
+            while True:
+                source_system, payload = await client_queue.get()
                 if payload is None:
-                    finished += 1
                     continue
+                
+                if payload == "heartbeat":
+                    yield ": keep-alive\n\n"
+                    continue
+
                 normalized = _normalize_stream_event(source_system, payload)
                 yield "data: " + json.dumps(normalized, default=str) + "\n\n"
         finally:
@@ -291,6 +330,39 @@ async def stream_alerts():
     )
  
  
+@router.post("/test")
+async def trigger_test_alert(payload: Optional[dict] = None):
+    """
+    Broadcasts one or more fake alerts to all active /alerts/stream subscribers.
+    If no payload is sent, it cycles through all known alert types once.
+    """
+    if payload:
+        await alerts_bus.broadcast(payload)
+        return {"status": "broadcasted_custom", "payload": payload}
+    else:
+        # Broadcast all types once
+        for t in ALERT_TEMPLATES:
+            item = t.copy()
+            item["triggered_at"] = str(date.today())
+            await alerts_bus.broadcast(item)
+            await asyncio.sleep(0.1)
+        return {"status": "broadcasted_all", "count": len(ALERT_TEMPLATES)}
+
+
+@router.get("/test/start")
+async def start_continuous_test(interval: float = Query(1.0, ge=0.5, le=60.0)):
+    """Starts an infinite loop of random test alerts every {interval} seconds."""
+    alerts_bus.start_test_stream(ALERT_TEMPLATES, interval=interval)
+    return {"status": "continuous_stream_started", "interval": interval}
+
+
+@router.get("/test/stop")
+async def stop_continuous_test():
+    """Stops the infinite loop of random test alerts."""
+    alerts_bus.stop_test_stream()
+    return {"status": "continuous_stream_stopped"}
+
+
 @router.patch("/{alert_id}/resolve")
 async def resolve_alert(alert_id: int, db: Session = Depends(get_db)):
     result = db.execute(
