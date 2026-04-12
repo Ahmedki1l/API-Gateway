@@ -11,7 +11,7 @@ Reads historical data from SQL Server and calls System 1 / System 2 for live sta
 Frontend
    │
    ▼
-API Gateway  (this project — FastAPI, port 8000)
+API Gateway  (this project — FastAPI, port 8001)
    ├── SQL Server          ← history, vehicles, alerts, occupancy capacities
    ├── System 1 :8001      ← Damanat-PMS-AI  (health check only from gateway)
    └── System 2 :8002      ← Damanat-PMS-VideoAnalytics (live slots & vehicles)
@@ -27,19 +27,24 @@ API Gateway  (this project — FastAPI, port 8000)
 ## Quick Start
 
 ```bash
-# 1. Copy and fill in env
+# 1. Create and activate a Python virtual environment (Recommended: Python 3.12)
+python -m venv .venv
+# On Windows:
+.venv\Scripts\activate
+
+# 2. Copy and fill in env
 cp .env.example .env
 
-# 2. Install dependencies
+# 3. Install dependencies
 pip install -r requirements.txt
 
-# 3. Run the schema migration on SQL Server (once)
+# 4. Run the schema migration on SQL Server (once)
 #    Open migrations/fix_system1_schema.sql in SSMS and execute
 
-# 4. Start the gateway
+# 5. Start the gateway
 python run.py
-# → http://localhost:8000
-# → http://localhost:8000/docs  (Swagger UI)
+# → http://localhost:8001
+# → http://localhost:8001/docs  (Swagger UI)
 ```
 
 ---
@@ -81,6 +86,7 @@ of failing halfway through.
 | Method | Path                   | Query Params                                          |
 |--------|------------------------|-------------------------------------------------------|
 | GET    | `/alerts/stats`        | —                                                     |
+| GET    | `/alerts/stream`       | — (Server-Sent Events)                                |
 | GET    | `/alerts/`             | page, page_size, search, severity, alert_type, resolved, date_from, date_to |
 | PATCH  | `/alerts/{id}/resolve` | —                                                     |
 | DELETE | `/alerts/{id}`         | —                                                     |
@@ -97,9 +103,11 @@ of failing halfway through.
 ### Vehicles
 | Method | Path                    | Query Params                                  |
 |--------|-------------------------|-----------------------------------------------|
+| POST   | `/vehicles/`            | body: VehicleCreate                           |
 | GET    | `/vehicles/kpis`        | —                                             |
 | GET    | `/vehicles/`            | page, page_size, search, is_employee, vehicle_type |
 | PUT    | `/vehicles/{id}`        | body: VehicleUpdate                           |
+| DELETE | `/vehicles/{id}`        | —                                             |
 | GET    | `/vehicles/export/csv`  | same filters as list                          |
 
 ### Occupancy
