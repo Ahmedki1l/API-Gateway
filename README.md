@@ -92,6 +92,12 @@ of failing halfway through.
 | DELETE | `/alerts/{id}`         | —                                                     |
 | GET    | `/alerts/export/csv`   | same filters as list                                  |
 
+# Test Alerts
+| Method | Path                   | Query Params                                          |
+|--------|------------------------|-------------------------------------------------------|
+| GET    | `/alerts/test/start`   | interval (sec, default 1.0) — start continuous stream |
+| GET    | `/alerts/test/stop`    | — (stop continuous stream)                            |
+
 ### Entry / Exit
 | Method | Path                      | Query Params                                          |
 |--------|---------------------------|-------------------------------------------------------|

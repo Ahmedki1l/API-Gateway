@@ -328,26 +328,6 @@ async def stream_alerts():
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
- 
- 
-@router.post("/test")
-async def trigger_test_alert(payload: Optional[dict] = None):
-    """
-    Broadcasts one or more fake alerts to all active /alerts/stream subscribers.
-    If no payload is sent, it cycles through all known alert types once.
-    """
-    if payload:
-        await alerts_bus.broadcast(payload)
-        return {"status": "broadcasted_custom", "payload": payload}
-    else:
-        # Broadcast all types once
-        for t in ALERT_TEMPLATES:
-            item = t.copy()
-            item["triggered_at"] = str(date.today())
-            await alerts_bus.broadcast(item)
-            await asyncio.sleep(0.1)
-        return {"status": "broadcasted_all", "count": len(ALERT_TEMPLATES)}
-
 
 @router.get("/test/start")
 async def start_continuous_test(interval: float = Query(1.0, ge=0.5, le=60.0)):
