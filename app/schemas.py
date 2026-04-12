@@ -56,6 +56,10 @@ class AlertItem(BaseModel):
     vehicle_type: Optional[str]
     alert_type: Optional[str]
     severity: Optional[str]
+    slot_id: Optional[str]
+    slot_name: Optional[str]
+    zone_id: Optional[str]
+    zone_name: Optional[str]
     location: Optional[str]
     description: Optional[str]
     screenshot_url: Optional[str]
@@ -82,6 +86,7 @@ class VehicleEvent(BaseModel):
     entry_time: Optional[datetime]
     exit_time: Optional[datetime]
     floor: Optional[str]
+    slot_id: Optional[str]
     slot: Optional[str]
     zone: Optional[str]
     screenshot_url: Optional[str]
@@ -122,7 +127,7 @@ class OccupancyKPIs(BaseModel):
     total_vehicles: int
 
 class ZoneItem(BaseModel):
-    zone_id: int
+    zone_id: str
     zone_name: Optional[str]
     floor: Optional[str]
     camera_id: Optional[str]

@@ -46,14 +46,20 @@ python run.py
 
 ## System 1 Schema Fixes Required
 
-Before starting the gateway, apply `migrations/fix_system1_schema.sql`.  
-It adds two missing columns to System 1's database:
+Before starting the gateway, apply `migrations/fix_system1_schema.sql`.
 
-| Table          | Column Added   | Why                                      |
-|----------------|----------------|------------------------------------------|
-| `Alerts`       | `plate_number` | Alerts need plate so frontend can show it |
-| `ZoneOccupancy`| `floor`        | Occupancy tab is floor-aware in Figma     |
-| `ZoneOccupancy`| `zone_name`    | Display name for each zone                |
+The script is idempotent and now does two jobs:
+
+1. Adds the compatibility columns the gateway expects on `alerts`, `zone_occupancy`,
+   `vehicles`, and `entry_exit_log`.
+2. Creates `parking_sessions` if it is missing and hardens the real foreign-key links
+   that already exist conceptually in PMS-AI:
+   - `entry_exit_log.vehicle_id -> vehicles.id`
+   - `entry_exit_log.matched_entry_id -> entry_exit_log.id`
+   - `parking_sessions.vehicle_id -> vehicles.id`
+
+If old orphan rows exist, the script prints a warning and skips that foreign key instead
+of failing halfway through.
 
 ---
 
