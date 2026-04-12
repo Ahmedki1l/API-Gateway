@@ -128,6 +128,7 @@ async def get_slots(
     floor: Optional[str] = Query(None),
     is_available: Optional[bool] = Query(None),
     is_violation_zone: Optional[bool] = Query(None),
+    grouped: bool = Query(True),
     db: Session = Depends(get_db),
 ):
     """Individual slot grid — joins parking_slots with latest slot_status."""
@@ -147,6 +148,41 @@ async def get_slots(
     where = " AND ".join(clauses)
     total = scalar(db, f"SELECT COUNT(*) FROM parking_slots ps WHERE {where}", params)
 
+    if grouped:
+        # Fetch all matching slots without pagination to group them properly
+        data = rows(db, f"""
+            SELECT
+                ps.slot_id,
+                ps.slot_name,
+                ps.floor,
+                ps.is_available,
+                ps.is_violation_zone,
+                ss.plate_number     AS current_plate,
+                ss.status           AS current_status,
+                ss.time             AS status_updated_at
+            FROM parking_slots ps
+            LEFT JOIN slot_status ss ON ss.slot_id = ps.slot_id
+                AND ss.time = (
+                    SELECT MAX(time) FROM slot_status WHERE slot_id = ps.slot_id
+                )
+            WHERE {where}
+            ORDER BY ps.floor, ps.slot_name
+        """, params)
+
+        # Group data by floor
+        floors = {}
+        for row in data:
+            f_name = row["floor"] or "Unassigned"
+            if f_name not in floors:
+                floors[f_name] = []
+            floors[f_name].append(row)
+
+        return [
+            {"floor": f, "slots": slots}
+            for f, slots in floors.items()
+        ]
+
+    # Standard paginated behavior
     params["offset"]    = (page - 1) * page_size
     params["page_size"] = page_size
 

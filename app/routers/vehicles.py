@@ -17,7 +17,11 @@ class VehicleCreate(BaseModel):
     employee_id:  Optional[str] = None
     vehicle_type: Optional[str] = None
     title:        Optional[str] = None
+    is_employee: Optional[bool] = False
+    phone:        Optional[str] = None
+    email:        Optional[str] = None
     notes:        Optional[str] = None
+    
 
 
 class VehicleUpdate(BaseModel):
@@ -26,7 +30,7 @@ class VehicleUpdate(BaseModel):
     vehicle_type: Optional[str]  = None
     title:        Optional[str]  = None
     notes:        Optional[str]  = None
-    is_employee:  Optional[bool] = None  # requires System 1 migration
+    is_employee:  Optional[bool] = False  # requires System 1 migration
     phone:        Optional[str]  = None  # requires System 1 migration
     email:        Optional[str]  = None  # requires System 1 migration
 
@@ -57,15 +61,18 @@ async def create_vehicle(body: VehicleCreate, db: Session = Depends(get_db)):
 
     db.execute(text("""
         INSERT INTO vehicles
-            (plate_number, owner_name, employee_id, vehicle_type, title, notes, is_registered, registered_at)
+            (plate_number, owner_name, employee_id, vehicle_type, title, is_employee, phone, email, notes, is_registered, registered_at)
         VALUES
-            (:plate, :owner, :emp_id, :vtype, :title, :notes, 1, GETDATE())
+            (:plate, :owner, :emp_id, :vtype, :title, :is_employee, :phone, :email, :notes, 1, GETDATE())
     """), {
         "plate":  body.plate_number,
         "owner":  body.owner_name,
         "emp_id": body.employee_id,
         "vtype":  body.vehicle_type,
         "title":  body.title,
+        "is_employee": body.is_employee,
+        "phone":  body.phone,
+        "email":  body.email,
         "notes":  body.notes,
     })
     db.commit()
