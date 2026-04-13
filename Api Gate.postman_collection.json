@@ -161,7 +161,7 @@
             "header": [],
             "body": {
               "mode": "raw",
-              "raw": "{\r\n    \"plate_number\": \"ABC-123\",\r\n    \"owner_name\": \"Ahmed Mohamed\",\r\n    \"employee_id\": \"EMP-001\",\r\n    \"vehicle_type\": \"Sedan\",\r\n    \"title\": \"Eng.\",\r\n    \"notes\": \"Parks in B1\"\r\n}",
+              "raw": "{\r\n    \"plate_number\": \"ZXY-123\",\r\n    \"owner_name\":  \"Ahmed alaa\",\r\n    \"employee_id\":  \"452\",\r\n    \"vehicle_type\": \"sedan\",\r\n    \"title\":  \"eng.\",\r\n    \"is_employee\":\"True\",\r\n    \"notes\":   \"good\"\r\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -427,6 +427,59 @@
       ]
     },
     {
+      "name": "Stream test",
+      "item": [
+        {
+          "name": "Stream Alerts Test start",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8001/alerts/test/start?interval=1.0",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8001",
+              "path": [
+                "alerts",
+                "test",
+                "start"
+              ],
+              "query": [
+                {
+                  "key": "interval",
+                  "value": "1.0"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Stream Alerts Test stop",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8001/alerts/test/stop",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8001",
+              "path": [
+                "alerts",
+                "test",
+                "stop"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
       "name": "Health Check",
       "request": {
         "method": "GET",
@@ -444,7 +497,7 @@
       "response": []
     },
     {
-      "name": "Stream Alerts",
+      "name": "stream",
       "request": {
         "method": "GET",
         "header": [],
