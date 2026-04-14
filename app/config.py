@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     db_name: str = "ParkingDB"
     db_user: str = "sa"
     db_password: str = ""
+    db_trusted_connection: bool = False
 
     # Upstream systems
     system1_base_url: str = "http://localhost:8080"
@@ -19,10 +20,16 @@ class Settings(BaseSettings):
 
     @property
     def db_connection_string(self) -> str:
+        driver = self.db_driver.replace(" ", "+")
+        if self.db_trusted_connection:
+            return (
+                f"mssql+pyodbc://{self.db_server}/{self.db_name}"
+                f"?driver={driver}&trusted_connection=yes"
+            )
         return (
             f"mssql+pyodbc://{self.db_user}:{self.db_password}"
             f"@{self.db_server}/{self.db_name}"
-            f"?driver={self.db_driver.replace(' ', '+')}"
+            f"?driver={driver}"
         )
 
     @property
