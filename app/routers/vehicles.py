@@ -117,45 +117,60 @@ async def get_vehicles(
     params: dict = {}
 
     if search:
-        clauses.append("(plate_number LIKE :search OR owner_name LIKE :search)")
+        clauses.append("(v.plate_number LIKE :search OR v.owner_name LIKE :search)")
         params["search"] = f"%{search}%"
     if vehicle_type:
-        clauses.append("vehicle_type = :vehicle_type")
+        clauses.append("v.vehicle_type = :vehicle_type")
         params["vehicle_type"] = vehicle_type
     if is_registered is not None:
-        clauses.append("is_registered = :is_registered")
+        clauses.append("v.is_registered = :is_registered")
         params["is_registered"] = 1 if is_registered else 0
     if is_employee is not None and cols["is_employee"]:
-        clauses.append("is_employee = :is_employee")
+        clauses.append("v.is_employee = :is_employee")
         params["is_employee"] = 1 if is_employee else 0
 
     where = " AND ".join(clauses)
-    total = scalar(db, f"SELECT COUNT(*) FROM vehicles WHERE {where}", params)
+    total = scalar(db, f"SELECT COUNT(*) FROM vehicles v WHERE {where}", params)
 
     params["offset"]    = (page - 1) * page_size
     params["page_size"] = page_size
 
     extra = (
-        (", is_employee" if cols["is_employee"] else ", NULL AS is_employee") +
-        (", phone"       if cols["phone"]       else ", NULL AS phone")       +
-        (", email"       if cols["email"]       else ", NULL AS email")
+        (", v.is_employee" if cols["is_employee"] else ", NULL AS is_employee") +
+        (", v.phone"       if cols["phone"]       else ", NULL AS phone")       +
+        (", v.email"       if cols["email"]       else ", NULL AS email")
     )
 
     items = rows(db, f"""
         SELECT
-            id,
-            plate_number,
-            owner_name,
-            vehicle_type,
-            employee_id,
-            title,
-            is_registered,
-            registered_at,
-            notes
-            {extra}
-        FROM vehicles
+            v.id,
+            v.plate_number,
+            v.owner_name,
+            v.vehicle_type,
+            v.employee_id,
+            v.title,
+            v.is_registered,
+            v.registered_at,
+            v.notes
+            {extra},
+            ps.parked_at,
+            ps.status      AS parking_status,
+            ps.floor,
+            ps.zone_name   AS zone
+        FROM vehicles v
+        LEFT JOIN (
+            SELECT
+                plate_number,
+                parked_at,
+                status,
+                floor,
+                zone_name,
+                ROW_NUMBER() OVER (PARTITION BY plate_number ORDER BY entry_time DESC) AS rn
+            FROM parking_sessions
+            WHERE status = 'open'
+        ) ps ON ps.plate_number = v.plate_number AND ps.rn = 1
         WHERE {where}
-        ORDER BY registered_at DESC
+        ORDER BY v.registered_at DESC
         OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
     """, params)
 

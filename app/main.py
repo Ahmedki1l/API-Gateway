@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import dashboard, alerts, entry_exit, vehicles, occupancy
+from app.routers import dashboard, alerts, entry_exit, vehicles, occupancy, camera_feeds
 
 app = FastAPI(
     title="Parking API Gateway",
@@ -23,6 +23,7 @@ app.include_router(alerts.router)
 app.include_router(entry_exit.router)
 app.include_router(vehicles.router)
 app.include_router(occupancy.router)
+app.include_router(camera_feeds.router)
 
 
 @app.get("/health", tags=["Gateway"])

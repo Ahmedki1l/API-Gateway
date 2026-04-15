@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Optional
  
@@ -183,15 +183,22 @@ async def alert_stats(db: Session = Depends(get_db)):
             WHERE is_resolved=0 AND is_test=0
               AND alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation')
         """
- 
+
+    # Calculate local midnight in UTC to compare with resolved_at (which is UTC)
+    # Assuming local time is UTC+2 (Arab Standard Time)
+    local_tz = timezone(timedelta(hours=2))
+    now_local = datetime.now(local_tz)
+    start_of_day_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_of_day_utc = start_of_day_local.astimezone(timezone.utc)
+
     return {
         "active_alerts":    scalar(db, "SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0"),
         "critical_violations": scalar(db, critical_sql),
         "resolved_today":   scalar(db, """
             SELECT COUNT(*) FROM alerts
             WHERE is_resolved=1 AND is_test=0
-              AND CAST(resolved_at AS DATE) = CAST(GETDATE() AS DATE)
-        """),
+              AND resolved_at >= :start_of_day
+        """, {"start_of_day": start_of_day_utc}),
     }
  
  

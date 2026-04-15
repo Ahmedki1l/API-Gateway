@@ -1,6 +1,9 @@
 from typing import Optional
+from io import StringIO
+import csv
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db, scalar, rows
@@ -207,3 +210,157 @@ async def get_slots(
     """, params)
 
     return build_paged(items, total or 0, page, page_size)
+
+@router.get("/export")
+async def export_occupancy_csv(
+    floor: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    output = StringIO()
+    writer = csv.writer(output)
+
+    # =========================
+    # 1. KPI Section
+    # =========================
+    total_spots = scalar(db, "SELECT COUNT(*) FROM parking_slots")
+
+    occupied = scalar(db, """
+        SELECT COUNT(DISTINCT ss.slot_id)
+        FROM slot_status ss
+        INNER JOIN (
+            SELECT slot_id, MAX(time) AS latest
+            FROM slot_status
+            GROUP BY slot_id
+        ) latest_ss
+        ON latest_ss.slot_id = ss.slot_id
+        AND latest_ss.latest = ss.time
+        WHERE ss.status NOT IN ('empty', 'available', 'free')
+    """) or 0
+
+    available = max((total_spots or 0) - occupied, 0)
+    utilization = round((occupied / total_spots) * 100, 1) if total_spots else 0
+
+    writer.writerow(["=== OCCUPANCY KPIs ==="])
+    writer.writerow(["total_spots", total_spots or 0])
+    writer.writerow(["occupied_spots", occupied])
+    writer.writerow(["available_spots", available])
+    writer.writerow(["utilization %", utilization])
+    writer.writerow([])
+
+    # =========================
+    # 2. Zones Section
+    # =========================
+    zone_clauses = ["1=1"]
+    zone_params = {}
+
+    if floor:
+        zone_clauses.append("zo.floor = :floor")
+        zone_params["floor"] = floor
+
+    zone_where = " AND ".join(zone_clauses)
+
+    zones = rows(db, f"""
+        SELECT
+            zo.zone_id,
+            zo.zone_name,
+            zo.floor,
+            zo.camera_id,
+            zo.max_capacity,
+            zo.current_count,
+            zo.last_updated
+        FROM zone_occupancy zo
+        WHERE {zone_where}
+        ORDER BY zo.floor, zo.zone_name
+    """, zone_params)
+
+    writer.writerow(["=== ZONES ==="])
+    writer.writerow([
+        "zone_id",
+        "zone_name",
+        "floor",
+        "camera_id",
+        "max_capacity",
+        "current_count",
+        "last_updated"
+    ])
+
+    for z in zones:
+        writer.writerow([
+            z["zone_id"],
+            z["zone_name"],
+            z["floor"],
+            z["camera_id"],
+            z["max_capacity"],
+            z["current_count"],
+            z["last_updated"],
+        ])
+
+    writer.writerow([])
+
+    # =========================
+    # 3. Slots Section
+    # =========================
+    slot_clauses = ["1=1"]
+    slot_params = {}
+
+    if floor:
+        slot_clauses.append("ps.floor = :floor")
+        slot_params["floor"] = floor
+
+    slot_where = " AND ".join(slot_clauses)
+
+    slots = rows(db, f"""
+        SELECT
+            ps.slot_id,
+            ps.slot_name,
+            ps.floor,
+            ps.is_available,
+            ps.is_violation_zone,
+            ss.plate_number AS current_plate,
+            ss.status AS current_status,
+            ss.time AS status_updated_at
+        FROM parking_slots ps
+        LEFT JOIN slot_status ss
+            ON ss.slot_id = ps.slot_id
+            AND ss.time = (
+                SELECT MAX(time)
+                FROM slot_status
+                WHERE slot_id = ps.slot_id
+            )
+        WHERE {slot_where}
+        ORDER BY ps.floor, ps.slot_name
+    """, slot_params)
+
+    writer.writerow(["=== SLOTS ==="])
+    writer.writerow([
+        "slot_id",
+        "slot_name",
+        "floor",
+        "is_available",
+        "is_violation_zone",
+        "current_plate",
+        "current_status",
+        "status_updated_at"
+    ])
+
+    for s in slots:
+        writer.writerow([
+            s["slot_id"],
+            s["slot_name"],
+            s["floor"],
+            s["is_available"],
+            s["is_violation_zone"],
+            s["current_plate"],
+            s["current_status"],
+            s["status_updated_at"],
+        ])
+
+    output.seek(0)
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": "attachment; filename=occupancy_report.csv"
+        }
+    )

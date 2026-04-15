@@ -1,6 +1,10 @@
-from sqlalchemy import create_engine, text
+import warnings
+from sqlalchemy import create_engine, text, exc as sa_exc
 from sqlalchemy.orm import sessionmaker, Session
 from app.config import settings
+
+# Suppress SQLAlchemy warning about unrecognized SQL Server versions (e.g. 17.0.1000.7)
+warnings.filterwarnings("ignore", category=sa_exc.SAWarning, message=".*Unrecognized server version.*")
 
 engine = create_engine(
     settings.db_connection_string,

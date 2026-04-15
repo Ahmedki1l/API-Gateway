@@ -1,4 +1,5 @@
-from datetime import date
+import calendar
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
  
 from fastapi import APIRouter, Depends, Query
@@ -35,18 +36,32 @@ async def entry_exit_kpis(
     target_date: Optional[date] = Query(None, description="ISO date e.g. 2024-06-01"),
     db: Session = Depends(get_db),
 ):
-    date_filter = "AND CAST(entry_time AS DATE) = :d" if target_date else ""
-    params      = {"d": str(target_date)} if target_date else {}
- 
+    local_tz = timezone(timedelta(hours=2))
+    
+    if target_date:
+        # Specific date provided: filter for that 24h window in local time
+        dt_local = datetime.combine(target_date, datetime.min.time()).replace(tzinfo=local_tz)
+        start_utc = dt_local.astimezone(timezone.utc)
+        end_utc   = (dt_local + timedelta(days=1)).astimezone(timezone.utc)
+        date_filter = "AND entry_time >= :start AND entry_time < :end"
+        params = {"start": start_utc, "end": end_utc}
+    else:
+        # Default to today: since local midnight
+        now_local = datetime.now(local_tz)
+        start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_utc = start_local.astimezone(timezone.utc)
+        date_filter = "AND entry_time >= :start"
+        params = {"start": start_utc}
+
     total = scalar(db, f"""
         SELECT COUNT(DISTINCT plate_number)
         FROM parking_sessions
         WHERE 1=1 {date_filter}
     """, params)
- 
+
     currently_parked = scalar(db,
         "SELECT COUNT(*) FROM parking_sessions WHERE status = 'open'")
- 
+
     # duration_seconds → minutes average (exclude still-open sessions)
     avg_stay_sec = scalar(db, f"""
         SELECT AVG(CAST(duration_seconds AS FLOAT))
@@ -56,15 +71,20 @@ async def entry_exit_kpis(
           {date_filter}
     """, params)
     avg_stay_minutes = round((avg_stay_sec or 0) / 60, 1)
- 
-    # overstay = status column set by entry_exit_service
-    overstays = scalar(db, f"""
-        SELECT COUNT(*) FROM parking_sessions
-        WHERE status = 'overstay' {date_filter}
-    """, params)
- 
+
+    # overstay = status column set by entry_exit_service or open > 24h
+    # Removed date_filter to show all current overstays regardless of entry day
+    # Option B: Overstays = unique vehicles that entered before today's local midnight
+    overstays = scalar(db, """
+        SELECT COUNT(DISTINCT plate_number)
+        FROM parking_sessions
+        WHERE plate_number IS NOT NULL
+          AND (status = 'open' OR status = 'overstay')
+          AND entry_time < :start_of_today
+    """, {"start_of_today": start_utc})
+
     return {
-        "total_vehicles":    total            or 0,
+        "total_vehicles_today":    total            or 0,
         "currently_parked":  currently_parked or 0,
         "avg_stay_minutes":  avg_stay_minutes,
         "overstays":         overstays        or 0,
@@ -79,7 +99,7 @@ async def traffic_chart(
     """
     Uses entry_exit_log for raw event counts.
     event_time column + gate column (entry/exit direction).
-    System 1 stores entry and exit as separate rows; gate indicates direction.
+    Ensures all intervals are present (zero-filled).
     """
     if period == "daily":
         sql = """
@@ -91,8 +111,10 @@ async def traffic_chart(
             WHERE CAST(event_time AS DATE) = CAST(GETDATE() AS DATE)
               AND is_test = 0
             GROUP BY DATEPART(HOUR, event_time)
-            ORDER BY label
         """
+        # Labels 0-23 as integers (to match DATEPART result type)
+        full_labels = {i: {"label": i, "entries": 0, "exits": 0} for i in range(24)}
+
     elif period == "weekly":
         sql = """
             SELECT
@@ -100,11 +122,14 @@ async def traffic_chart(
                 SUM(CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END) AS entries,
                 SUM(CASE WHEN gate LIKE '%exit%'  OR gate LIKE '%out%' THEN 1 ELSE 0 END) AS exits
             FROM entry_exit_log
-            WHERE event_time >= DATEADD(DAY, 2 - DATEPART(WEEKDAY, GETDATE()), CAST(GETDATE() AS DATE))
+            WHERE event_time >= DATEADD(DAY, 1 - DATEPART(WEEKDAY, GETDATE()), CAST(GETDATE() AS DATE))
               AND is_test = 0
-            GROUP BY DATENAME(WEEKDAY, event_time), DATEPART(WEEKDAY, event_time)
-            ORDER BY MIN(DATEPART(WEEKDAY, event_time))
+            GROUP BY DATENAME(WEEKDAY, event_time)
         """
+        # Standard week days
+        days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+        full_labels = {d: {"label": d, "entries": 0, "exits": 0} for d in days}
+
     else:  # monthly
         sql = """
             SELECT
@@ -116,9 +141,24 @@ async def traffic_chart(
               AND MONTH(event_time) = MONTH(GETDATE())
               AND is_test = 0
             GROUP BY DAY(event_time)
-            ORDER BY label
         """
-    return rows(db, sql)
+        today = date.today()
+        _, last_day = calendar.monthrange(today.year, today.month)
+        full_labels = {i: {"label": i, "entries": 0, "exits": 0} for i in range(1, last_day + 1)}
+
+    db_results = rows(db, sql)
+    for row in db_results:
+        label = row["label"]
+        if label in full_labels:
+            full_labels[label]["entries"] = row["entries"]
+            full_labels[label]["exits"] = row["exits"]
+
+    # Sort results to maintain time order
+    if period == "weekly":
+        # Keep Sunday-Saturday order
+        return [full_labels[d] for d in ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]]
+    
+    return [full_labels[k] for k in sorted(full_labels.keys())]
  
  
 @router.get("/")
