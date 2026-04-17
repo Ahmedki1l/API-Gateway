@@ -5,6 +5,7 @@ import csv
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from app.database import get_db, scalar, rows
 from app.services.upstream import get_live_slots
@@ -66,23 +67,61 @@ async def get_zones(
     floor: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
+    # =========================
+    # 🔹 STEP 1: Compute capacities from parking_slots
+    # =========================
+    b1_max = scalar(db, "SELECT COUNT(*) FROM parking_slots WHERE floor='B1'") or 0
+    b2_max = scalar(db, "SELECT COUNT(*) FROM parking_slots WHERE floor='B2'") or 0
+    total_max = b1_max + b2_max
+
+    # =========================
+    # 🔹 STEP 2: Update DB (sync)
+    # =========================
+    db.execute(
+        text("UPDATE zone_occupancy SET max_capacity = :v WHERE zone_id = 'B1-PARKING'"),
+        {"v": b1_max},
+    )
+    db.execute(
+        text("UPDATE zone_occupancy SET max_capacity = :v WHERE zone_id = 'B2-PARKING'"),
+        {"v": b2_max},
+    )
+    db.execute(
+        text("UPDATE zone_occupancy SET max_capacity = :v WHERE zone_id = 'GARAGE-TOTAL'"),
+        {"v": total_max},
+    )
+    db.commit()
+
+    # =========================
+    # 🔹 STEP 3: Filtering
+    # =========================
     clauses = ["1=1"]
     params: dict = {}
 
     if search:
         clauses.append("(zo.zone_name LIKE :search OR CAST(zo.floor AS NVARCHAR) LIKE :search OR zo.zone_id LIKE :search)")
         params["search"] = f"%{search}%"
+
     if floor:
         clauses.append("zo.floor = :floor")
         params["floor"] = floor
 
     where = " AND ".join(clauses)
-    total = scalar(db, f"SELECT COUNT(*) FROM zone_occupancy zo WHERE {where}", params)
 
-    params["offset"]    = (page - 1) * page_size
+    total = scalar(
+        db,
+        f"SELECT COUNT(*) FROM zone_occupancy zo WHERE {where}",
+        params,
+    )
+
+    params["offset"] = (page - 1) * page_size
     params["page_size"] = page_size
 
-    zone_rows = rows(db, f"""
+    # =========================
+    # 🔹 STEP 4: Fetch zones (now updated)
+    # =========================
+    zone_rows = rows(
+        db,
+        f"""
         SELECT
             zo.id,
             zo.zone_id,
@@ -96,10 +135,15 @@ async def get_zones(
         WHERE {where}
         ORDER BY zo.floor, zo.zone_name
         OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
-    """, params)
+        """,
+        params,
+    )
 
-    # overlay live slot counts from System 2 per zone
+    # =========================
+    # 🔹 STEP 5: Live slots overlay
+    # =========================
     live_slots = await get_live_slots()
+
     live_by_zone: dict[str, int] = {}
     for slot in live_slots:
         zid = str(slot.get("zone_id") or slot.get("zone") or "")
@@ -108,21 +152,24 @@ async def get_zones(
                 1 if slot.get("status") not in ("empty", "available", "free") else 0
             )
 
+    # =========================
+    # 🔹 STEP 6: Build response
+    # =========================
     items = []
     for z in zone_rows:
-        zid      = str(z["zone_id"])
-        # prefer live count → fall back to zone_occupancy.current_count
+        zid = str(z["zone_id"])
+
         occupied = live_by_zone.get(zid, z["current_count"] or 0)
-        capacity = z["max_capacity"] or 1
+        capacity = max(z["max_capacity"] or 0, 1)
+
         items.append({
             **z,
-            "occupied":    occupied,
-            "available":   max(capacity - occupied, 0),
+            "occupied": occupied,
+            "available": max(capacity - occupied, 0),
             "utilization": round(occupied / capacity * 100, 1),
         })
 
     return build_paged(items, total or 0, page, page_size)
-
 
 @router.get("/slots")
 async def get_slots(

@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     # SQL Server
     db_driver: str = "ODBC Driver 17 for SQL Server"
     db_server: str = "localhost"
+    db_port: int = 1433
     db_name: str = "ParkingDB"
     db_user: str = "sa"
     db_password: str = ""
