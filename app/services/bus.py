@@ -41,6 +41,7 @@ class Broadcaster:
                 print(f"Bus: Starting continuous test stream ({interval}s)")
                 while True:
                     template = random.choice(templates).copy()
+                    template["id"] = random.randint(100000, 999999) # Mock ID for test stream
                     template["triggered_at"] = datetime.now().isoformat()
                     await self.broadcast(template)
                     await asyncio.sleep(interval)

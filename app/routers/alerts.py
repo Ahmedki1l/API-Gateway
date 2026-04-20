@@ -150,6 +150,7 @@ def _normalize_stream_event(source_system: str, payload: dict) -> dict:
         slot_name = str(payload["slot_number"])
  
     return {
+        "alert_id":      payload.get("id") or payload.get("alert_id"),
         "source_system": source_system,
         "alert_type":    payload.get("alert_type"),
         "severity":      payload.get("severity", "info"),
@@ -299,6 +300,7 @@ async def stream_alerts():
  
         try:
             yield "data: " + json.dumps({
+                "alert_id":      None,
                 "source_system": "gateway",
                 "alert_type":    "connection_established",
                 "severity":      "info",
