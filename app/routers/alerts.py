@@ -220,8 +220,13 @@ async def get_alerts(
     where, params = _where(search, severity, alert_type, resolved, date_from, date_to, cols)
     params["offset"]    = (page - 1) * page_size
     params["page_size"] = page_size
- 
-    total = scalar(db, f"SELECT COUNT(*) FROM alerts a WHERE {where}", params)
+    
+    total = scalar(db, f"""
+        SELECT COUNT(*) 
+        FROM alerts a
+        {bits["slot_join"]}
+        WHERE {where}
+    """, params)    
     items = rows(db, f"""
         SELECT
             a.id,

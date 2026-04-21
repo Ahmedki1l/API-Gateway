@@ -118,33 +118,53 @@ async def traffic_chart(
     elif period == "weekly":
         sql = """
             SELECT
-                DATENAME(WEEKDAY, event_time)                           AS label,
+                CAST(event_time AS DATE) AS label,
                 SUM(CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END) AS entries,
                 SUM(CASE WHEN gate LIKE '%exit%'  OR gate LIKE '%out%' THEN 1 ELSE 0 END) AS exits
             FROM entry_exit_log
-            WHERE event_time >= DATEADD(DAY, 1 - DATEPART(WEEKDAY, GETDATE()), CAST(GETDATE() AS DATE))
-              AND is_test = 0
-            GROUP BY DATENAME(WEEKDAY, event_time)
+            WHERE event_time >= DATEADD(DAY, -6, CAST(GETDATE() AS DATE))
+            AND event_time < DATEADD(DAY, 1, CAST(GETDATE() AS DATE))
+            AND is_test = 0
+            GROUP BY CAST(event_time AS DATE)
         """
-        # Standard week days
-        days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-        full_labels = {d: {"label": d, "entries": 0, "exits": 0} for d in days}
 
-    else:  # monthly
+        from datetime import date, timedelta
+
+        today = date.today()
+
+        full_labels = {
+            today - timedelta(days=i): {
+                "label": (today - timedelta(days=i)).isoformat(),
+                "entries": 0,
+                "exits": 0,
+            }
+            for i in range(6, -1, -1)
+        }
+    else:  # monthly = last 30 days
         sql = """
             SELECT
-                DAY(event_time)                                         AS label,
+                CAST(event_time AS DATE) AS label,
                 SUM(CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END) AS entries,
                 SUM(CASE WHEN gate LIKE '%exit%'  OR gate LIKE '%out%' THEN 1 ELSE 0 END) AS exits
             FROM entry_exit_log
-            WHERE YEAR(event_time)  = YEAR(GETDATE())
-              AND MONTH(event_time) = MONTH(GETDATE())
-              AND is_test = 0
-            GROUP BY DAY(event_time)
+            WHERE event_time >= DATEADD(DAY, -29, CAST(GETDATE() AS DATE))
+            AND event_time < DATEADD(DAY, 1, CAST(GETDATE() AS DATE))
+            AND is_test = 0
+            GROUP BY CAST(event_time AS DATE)
         """
+
+        from datetime import date, timedelta
+
         today = date.today()
-        _, last_day = calendar.monthrange(today.year, today.month)
-        full_labels = {i: {"label": i, "entries": 0, "exits": 0} for i in range(1, last_day + 1)}
+
+        full_labels = {
+            today - timedelta(days=i): {
+                "label": (today - timedelta(days=i)).isoformat(),
+                "entries": 0,
+                "exits": 0,
+            }
+            for i in range(29, -1, -1)
+        }
 
     db_results = rows(db, sql)
     for row in db_results:
@@ -154,9 +174,9 @@ async def traffic_chart(
             full_labels[label]["exits"] = row["exits"]
 
     # Sort results to maintain time order
-    if period == "weekly":
-        # Keep Sunday-Saturday order
-        return [full_labels[d] for d in ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]]
+    # if period == "weekly":
+    #     # Keep Sunday-Saturday order
+    #      return [full_labels[k] for k in sorted(full_labels.keys())]
     
     return [full_labels[k] for k in sorted(full_labels.keys())]
  
