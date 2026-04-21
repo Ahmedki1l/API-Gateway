@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     db_driver: str = "ODBC Driver 18 for SQL Server"
     db_server: str = "pms-mssql"
+    db_instance: str | None = None
     db_port: int = 1433
     db_name: str = "damanat_pms"
     db_user: str = "damanat"
@@ -19,16 +20,23 @@ class Settings(BaseSettings):
     @property
     def db_connection_string(self) -> str:
         driver = self.db_driver.replace(" ", "+")
+        
+        if self.db_instance:
+            server_target = f"{self.db_server}\\{self.db_instance}"
+        elif self.db_server in (".", "(local)"):
+            server_target = self.db_server
+        else:
+            server_target = f"{self.db_server}:{self.db_port}"
 
         if self.db_trusted_connection:
             return (
-                f"mssql+pyodbc://{self.db_server}:{self.db_port}/{self.db_name}"
+                f"mssql+pyodbc://{server_target}/{self.db_name}"
                 f"?driver={driver}&trusted_connection=yes&TrustServerCertificate=yes"
             )
 
         return (
             f"mssql+pyodbc://{self.db_user}:{self.db_password}"
-            f"@{self.db_server}:{self.db_port}/{self.db_name}"
+            f"@{server_target}/{self.db_name}"
             f"?driver={driver}&TrustServerCertificate=yes"
         )
 
