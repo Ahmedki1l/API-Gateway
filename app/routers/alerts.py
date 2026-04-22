@@ -38,7 +38,7 @@ def _alerts_extra_cols() -> dict:
     finally:
         db.close()
  
- 
+
 def _alert_query_bits(cols: dict) -> dict[str, str]:
     """
     Build SQL expression fragments based on which columns exist in the alerts table.

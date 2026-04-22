@@ -27,10 +27,9 @@ API Gateway  (this project — FastAPI, port 8001)
 ## Quick Start
 
 ```bash
-# 1. Create and activate a Python virtual environment (Recommended: Python 3.12)
-python -m venv .venv
-# On Windows:
-.venv\Scripts\activate
+# 1. Create and activate a Python virtual environment (Python 3.11 recommended; 3.12 also works)
+python3.11 -m venv .venv
+source .venv/bin/activate          # (Windows: .venv\Scripts\activate)
 
 # 2. Copy and fill in env
 cp .env.example .env
@@ -38,14 +37,51 @@ cp .env.example .env
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Run the schema migration on SQL Server (once)
-#    Open migrations/fix_system1_schema.sql in SSMS and execute
+# 4. Generate the camera-credentials encryption key + internal token (REQUIRED)
+python -c "from cryptography.fernet import Fernet; print('CAMERAS_ENCRYPTION_KEY=' + Fernet.generate_key().decode())"
+python -c "import secrets; print('CAMERAS_INTERNAL_TOKEN=' + secrets.token_urlsafe(32))"
+# Paste both into .env. The gateway refuses to boot without them.
 
-# 5. Start the gateway
+# 5. Run the SQL migrations (once, in order)
+#    - migrations/fix_system1_schema.sql   (existing System-1 compatibility patches)
+#    - migrations/add_cameras_table.sql    (new cameras configurator table)
+# Open both in SSMS or run via sqlcmd / docker exec — see the macOS quickstart below.
+
+# 6. Start the gateway
 python run.py
 # → http://localhost:8001
 # → http://localhost:8001/docs  (Swagger UI)
 ```
+
+## First-time setup on macOS (no SQL Server installed)
+
+If you don't already have a SQL Server reachable, the fastest path is Azure SQL Edge in Docker (ARM-native — runs cleanly on Apple Silicon, unlike `mssql/server` which requires Rosetta and crashes under it).
+
+```bash
+# 1. Start the DB
+docker run -d --name pms-mssql \
+  -e "ACCEPT_EULA=Y" \
+  -e "MSSQL_SA_PASSWORD=YourStrong!Pass1" \
+  -p 1433:1433 \
+  -v pms-mssql-data:/var/opt/mssql \
+  mcr.microsoft.com/azure-sql-edge:latest
+
+# 2. Load schema + migrations using a sidecar tools container
+#    (avoids needing host-side mssql-tools / msodbcsql)
+TOOLS="docker run --rm --network host -v $(pwd):/sql mcr.microsoft.com/mssql-tools \
+  /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P 'YourStrong!Pass1' -C"
+$TOOLS -Q "IF DB_ID('damanat_pms') IS NULL CREATE DATABASE damanat_pms"
+$TOOLS -d damanat_pms -i /sql/damanat_pms_full_script_portable.sql
+$TOOLS -d damanat_pms -i /sql/migrations/fix_system1_schema.sql
+$TOOLS -d damanat_pms -i /sql/migrations/add_cameras_table.sql
+```
+
+### DB driver choice (pyodbc vs pymssql)
+
+`config.py` accepts two drivers:
+
+- **`DB_DRIVER=ODBC Driver 18 for SQL Server`** (default) — uses pyodbc. Requires the Microsoft ODBC driver installed on the host: `brew tap microsoft/mssql-release ; brew install msodbcsql18 mssql-tools18`. Production deploys should use this.
+- **`DB_DRIVER=pymssql`** — uses pymssql (FreeTDS-based). Useful for local dev when host msodbcsql is unavailable (e.g. macOS Command Line Tools update pending). `pip install pymssql` and `brew install freetds`. Same SQL Server, different transport — no other code changes needed.
 
 ---
 
@@ -121,6 +157,48 @@ of failing halfway through.
 |--------|----------------------|-------------------------------------|
 | GET    | `/occupancy/kpis`    | —                                   |
 | GET    | `/occupancy/zones`   | page, page_size, search, floor      |
+
+### Cameras
+| Method | Path                                | Query Params / Body                                                        |
+|--------|-------------------------------------|----------------------------------------------------------------------------|
+| GET    | `/cameras/kpis`                     | — (returns total, enabled, disabled, online, offline, by_floor, by_status) |
+| GET    | `/cameras/`                         | page, page_size, search, floor, enabled, is_online, last_status            |
+| GET    | `/cameras/{camera_id}`              | —                                                                          |
+| POST   | `/cameras/`                         | body: CameraCreate (camera_id, ip_address, username?, password?, …)        |
+| PUT    | `/cameras/{camera_id}`              | body: CameraUpdate — only provided fields update; password=None is no-op   |
+| DELETE | `/cameras/{camera_id}`              | —                                                                          |
+| POST   | `/cameras/{camera_id}/check-now`    | one-off TCP probe; returns is_online, last_status, last_check_at, last_seen_at |
+| GET    | `/cameras/export/csv`               | search, floor, enabled — **password column intentionally absent**          |
+| GET    | `/cameras/{camera_id}/credentials`  | header `X-Internal-Token` required → returns plaintext password + assembled rtsp_url |
+| GET    | `/cameras/internal/all`             | header `X-Internal-Token` required → bulk decrypted list for upstream consumers (VideoAnalytics). `?enabled=true` (default), `?include_disabled=true` for diagnostic mode. **Unpaginated by design.** |
+
+The RTSP URL is **never stored** — it's assembled on demand from `ip_address`/`rtsp_port`/`rtsp_path`/`username`/decrypted-`password`. List/show responses include `rtsp_url_masked` (password → `***`) and `is_online` (derived from `last_seen_at` + the monitor interval).
+
+#### Liveness monitor
+
+A background asyncio task TCP-probes every enabled camera every `CAMERA_MONITOR_INTERVAL_SECONDS` (default 60s) and writes `last_check_at` / `last_seen_at` / `last_status` (`online`, `timeout`, `connection_refused`, `dns_error`, `unreachable`). Toggle off with `CAMERA_MONITOR_ENABLED=false` for local dev when cameras aren't reachable.
+
+#### Migrating an upstream `.env` into the cameras table
+
+For sites where camera credentials currently live in System 2 (VideoAnalytics) `.env` files, use the one-shot ingest script:
+
+```bash
+# Dry-run (default — prints what would change, makes no DB writes)
+python scripts/migrate_cameras_from_env.py --source /path/to/upstream/.env
+
+# Actually write
+python scripts/migrate_cameras_from_env.py --source /path/to/upstream/.env --commit
+
+# Rotate passwords (re-imports CAM<N>_PASS values for existing rows)
+python scripts/migrate_cameras_from_env.py --source /path/to/upstream/.env --commit --overwrite-passwords
+
+# Custom prefix if upstream uses CAMERA<N>_ instead of CAM<N>_
+python scripts/migrate_cameras_from_env.py --source ... --prefix CAMERA --commit
+```
+
+Expected key shape (default prefix `CAM`): `CAM01_NAME`, `CAM01_FLOOR`, `CAM01_IP`, `CAM01_RTSP_PORT`, `CAM01_RTSP_PATH`, `CAM01_USER`, `CAM01_PASS`, `CAM01_ENABLED`, `CAM01_NOTES`. See `scripts/sample_upstream_cameras.env` for a complete annotated example. The script also accepts a full `CAM01_RTSP=rtsp://user:pass@host:port/path` line and decomposes it via `urllib.parse.urlsplit` for backwards compatibility with upstream configs that already store the assembled URL.
+
+After running once, point System 2 (VideoAnalytics) at `GET /cameras/internal/all` (with the shared `X-Internal-Token` header) on its own startup + on a periodic refresh, and remove the `CAM<N>_*` lines from its `.env`. Camera changes from then on happen via the gateway's CRUD endpoints.
 
 ---
 
