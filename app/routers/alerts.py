@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Optional
  
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -168,9 +168,16 @@ def _normalize_stream_event(source_system: str, payload: dict) -> dict:
  
  
 async def _pump(source_system: str, iterator, queue: asyncio.Queue):
-    async for event in iterator:
-        await queue.put((source_system, event))
-    await queue.put((source_system, None))
+    try:
+        async for event in iterator:
+            await queue.put((source_system, event))
+        await queue.put((source_system, None))
+    except asyncio.CancelledError:
+        raise
+    finally:
+        aclose = getattr(iterator, "aclose", None)
+        if aclose:
+            await aclose()
  
  
 @router.get("/stats")
@@ -267,7 +274,7 @@ ALERT_TEMPLATES = [
 
 
 @router.get("/stream")
-async def stream_alerts():
+async def stream_alerts(request: Request):
     async def event_stream():
         client_queue: asyncio.Queue = asyncio.Queue()
         bus_queue = alerts_bus.subscribe()
@@ -296,8 +303,7 @@ async def stream_alerts():
             asyncio.create_task(_bus_pump()),
             asyncio.create_task(_heartbeat()),
         ]
-        finished = 0
- 
+
         try:
             yield "data: " + json.dumps({
                 "alert_id":      None,
@@ -317,7 +323,14 @@ async def stream_alerts():
             }) + "\n\n"
  
             while True:
-                source_system, payload = await client_queue.get()
+                if await request.is_disconnected():
+                    break
+
+                try:
+                    source_system, payload = await asyncio.wait_for(client_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+
                 if payload is None:
                     continue
                 

@@ -5,20 +5,9 @@ Shared utilities used by every router:
 """
 import csv
 import io
-from typing import Any, Generic, TypeVar
-
+from typing import Any
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from pydantic.generics import GenericModel
 
-T = TypeVar("T")
-
-
-class PagedResponse(GenericModel, Generic[T]):
-    total_count: int
-    page: int
-    page_size: int
-    items: list[T]
 
 
 def build_paged(items: list[Any], total: int, page: int, page_size: int) -> dict:
