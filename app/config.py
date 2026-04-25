@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from pydantic_settings import BaseSettings
 
 
@@ -14,7 +16,7 @@ class Settings(BaseSettings):
     system2_base_url: str = "http://localhost:8000"
 
     gateway_port: int = 8001
-    allowed_origins: str = "http://localhost:3000,http://localhost:5173"
+    allowed_origins: str = "http://localhost:3000,http://localhost:5173,http://localhost:4200"
 
     cameras_encryption_key: str
     cameras_internal_token: str
@@ -23,6 +25,9 @@ class Settings(BaseSettings):
     camera_monitor_interval_seconds: int = 60
     camera_monitor_tcp_timeout_seconds: float = 3.0
     camera_monitor_concurrency: int = 20
+
+    # Facility-local clock offset from UTC, applied to "today" / "since-local-midnight" computations.
+    facility_timezone_offset_hours: float = 2.0
 
     @property
     def db_connection_string(self) -> str:
@@ -36,15 +41,19 @@ class Settings(BaseSettings):
         driver = self.db_driver.replace(" ", "+")
 
         if self.db_trusted_connection:
+            # Windows authentication. The empty `@` between the scheme and the
+            # host tells SQLAlchemy/pyodbc not to attempt SQL auth — without it
+            # the driver can fail with "Login failed for user ''" on some boxes.
+            # Capitalisation matches the ODBC documented spelling.
             return (
-                f"mssql+pyodbc://{self.db_server}:{self.db_port}/{self.db_name}"
-                f"?driver={driver}&trusted_connection=yes&TrustServerCertificate=yes"
+                f"mssql+pyodbc://@{self.db_server}:{self.db_port}/{self.db_name}"
+                f"?driver={driver}&Trusted_Connection=Yes&TrustServerCertificate=Yes"
             )
 
         return (
             f"mssql+pyodbc://{self.db_user}:{self.db_password}"
             f"@{self.db_server}:{self.db_port}/{self.db_name}"
-            f"?driver={driver}&TrustServerCertificate=yes"
+            f"?driver={driver}&TrustServerCertificate=Yes"
         )
 
     @property
@@ -57,3 +66,18 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def facility_tz() -> timezone:
+    """The local timezone for "today"-style date math. Configurable via
+    FACILITY_TIMEZONE_OFFSET_HOURS env var (default UTC+2 for the current
+    Riyadh-region deployment)."""
+    return timezone(timedelta(hours=settings.facility_timezone_offset_hours))
+
+
+def facility_today_utc() -> datetime:
+    """UTC instant of facility-local midnight today. Use this when filtering
+    SQL columns stored in UTC to "since local midnight today"."""
+    now_local = datetime.now(facility_tz())
+    midnight_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight_local.astimezone(timezone.utc)

@@ -1,40 +1,75 @@
-from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, HTTPException
-from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import get_db, scalar, rows
-from app.schemas import VehicleDetail, VehicleSession
+from app.routers._helpers import _floor_schema
+from app.routers.entry_exit import _live_duration_seconds
+from app.schemas import (
+    EntityActionResponse,
+    EntryExitEvent,
+    PagedResponse,
+    VehicleCreate,
+    VehicleDetail,
+    VehicleEvent,
+    VehicleItem,
+    VehicleKPIs,
+    VehicleListItem,
+    VehicleUpdate,
+)
 from app.shared import build_paged, stream_csv
 
 router = APIRouter(prefix="/vehicles", tags=["Vehicles"])
 
 
-class VehicleCreate(BaseModel):
-    plate_number: str
-    owner_name:   Optional[str] = None
-    employee_id:  Optional[str] = None
-    vehicle_type: Optional[str] = None
-    title:        Optional[str] = None
-    is_employee: Optional[bool] = False
-    phone:        Optional[str] = None
-    email:        Optional[str] = None
-    notes:        Optional[str] = None
-    
-
-
-class VehicleUpdate(BaseModel):
-    plate_number: Optional[str]  = None
-    owner_name:   Optional[str]  = None
-    vehicle_type: Optional[str]  = None
-    title:        Optional[str]  = None
-    notes:        Optional[str]  = None
-    is_employee:  Optional[bool] = False  # requires System 1 migration
-    phone:        Optional[str]  = None  # requires System 1 migration
-    email:        Optional[str]  = None  # requires System 1 migration
+def _fetch_vehicle_list_item(db: Session, vehicle_id: int) -> Optional[dict]:
+    """Re-fetch a vehicle by id in the same shape /vehicles/ list rows have.
+    Used by POST/PUT to return the canonical `VehicleListItem` after a write
+    instead of a raw SELECT * dict (which has a different field set)."""
+    cols = _vehicle_extra_cols(db)
+    schema = _floor_schema()
+    extra = (
+        (", v.is_employee" if cols["is_employee"] else ", NULL AS is_employee") +
+        (", v.phone"       if cols["phone"]       else ", NULL AS phone")       +
+        (", v.email"       if cols["email"]       else ", NULL AS email")
+    )
+    # WS-8.E: subquery grabs floor_id alongside floor; outer SELECT surfaces it.
+    # Pre-WS-8 DB tolerance: when ps.floor_id doesn't exist yet, emit NULL.
+    ps_floor_id_col   = "floor_id" if schema["parking_sessions_floor_id"] else "NULL AS floor_id"
+    ps_outer_floor_id = "ps.floor_id" if schema["parking_sessions_floor_id"] else "NULL"
+    result = rows(db, f"""
+        SELECT
+            v.id,
+            v.plate_number,
+            v.owner_name,
+            v.vehicle_type,
+            v.employee_id,
+            v.title,
+            CAST(v.is_registered AS BIT) AS is_registered,
+            v.registered_at,
+            v.notes
+            {extra},
+            ps.parked_at,
+            ps.status      AS parking_status,
+            ps.floor,
+            {ps_outer_floor_id} AS floor_id
+        FROM vehicles v
+        LEFT JOIN (
+            SELECT
+                plate_number,
+                parked_at,
+                status,
+                floor,
+                {ps_floor_id_col},
+                ROW_NUMBER() OVER (PARTITION BY plate_number ORDER BY entry_time DESC) AS rn
+            FROM parking_sessions
+            WHERE status = 'open'
+        ) ps ON ps.plate_number = v.plate_number AND ps.rn = 1
+        WHERE v.id = :id
+    """, {"id": vehicle_id})
+    return result[0] if result else None
 
 
 def _vehicle_extra_cols(db: Session) -> dict:
@@ -52,8 +87,71 @@ def _vehicle_extra_cols(db: Session) -> dict:
     }
 
 
+def _event_from_row(
+    r: dict,
+    plate_number: str,
+    vehicle_id: Optional[int],
+    *,
+    owner_name: Optional[str] = None,
+    vehicle_type: Optional[str] = None,
+    is_employee: Optional[bool] = None,
+) -> VehicleEvent:
+    """Build a VehicleEvent (with nested entry + optional exit EntryExitEvents)
+    from a parking_sessions row. `direction` is implicit — entry always exists,
+    exit is populated when exit_time is not null. Vehicle-level fields are
+    passed in by the caller (denormalized so /vehicles/{id} events match the
+    shape served by /entry-exit/)."""
+    entry = EntryExitEvent(
+        plate_number=plate_number,
+        vehicle_id=vehicle_id,
+        direction="entry",
+        camera_id=r.get("entry_camera_id"),
+        event_time=r.get("entry_time"),
+        snapshot_url=r.get("entry_snapshot_path"),
+        vehicle_event_id=r["id"],
+    )
+    exit_event: Optional[EntryExitEvent] = None
+    if r.get("exit_time") is not None:
+        exit_event = EntryExitEvent(
+            plate_number=plate_number,
+            vehicle_id=vehicle_id,
+            direction="exit",
+            camera_id=r.get("exit_camera_id"),
+            event_time=r.get("exit_time"),
+            snapshot_url=r.get("exit_snapshot_path"),
+            vehicle_event_id=r["id"],
+        )
+    return VehicleEvent(
+        id=r["id"],
+        vehicle_id=vehicle_id,
+        plate_number=plate_number,
+        owner_name=owner_name,
+        vehicle_type=vehicle_type,
+        is_employee=is_employee,
+        status=r.get("status"),
+        entry=entry,
+        exit=exit_event,
+        duration_seconds=_live_duration_seconds(
+            entry_time=r.get("entry_time"),
+            exit_time=r.get("exit_time"),
+            parked_at=r.get("parked_at"),
+            stored_duration=r.get("duration_seconds"),
+        ),
+        slot_id=r.get("slot_id"),
+        slot_name=r.get("slot_name"),
+        slot_number=r.get("slot_number"),
+        floor=r.get("floor"),
+        # WS-8.E: integer-id sibling field; None on legacy rows where backfill hasn't run.
+        floor_id=r.get("floor_id"),
+        parked_at=r.get("parked_at"),
+        slot_left_at=r.get("slot_left_at"),
+        slot_camera_id=r.get("slot_camera_id"),
+        slot_snapshot_url=r.get("slot_snapshot_path"),
+    )
+
+
 # ── POST /vehicles ────────────────────────────────────────────────────────────
-@router.post("/")
+@router.post("/", response_model=VehicleListItem, status_code=201)
 async def create_vehicle(body: VehicleCreate, db: Session = Depends(get_db)):
     existing = scalar(db,
         "SELECT COUNT(*) FROM vehicles WHERE plate_number = :p",
@@ -79,14 +177,18 @@ async def create_vehicle(body: VehicleCreate, db: Session = Depends(get_db)):
     })
     db.commit()
 
-    created = rows(db,
-        "SELECT * FROM vehicles WHERE plate_number = :p",
-        {"p": body.plate_number})
-    return created[0] if created else {"success": True}
+    new_id = scalar(db, "SELECT id FROM vehicles WHERE plate_number = :p", {"p": body.plate_number})
+    if new_id is None:
+        # Should never happen — INSERT just succeeded — but raise a clean error.
+        raise HTTPException(500, "Vehicle inserted but could not be re-read")
+    item = _fetch_vehicle_list_item(db, new_id)
+    if item is None:
+        raise HTTPException(500, "Vehicle inserted but could not be re-read")
+    return item
 
 
 # ── GET /vehicles/kpis ────────────────────────────────────────────────────────
-@router.get("/kpis")
+@router.get("/kpis", response_model=VehicleKPIs)
 async def vehicle_kpis(db: Session = Depends(get_db)):
     cols = _vehicle_extra_cols(db)
 
@@ -96,43 +198,112 @@ async def vehicle_kpis(db: Session = Depends(get_db)):
     employee = scalar(db, "SELECT COUNT(*) FROM vehicles WHERE is_employee = 1") \
                if cols["is_employee"] else 0
 
-    return {
-        "total_vehicles":    total    or 0,
-        "active_vehicles":   active   or 0,
-        "employee_vehicles": employee or 0,
-    }
+    return VehicleKPIs(
+        total_vehicles=total or 0,
+        active_vehicles=active or 0,
+        employee_vehicles=employee or 0,
+    )
 
 
 # ── GET /vehicles ─────────────────────────────────────────────────────────────
-@router.get("/")
+@router.get("/", response_model=PagedResponse[VehicleItem])
 async def get_vehicles(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = Query(None, description="plate or owner name"),
     is_employee: Optional[bool] = Query(None),
     vehicle_type: Optional[str] = Query(None),
-    is_registered: Optional[bool] = Query(None),
+    is_registered: Optional[bool] = Query(
+        None,
+        description=(
+            "true  → only plates that exist as a row in the `vehicles` registry\n"
+            "false → only plates seen in parking_sessions but never registered\n"
+            "null  → all plates"
+        ),
+    ),
+    is_currently_parked: Optional[bool] = Query(
+        None,
+        description=(
+            "true  → only plates with an open parking_sessions row right now\n"
+            "false → only plates NOT currently parked\n"
+            "null  → all plates (default)"
+        ),
+    ),
     db: Session = Depends(get_db),
 ):
+    """All-plates view: UNION of the `vehicles` registry and any plate that has
+    ever generated a parking_sessions row. Unregistered plates surface with
+    `id = null`, `is_registered = false`, and whatever data is available from
+    the most recent parking session. The `?is_currently_parked=true` filter
+    matches all 14-style "active now" plates regardless of registration —
+    fixing the previous mismatch where /vehicles count < active-vehicles count.
+    """
     cols    = _vehicle_extra_cols(db)
+    schema  = _floor_schema()
     clauses = ["1=1"]
     params: dict = {}
 
     if search:
-        clauses.append("(v.plate_number LIKE :search OR v.owner_name LIKE :search)")
+        clauses.append("(ap.plate_number LIKE :search OR v.owner_name LIKE :search)")
         params["search"] = f"%{search}%"
     if vehicle_type:
-        clauses.append("v.vehicle_type = :vehicle_type")
+        clauses.append("COALESCE(v.vehicle_type, ps.vehicle_type) = :vehicle_type")
         params["vehicle_type"] = vehicle_type
-    if is_registered is not None:
-        clauses.append("v.is_registered = :is_registered")
-        params["is_registered"] = 1 if is_registered else 0
+    if is_registered is True:
+        clauses.append("v.id IS NOT NULL")
+    elif is_registered is False:
+        clauses.append("v.id IS NULL")
     if is_employee is not None and cols["is_employee"]:
-        clauses.append("v.is_employee = :is_employee")
+        # Filter on the registry's flag when present; falls back to the session row.
+        clauses.append("COALESCE(v.is_employee, ps.is_employee) = :is_employee")
         params["is_employee"] = 1 if is_employee else 0
+    if is_currently_parked is True:
+        # Match plates with any open parking_sessions row (ps subquery already filters status='open');
+        # parked_at can be NULL until VA assigns a slot, so we key on plate_number to match /dashboard/kpis.active_now.
+        clauses.append("ps.plate_number IS NOT NULL")
+    elif is_currently_parked is False:
+        clauses.append("ps.parked_at IS NULL")
 
     where = " AND ".join(clauses)
-    total = scalar(db, f"SELECT COUNT(*) FROM vehicles v WHERE {where}", params)
+
+    # CTE: every plate the system has ever observed — registry ∪ parking_sessions.
+    all_plates_cte = """
+        WITH all_plates AS (
+            SELECT plate_number FROM dbo.vehicles
+            UNION
+            SELECT DISTINCT plate_number FROM dbo.parking_sessions WHERE plate_number IS NOT NULL
+        )
+    """
+
+    # WS-8.E: floor_id added to the subquery so the outer SELECT can surface it.
+    # Pre-WS-8 DB tolerance: when ps.floor_id doesn't exist yet, emit NULL.
+    ps_floor_id_col   = "floor_id" if schema["parking_sessions_floor_id"] else "NULL AS floor_id"
+    ps_outer_floor_id = "ps.floor_id" if schema["parking_sessions_floor_id"] else "NULL"
+
+    # Shared FROM/JOIN — used by both COUNT and SELECT so they stay consistent.
+    base_from = f"""
+        FROM all_plates ap
+        LEFT JOIN dbo.vehicles v ON v.plate_number = ap.plate_number
+        LEFT JOIN (
+            SELECT
+                plate_number,
+                parked_at,
+                status,
+                floor,
+                {ps_floor_id_col},
+                vehicle_type,
+                is_employee,
+                ROW_NUMBER() OVER (PARTITION BY plate_number ORDER BY entry_time DESC) AS rn
+            FROM dbo.parking_sessions
+            WHERE status = 'open'
+        ) ps ON ps.plate_number = ap.plate_number AND ps.rn = 1
+    """
+
+    total = scalar(
+        db,
+        f"{all_plates_cte} SELECT COUNT(*) {base_from} WHERE {where}",
+        params,
+    )
 
     params["offset"]    = (page - 1) * page_size
     params["page_size"] = page_size
@@ -144,35 +315,30 @@ async def get_vehicles(
     )
 
     items = rows(db, f"""
+        {all_plates_cte}
         SELECT
             v.id,
-            v.plate_number,
+            ap.plate_number,
             v.owner_name,
-            v.vehicle_type,
+            COALESCE(v.vehicle_type, ps.vehicle_type) AS vehicle_type,
             v.employee_id,
             v.title,
-            v.is_registered,
+            -- Reflect whether the plate has a registry row, not just the v.is_registered flag
+            CASE WHEN v.id IS NOT NULL THEN 1 ELSE 0 END AS is_registered,
             v.registered_at,
             v.notes
             {extra},
             ps.parked_at,
             ps.status      AS parking_status,
             ps.floor,
-            ps.zone_name   AS zone
-        FROM vehicles v
-        LEFT JOIN (
-            SELECT
-                plate_number,
-                parked_at,
-                status,
-                floor,
-                zone_name,
-                ROW_NUMBER() OVER (PARTITION BY plate_number ORDER BY entry_time DESC) AS rn
-            FROM parking_sessions
-            WHERE status = 'open'
-        ) ps ON ps.plate_number = v.plate_number AND ps.rn = 1
+            {ps_outer_floor_id} AS floor_id
+        {base_from}
         WHERE {where}
-        ORDER BY v.registered_at DESC
+        ORDER BY
+            CASE WHEN ps.parked_at IS NOT NULL THEN 0 ELSE 1 END,
+            ps.parked_at DESC,
+            v.registered_at DESC,
+            ap.plate_number
         OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
     """, params)
 
@@ -180,7 +346,7 @@ async def get_vehicles(
 
 
 # ── PUT /vehicles/{vehicle_id} ────────────────────────────────────────────────
-@router.put("/{vehicle_id}")
+@router.put("/{vehicle_id}", response_model=VehicleListItem)
 async def update_vehicle(
     vehicle_id: int,
     body: VehicleUpdate,
@@ -221,12 +387,14 @@ async def update_vehicle(
     if result.rowcount == 0:
         raise HTTPException(404, "Vehicle not found")
 
-    updated = rows(db, "SELECT * FROM vehicles WHERE id = :id", {"id": vehicle_id})
-    return updated[0] if updated else {"success": True}
+    item = _fetch_vehicle_list_item(db, vehicle_id)
+    if item is None:
+        raise HTTPException(500, "Vehicle updated but could not be re-read")
+    return item
 
 
 # ── DELETE /vehicles/{vehicle_id} ──────────────────────────────────────────────
-@router.delete("/{vehicle_id}")
+@router.delete("/{vehicle_id}", response_model=EntityActionResponse)
 async def delete_vehicle(
     vehicle_id: int,
     db: Session = Depends(get_db),
@@ -238,7 +406,7 @@ async def delete_vehicle(
     db.commit()
     if result.rowcount == 0:
         raise HTTPException(404, "Vehicle not found")
-    return {"success": True}
+    return EntityActionResponse(id=vehicle_id)
 
 
 # ── GET /vehicles/export/csv ──────────────────────────────────────────────────
@@ -247,77 +415,80 @@ async def export_vehicles_csv(
     search: Optional[str] = Query(None),
     vehicle_type: Optional[str] = Query(None),
     is_registered: Optional[bool] = Query(None),
+    is_employee: Optional[bool] = Query(None),
+    is_currently_parked: Optional[bool] = Query(None),
     db: Session = Depends(get_db),
 ):
+    """CSV export of vehicles. Filter set matches `GET /vehicles/` so the CSV
+    download mirrors what's on screen."""
+    cols = _vehicle_extra_cols(db)
     clauses = ["1=1"]
     params: dict = {}
     if search:
-        clauses.append("(plate_number LIKE :search OR owner_name LIKE :search)")
+        clauses.append("(v.plate_number LIKE :search OR v.owner_name LIKE :search)")
         params["search"] = f"%{search}%"
     if vehicle_type:
-        clauses.append("vehicle_type = :vehicle_type")
+        clauses.append("v.vehicle_type = :vehicle_type")
         params["vehicle_type"] = vehicle_type
     if is_registered is not None:
-        clauses.append("is_registered = :is_registered")
+        clauses.append("v.is_registered = :is_registered")
         params["is_registered"] = 1 if is_registered else 0
+    if is_employee is not None and cols["is_employee"]:
+        clauses.append("v.is_employee = :is_employee")
+        params["is_employee"] = 1 if is_employee else 0
+    if is_currently_parked is True:
+        clauses.append("ps.parked_at IS NOT NULL")
+    elif is_currently_parked is False:
+        clauses.append("ps.parked_at IS NULL")
+
+    is_emp_col = "v.is_employee" if cols["is_employee"] else "NULL"
 
     data = rows(db, f"""
         SELECT
-            plate_number  AS [Plate Number],
-            owner_name    AS [Owner Name],
-            vehicle_type  AS [Vehicle Type],
-            employee_id   AS [Employee ID],
-            title         AS [Title],
-            is_registered AS [Registered],
-            registered_at AS [Registered At],
-            notes         AS [Notes]
-        FROM vehicles
+            v.plate_number  AS [Plate Number],
+            v.owner_name    AS [Owner Name],
+            v.vehicle_type  AS [Vehicle Type],
+            v.employee_id   AS [Employee ID],
+            v.title         AS [Title],
+            v.is_registered AS [Registered],
+            {is_emp_col}    AS [Is Employee],
+            v.registered_at AS [Registered At],
+            CASE WHEN ps.parked_at IS NOT NULL THEN 1 ELSE 0 END AS [Currently Parked],
+            ps.parked_at    AS [Parked At],
+            ps.floor        AS [Floor],
+            v.notes         AS [Notes]
+        FROM vehicles v
+        LEFT JOIN (
+            SELECT
+                plate_number,
+                parked_at,
+                floor,
+                ROW_NUMBER() OVER (PARTITION BY plate_number ORDER BY entry_time DESC) AS rn
+            FROM parking_sessions
+            WHERE status = 'open'
+        ) ps ON ps.plate_number = v.plate_number AND ps.rn = 1
         WHERE {" AND ".join(clauses)}
-        ORDER BY registered_at DESC
+        ORDER BY v.registered_at DESC
     """, params)
 
     headers = ["Plate Number", "Owner Name", "Vehicle Type", "Employee ID",
-               "Title", "Registered", "Registered At", "Notes"]
+               "Title", "Registered", "Is Employee", "Registered At",
+               "Currently Parked", "Parked At", "Floor", "Notes"]
     return stream_csv(data, headers, filename="vehicles.csv")
 
 
 # ── GET /vehicles/{vehicle_id} ────────────────────────────────────────────────
 # Declared LAST so FastAPI matches the specific routes (/kpis, /export/csv) first.
-def _session_row_to_dict(r: dict) -> dict:
-    duration_seconds = r.get("duration_seconds")
-    return {
-        "id": r["id"],
-        "status": r.get("status"),
-        "entry_time": r.get("entry_time"),
-        "exit_time": r.get("exit_time"),
-        "duration_seconds": duration_seconds,
-        "duration_minutes": (duration_seconds // 60) if duration_seconds is not None else None,
-        "floor": r.get("floor"),
-        "slot_id": r.get("slot_id"),
-        "slot_name": r.get("slot_name"),
-        "zone_id": r.get("zone_id"),
-        "zone_name": r.get("zone_name"),
-        "slot_number": r.get("slot_number"),
-        "parked_at": r.get("parked_at"),
-        "slot_left_at": r.get("slot_left_at"),
-        "entry_camera_id": r.get("entry_camera_id"),
-        "exit_camera_id": r.get("exit_camera_id"),
-        "entry_snapshot_path": r.get("entry_snapshot_path"),
-        "exit_snapshot_path": r.get("exit_snapshot_path"),
-        "slot_snapshot_path": r.get("slot_snapshot_path"),
-    }
-
-
 @router.get("/{vehicle_id}", response_model=VehicleDetail)
 async def get_vehicle(
     vehicle_id: int,
-    limit: int = Query(100, ge=1, le=500, description="max sessions to return (most recent first)"),
-    date_from: Optional[date] = Query(None, description="filter sessions with entry_time >= this date"),
-    date_to: Optional[date] = Query(None, description="filter sessions with entry_time <= this date"),
     db: Session = Depends(get_db),
 ):
-    """Return a vehicle by id, with its parking-session history (entries + exits)."""
+    """Return a vehicle by id with its full parking-event history (entries + exits).
+    For filtered/paginated event queries, use GET /entry-exit/by-vehicle/{vehicle_id}.
+    """
     cols = _vehicle_extra_cols(db)
+    schema = _floor_schema()
 
     extra_cols = (
         (", v.is_employee" if cols["is_employee"] else ", NULL AS is_employee") +
@@ -347,55 +518,57 @@ async def get_vehicle(
     v = vehicle_rows[0]
     plate = v["plate_number"]
 
-    session_clauses = ["ps.plate_number = :plate"]
-    session_params: dict = {"plate": plate}
-    if date_from:
-        session_clauses.append("CAST(ps.entry_time AS DATE) >= :date_from")
-        session_params["date_from"] = str(date_from)
-    if date_to:
-        session_clauses.append("CAST(ps.entry_time AS DATE) <= :date_to")
-        session_params["date_to"] = str(date_to)
-    session_where = " AND ".join(session_clauses)
-
-    sessions_total = scalar(
+    events_total = scalar(
         db,
-        f"SELECT COUNT(*) FROM parking_sessions ps WHERE {session_where}",
-        session_params,
+        "SELECT COUNT(*) FROM parking_sessions ps WHERE ps.plate_number = :plate",
+        {"plate": plate},
     ) or 0
 
-    session_params["limit"] = limit
-    session_rows = rows(db, f"""
-        SELECT
+    # Bounded fetch — TOP 500 to avoid runaway responses on a high-volume plate.
+    # If the caller needs more, paginate via /entry-exit/by-vehicle/{id}.
+    # WS-8.E: ps.floor_id added so VehicleEvent.floor_id populates on the detail.
+    # Pre-WS-8 DB tolerance: when ps.floor_id doesn't exist yet, emit NULL.
+    ps_event_floor_id = "ps.floor_id" if schema["parking_sessions_floor_id"] else "NULL AS floor_id"
+    event_rows = rows(db, f"""
+        SELECT TOP 500
             ps.id,
             ps.status,
             ps.entry_time,
             ps.exit_time,
             ps.duration_seconds,
             ps.floor,
-            ps.zone_id AS slot_id,
-            COALESCE(pk.slot_name, ps.slot_number, ps.zone_id) AS slot_name,
-            ps.zone_id,
-            ps.zone_name,
+            {ps_event_floor_id},
+            ps.slot_id,
+            COALESCE(pk.slot_name, ps.slot_number) AS slot_name,
             ps.slot_number,
             ps.parked_at,
             ps.slot_left_at,
             ps.entry_camera_id,
             ps.exit_camera_id,
+            ps.slot_camera_id,
             ps.entry_snapshot_path,
             ps.exit_snapshot_path,
             ps.slot_snapshot_path
         FROM parking_sessions ps
-        LEFT JOIN parking_slots pk ON pk.slot_id = ps.zone_id
-        WHERE {session_where}
+        LEFT JOIN parking_slots pk ON pk.slot_id = ps.slot_id
+        WHERE ps.plate_number = :plate
         ORDER BY ps.entry_time DESC
-        OFFSET 0 ROWS FETCH NEXT :limit ROWS ONLY
-    """, session_params)
+    """, {"plate": plate})
 
-    sessions = [_session_row_to_dict(r) for r in session_rows]
-    current_session = next(
-        (VehicleSession(**s) for s in sessions if s["status"] == "open"),
-        None,
-    )
+    vehicle_pk = v["id"]
+    v_owner = v.get("owner_name")
+    v_type = v.get("vehicle_type")
+    v_is_emp = bool(v["is_employee"]) if v.get("is_employee") is not None else None
+    events = [
+        _event_from_row(
+            r, plate, vehicle_pk,
+            owner_name=v_owner,
+            vehicle_type=v_type,
+            is_employee=v_is_emp,
+        )
+        for r in event_rows
+    ]
+    current_event = next((e for e in events if e.status == "open"), None)
 
     return VehicleDetail(
         id=v["id"],
@@ -410,8 +583,8 @@ async def get_vehicle(
         is_employee=bool(v["is_employee"]) if v.get("is_employee") is not None else None,
         phone=v.get("phone"),
         email=v.get("email"),
-        is_currently_parked=current_session is not None,
-        current_session=current_session,
-        sessions_total=sessions_total,
-        sessions=[VehicleSession(**s) for s in sessions],
+        is_currently_parked=current_event is not None,
+        current_event=current_event,
+        events_total=events_total,
+        events=events,
     )

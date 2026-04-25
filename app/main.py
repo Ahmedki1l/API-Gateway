@@ -27,9 +27,14 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.origins_list,
+    # Permissive localhost regex so any dev port (3000, 4200, 5173, 8080, …)
+    # is accepted without having to maintain the explicit list. In production
+    # only ALLOWED_ORIGINS matters — set it to your real frontend domain(s).
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 app.include_router(dashboard.router)

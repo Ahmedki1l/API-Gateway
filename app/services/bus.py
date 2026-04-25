@@ -54,7 +54,7 @@ class Broadcaster:
             # Initial data fetch
             db = SessionLocal()
             try:
-                slots = rows(db, "SELECT slot_id, slot_name, zone_id, zone_name, floor FROM parking_slots")
+                slots = rows(db, "SELECT slot_id, slot_name, floor FROM parking_slots")
                 plates = rows(db, "SELECT plate_number FROM vehicles")
             except Exception as e:
                 print(f"Bus: Failed to fetch test data: {e}")
