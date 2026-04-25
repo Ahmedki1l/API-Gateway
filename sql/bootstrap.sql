@@ -762,6 +762,103 @@ IF COL_LENGTH(N'dbo.cameras', N'floor_id') IS NOT NULL
         WHERE t.floor_id IS NULL;';
 GO
 
+
+/* ============================================================================
+   -- Normalize floor-name aliases (idempotent; safe to re-run)
+   ============================================================================
+   The cameras seed introduced `floor='Ground'`, but pre-existing data on
+   `parking_slots` (and other tables) used `floor='Ground Floor'`. They
+   refer to the same physical floor — so without normalization the gateway
+   ends up with 4 logical floors instead of 3, and the dashboard splits
+   "Ground" cameras and "Ground Floor" slots into separate buckets.
+
+   This block:
+     1. re-points every `floor_id` row from "Ground Floor" → "Ground" so no
+        FK orphans are left;
+     2. rewrites the legacy `floor` string column on every source table;
+     3. deletes the now-empty "Ground Floor" row from the `floors` lookup.
+
+   To add new aliases later, append more rows to the @aliases table.
+   ============================================================================ */
+DECLARE @aliases TABLE (alias NVARCHAR(50), canonical NVARCHAR(50));
+INSERT INTO @aliases (alias, canonical) VALUES
+    ('Ground Floor', 'Ground');
+    -- additional aliases here, e.g. ('GF', 'Ground'), ('Basement 1', 'B1')
+
+DECLARE @alias NVARCHAR(50), @canonical NVARCHAR(50), @from_id INT, @to_id INT;
+DECLARE alias_cur CURSOR LOCAL FAST_FORWARD FOR SELECT alias, canonical FROM @aliases;
+OPEN alias_cur;
+FETCH NEXT FROM alias_cur INTO @alias, @canonical;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    SELECT @from_id = id FROM dbo.floors WHERE name = @alias;
+    SELECT @to_id   = id FROM dbo.floors WHERE name = @canonical;
+
+    IF @from_id IS NOT NULL AND @to_id IS NOT NULL AND @from_id <> @to_id
+    BEGIN
+        -- 1. Re-point integer FK columns. Dynamic-SQL so missing columns no-op.
+        IF COL_LENGTH(N'dbo.parking_slots', N'floor_id') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.parking_slots   SET floor_id = @t WHERE floor_id = @f',
+                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
+        IF COL_LENGTH(N'dbo.parking_sessions', N'floor_id') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.parking_sessions SET floor_id = @t WHERE floor_id = @f',
+                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
+        IF COL_LENGTH(N'dbo.cameras', N'floor_id') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.cameras SET floor_id = @t WHERE floor_id = @f',
+                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
+        IF COL_LENGTH(N'dbo.cameras', N'watches_floor_id') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.cameras SET watches_floor_id = @t WHERE watches_floor_id = @f',
+                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
+        IF COL_LENGTH(N'dbo.alerts', N'floor_id') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.alerts SET floor_id = @t WHERE floor_id = @f',
+                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
+        IF OBJECT_ID(N'dbo.floor_occupancy', N'U') IS NOT NULL
+           AND COL_LENGTH(N'dbo.floor_occupancy', N'floor_id') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.floor_occupancy SET floor_id = @t WHERE floor_id = @f',
+                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
+
+        -- 2. Rewrite legacy string columns.
+        IF COL_LENGTH(N'dbo.parking_slots', N'floor') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.parking_slots   SET floor = @t WHERE floor = @f',
+                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
+        IF COL_LENGTH(N'dbo.parking_sessions', N'floor') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.parking_sessions SET floor = @t WHERE floor = @f',
+                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
+        IF COL_LENGTH(N'dbo.cameras', N'floor') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.cameras SET floor = @t WHERE floor = @f',
+                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
+        IF COL_LENGTH(N'dbo.cameras', N'watches_floor') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.cameras SET watches_floor = @t WHERE watches_floor = @f',
+                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
+        IF COL_LENGTH(N'dbo.alerts', N'floor') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.alerts SET floor = @t WHERE floor = @f',
+                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
+        IF OBJECT_ID(N'dbo.floor_occupancy', N'U') IS NOT NULL
+           AND COL_LENGTH(N'dbo.floor_occupancy', N'floor') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.floor_occupancy SET floor = @t WHERE floor = @f',
+                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
+
+        -- 3. Delete the orphaned alias row.
+        DELETE FROM dbo.floors WHERE id = @from_id;
+        PRINT '  Normalized floor alias: ' + @alias + ' -> ' + @canonical;
+    END
+
+    FETCH NEXT FROM alias_cur INTO @alias, @canonical;
+END
+CLOSE alias_cur;
+DEALLOCATE alias_cur;
+GO
+
+/* Re-apply sort_order pass after the deletion so canonical floors are
+   numbered 0..n-1 contiguously. */
+;WITH ordered AS (
+    SELECT id, DENSE_RANK() OVER (ORDER BY name) - 1 AS new_order FROM dbo.floors
+)
+UPDATE f SET sort_order = o.new_order
+FROM dbo.floors f INNER JOIN ordered o ON o.id = f.id
+WHERE f.sort_order != o.new_order;
+GO
+
 PRINT '──────────────────────────────────────────────';
 PRINT '  bootstrap.sql finished';
 PRINT '──────────────────────────────────────────────';
