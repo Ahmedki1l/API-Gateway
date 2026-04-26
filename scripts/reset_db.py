@@ -1,11 +1,14 @@
 """
-Full database reset: bootstrap schema + seed base data + simulate demo.
+Full database reset — single command for a fresh project.
 
-Runs all 3 steps in one shot for a fresh project setup.
+  1. DROP all user tables (FK-safe order)
+  2. Bootstrap schema  (sql/bootstrap.sql)
+  3. Seed base data    (sql/seed.sql — floors, slots, cameras, vehicles)
+  4. Simulate demo     (scratch/simulate_demo.py — sessions, alerts, history)
 
 Usage:
-    .venv/bin/python scripts/reset_db.py              # full reset
-    .venv/bin/python scripts/reset_db.py --skip-sim    # schema + seed only (no simulation)
+    .venv/bin/python scripts/reset_db.py              # full reset + demo data
+    .venv/bin/python scripts/reset_db.py --skip-sim   # reset + seed only (no simulation)
 """
 from __future__ import annotations
 
@@ -22,7 +25,61 @@ SEED_SQL = ROOT / "sql" / "seed.sql"
 SIMULATE_PY = ROOT / "scratch" / "simulate_demo.py"
 
 
-def run_sql_file(path: Path, label: str) -> int:
+# ── Step 1: Drop all tables ─────────────────────────────────────────────
+def drop_all_tables() -> int:
+    """Drop every user table in FK-safe order."""
+    from app.database import engine
+    from sqlalchemy import text
+
+    print(f"\n{'='*60}")
+    print(f"  Step 1: Drop all tables")
+    print(f"{'='*60}")
+
+    with engine.connect() as conn:
+        # Get all user tables
+        result = conn.execute(text(
+            "SELECT name FROM sys.tables WHERE type = 'U' ORDER BY name"
+        ))
+        tables = [r[0] for r in result]
+
+        if not tables:
+            print("  No tables found — fresh database")
+            return 0
+
+        print(f"  Found {len(tables)} tables: {', '.join(tables)}")
+
+        # Drop all FK constraints first so table order doesn't matter
+        print("  Dropping foreign key constraints...")
+        fk_result = conn.execute(text("""
+            SELECT fk.name AS fk_name, t.name AS table_name
+            FROM sys.foreign_keys fk
+            JOIN sys.tables t ON fk.parent_object_id = t.object_id
+        """))
+        fks = [(r[0], r[1]) for r in fk_result]
+        for fk_name, table_name in fks:
+            try:
+                conn.execute(text(f"ALTER TABLE dbo.[{table_name}] DROP CONSTRAINT [{fk_name}]"))
+            except Exception:
+                pass  # already dropped
+        conn.commit()
+        print(f"    Dropped {len(fks)} constraints")
+
+        # Now drop all tables
+        print("  Dropping tables...")
+        for table in tables:
+            try:
+                conn.execute(text(f"DROP TABLE dbo.[{table}]"))
+                print(f"    Dropped {table}")
+            except Exception as e:
+                print(f"    FAIL {table}: {str(e).splitlines()[0][:80]}")
+        conn.commit()
+
+    print(f"\n  ✅ All tables dropped")
+    return 0
+
+
+# ── Step 2 & 3: Run SQL files ───────────────────────────────────────────
+def run_sql_file(path: Path, label: str, step: int) -> int:
     """Execute a T-SQL file split on GO batch separators."""
     from app.database import engine
     from sqlalchemy import text
@@ -34,7 +91,7 @@ def run_sql_file(path: Path, label: str) -> int:
     src = path.read_text()
     batches = [b.strip() for b in re.split(r"(?im)^\s*GO\s*$", src) if b.strip()]
     print(f"\n{'='*60}")
-    print(f"  Step: {label} ({len(batches)} batches)")
+    print(f"  Step {step}: {label} ({len(batches)} batches)")
     print(f"{'='*60}")
 
     failures = 0
@@ -59,10 +116,11 @@ def run_sql_file(path: Path, label: str) -> int:
     return failures
 
 
-def run_simulation():
+# ── Step 4: Simulate demo data ──────────────────────────────────────────
+def run_simulation() -> int:
     """Run the demo simulation script."""
     print(f"\n{'='*60}")
-    print(f"  Step: Simulate demo data")
+    print(f"  Step 4: Simulate demo data")
     print(f"{'='*60}")
 
     if not SIMULATE_PY.exists():
@@ -82,44 +140,49 @@ def run_simulation():
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Reset the parking database")
-    parser.add_argument("--skip-sim", action="store_true", help="Skip demo simulation")
+    parser = argparse.ArgumentParser(description="Full database reset for the parking system")
+    parser.add_argument("--skip-sim", action="store_true",
+                        help="Skip demo simulation (schema + seed only)")
     args = parser.parse_args()
 
     print("╔══════════════════════════════════════════════════════════╗")
-    print("║         Parking System — Database Reset                 ║")
+    print("║     Parking System — Full Database Reset                ║")
+    print("╠══════════════════════════════════════════════════════════╣")
+    print("║  1. Drop all tables                                    ║")
+    print("║  2. Bootstrap schema       (sql/bootstrap.sql)         ║")
+    print("║  3. Seed base data         (sql/seed.sql)              ║")
+    if not args.skip_sim:
+        print("║  4. Simulate demo data    (scratch/simulate_demo.py)  ║")
     print("╚══════════════════════════════════════════════════════════╝")
 
-    # Step 1: Bootstrap schema
-    f1 = run_sql_file(BOOTSTRAP_SQL, "Bootstrap schema (DDL)")
-    if f1:
+    # Step 1: Drop everything
+    drop_all_tables()
+
+    # Step 2: Bootstrap schema
+    f2 = run_sql_file(BOOTSTRAP_SQL, "Bootstrap schema (DDL)", step=2)
+    if f2:
         print("\n⛔ Schema bootstrap had failures — stopping.")
         return 1
 
-    # Step 2: Seed base data
-    f2 = run_sql_file(SEED_SQL, "Seed base data (floors, slots, cameras, vehicles)")
+    # Step 3: Seed base data
+    f3 = run_sql_file(SEED_SQL, "Seed base data (floors, slots, cameras, vehicles)", step=3)
 
-    # Step 3: Simulate demo data
+    # Step 4: Simulate demo data
     if not args.skip_sim:
-        f3 = run_simulation()
+        f4 = run_simulation()
     else:
-        f3 = 0
+        f4 = 0
         print("\n  ⏭️  Simulation skipped (--skip-sim)")
 
     # Summary
+    total_failures = f2 + f3 + f4
     print(f"\n{'='*60}")
-    print(f"  DONE")
-    print(f"{'='*60}")
-    steps = ["bootstrap.sql", "seed.sql"]
-    if not args.skip_sim:
-        steps.append("simulate_demo.py")
-    print(f"  Ran: {' → '.join(steps)}")
-    total_failures = f1 + f2 + f3
     if total_failures:
-        print(f"  ⚠️  {total_failures} total failures")
+        print(f"  ⚠️  Done with {total_failures} failures")
     else:
-        print(f"  ✅ All steps succeeded — database is ready")
-    print(f"\n  Restart the gateway: python run.py")
+        print(f"  ✅ Database is ready — all steps succeeded")
+    print(f"{'='*60}")
+    print(f"\n  Next: python run.py")
     return 0 if total_failures == 0 else 1
 
 
