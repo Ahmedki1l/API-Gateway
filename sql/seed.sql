@@ -121,33 +121,31 @@ GO
    with your key. See app/services/crypto.py.
    ──────────────────────────────────────────────────────────────────────────── */
 IF OBJECT_ID(N'dbo.cameras', 'U') IS NOT NULL
-   AND COL_LENGTH(N'dbo.cameras', N'zone_id') IS NOT NULL
 BEGIN
     MERGE INTO dbo.cameras AS Target
     USING (VALUES
-        ('Cam_01',     'GF-FRONT',   'Ground', 'string',     '10.1.13.60',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e6A6j_Qpr6-uimln8jM5osSSPctIy-0dob6PjUGWLAHTd6XIkWiSaUaKfmXNT_u4iy2W8Pr4VA45Kk4favDsOClHw==', 1, 'string'),
-        ('Cam_02',     'GF-FRONT',   'Ground', 'string',     '10.1.13.61',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e7RABH1t0SZa7kgGjwLfoObuiSkpJpxRsYQ3VGD3xxB1DeeRZ0Dka2xXztPXi2S-afIEjlVT_xBG7sf5kmL3ZI1bA==', 1, 'string'),
-        ('Cam_03',     'B1-PARKING', 'B1',     'string',     '10.1.13.62',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e-D18fZxcTrYrdfe7P8FiJVi-02hz7N9LMKSeWZpkYzNh14YFRljelTq-JBWYjuDT5n-TYAhw6bUQYY5XuK2yWdtw==', 1, 'string'),
-        ('Cam_04',     'B1-PARKING', 'B1',     'string',     '10.1.13.63',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e-gp-OCNTt8AU8c3vIVIIZwbTHSSfTPoCqal9nNQCeSaoFjTc7eBGDJSBWfmGfJ5atZEkpBoVZ_T8NO790HCZpUaA==', 1, 'string'),
-        ('Cam_05',     'B1-PARKING', 'B1',     'string',     '10.1.13.64',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e_uYUN6Qr46oV3elkRDLFd09qFaKwrgzv9I8PpWX9inFP2-RlFtmmJxVTHiqq9x6UdGJaFuTumPwyha9K60rjMdkA==', 1, 'string'),
-        ('Cam_06',     'B1-PARKING', 'B1',     'string',     '10.1.13.65',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e_2bsqW8uCeal2wXSkAxbZyrKYUFkFxUiK7SaRKSnx4AAyppzvzwFTd5BRjhFt82a_laGZ1SVLPh2Et0IxifnL6ow==', 1, 'string'),
-        ('Cam_07',     'B1-PARKING', 'B1',     'string',     '10.1.13.66',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e_9LgEh_4GCmDwEd_FHVAEMnWT0GFgMy3M-nhC4GKOOuHVN-CfAdyTHJPCtJAM1RViV-IwSObVKLzs-3GZowfFmIA==', 1, 'string'),
-        ('Cam_08',     'B1-PARKING', 'B1',     'string',     '10.1.13.67',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fAY2-AEnVw7taPduRk__zPqqrTWEf1qWzkgxsmu17x6RDZMEkrmoO7mdInTY00dUywiJkMjlwWo1v_nNJrue-Ndhw==', 1, 'string'),
-        ('Cam_09',     'B2-PARKING', 'B2',     'string',     '10.1.13.68',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fCPk_5bVzvA6f54c6asDneRNfFKlGRkxHYioYMBbq9J85mfiLvWgDCf01FjPe2oGsMhDYLd7U_apRZhboHxOqH1eg==', 1, 'string'),
-        ('Cam_10',     'B2-PARKING', 'B2',     'string',     '10.1.13.69',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fDQw9C51CFlYc-Ls3lINRvWyUvrhtKkN9uCsczDkcc0E_hKhENbL18hCgCwlqQEM83m5eInc8q4Y6w9gWTOalKwzA==', 1, 'string'),
-        ('Cam_11',     'B2-PARKING', 'B2',     'string',     '10.1.13.70',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fDYHfJQsQY3UdFxVeZCQ184_jcVlJvSE1f3w41my8Rnqeckrop5dRSWpD8HkDWTUc5JiaFYpQwJvF7QXrYOQlsL0g==', 1, 'string'),
-        ('Cam_12',     'B2-PARKING', 'B2',     'string',     '10.1.13.71',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fDw1Qdj1Rs4SREgTw6QMXnLgNoub-jthp1_DdFbVoSM4LISfMhwi4_YfKA2llgsrszPFcOVup_e7DAIfkc-00VuhA==', 1, 'string'),
-        ('Cam_13',     'B2-PARKING', 'B2',     'string',     '10.1.13.72',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fEA1_0Ts-N94Y_OItQemw_In7YtqAfC5sDtSKEUuB3OuySeimbMDhGznZGYHBsQ0rqCg7T4gZy2MwIE93kTHp8oVQ==', 1, 'string'),
-        ('Cam_14',     'B2-PARKING', 'B2',     'string',     '10.1.13.73',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fEI7ltsTbu8siRozaH_9zi1MVOrwBO8rumjDSVSJN_5SZlFNK3ChoaSB0VjtHH52ukLdm8hMgd535ap0fSDQho7Gg==', 1, 'string'),
-        ('ANPR-Entry', 'ENTRY-GATE', 'Ground', 'string',     '10.1.13.100', 554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fG_8xKy6gcai-WzQ6_kf80AvCqmnwOJ2oDFJ7Aq_kAIXcs_gaTYHWoECpzWfmoEuNM2fpn3pyDzSF5w5E7lcTHXRw==', 1, 'string'),
-        ('ANPR-Exit',  'EXIT-GATE',  'Ground', 'string',     '10.1.13.101', 554, '/Streaming/Channels/101', 'kloudspot1', 'gAAAAABp6fIGrXXkRo3nz-Yhm1IexonNM734GyEgDtrvDAY8p52FyETJt3BEwUWrfxd9ivggeG7J3-_lKInyVg95uvnLQCerFg==', 1, 'string')
-    ) AS Source (camera_id, name, floor, zone_id, ip_address, rtsp_port, rtsp_path, username, password_encrypted, enabled, notes)
+        ('Cam_01',     'GF-FRONT',   'Ground', '10.1.13.60',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e6A6j_Qpr6-uimln8jM5osSSPctIy-0dob6PjUGWLAHTd6XIkWiSaUaKfmXNT_u4iy2W8Pr4VA45Kk4favDsOClHw==', 1, 'string'),
+        ('Cam_02',     'GF-FRONT',   'Ground', '10.1.13.61',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e7RABH1t0SZa7kgGjwLfoObuiSkpJpxRsYQ3VGD3xxB1DeeRZ0Dka2xXztPXi2S-afIEjlVT_xBG7sf5kmL3ZI1bA==', 1, 'string'),
+        ('Cam_03',     'B1-PARKING', 'B1',     '10.1.13.62',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e-D18fZxcTrYrdfe7P8FiJVi-02hz7N9LMKSeWZpkYzNh14YFRljelTq-JBWYjuDT5n-TYAhw6bUQYY5XuK2yWdtw==', 1, 'string'),
+        ('Cam_04',     'B1-PARKING', 'B1',     '10.1.13.63',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e-gp-OCNTt8AU8c3vIVIIZwbTHSSfTPoCqal9nNQCeSaoFjTc7eBGDJSBWfmGfJ5atZEkpBoVZ_T8NO790HCZpUaA==', 1, 'string'),
+        ('Cam_05',     'B1-PARKING', 'B1',     '10.1.13.64',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e_uYUN6Qr46oV3elkRDLFd09qFaKwrgzv9I8PpWX9inFP2-RlFtmmJxVTHiqq9x6UdGJaFuTumPwyha9K60rjMdkA==', 1, 'string'),
+        ('Cam_06',     'B1-PARKING', 'B1',     '10.1.13.65',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e_2bsqW8uCeal2wXSkAxbZyrKYUFkFxUiK7SaRKSnx4AAyppzvzwFTd5BRjhFt82a_laGZ1SVLPh2Et0IxifnL6ow==', 1, 'string'),
+        ('Cam_07',     'B1-PARKING', 'B1',     '10.1.13.66',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e_9LgEh_4GCmDwEd_FHVAEMnWT0GFgMy3M-nhC4GKOOuHVN-CfAdyTHJPCtJAM1RViV-IwSObVKLzs-3GZowfFmIA==', 1, 'string'),
+        ('Cam_08',     'B1-PARKING', 'B1',     '10.1.13.67',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fAY2-AEnVw7taPduRk__zPqqrTWEf1qWzkgxsmu17x6RDZMEkrmoO7mdInTY00dUywiJkMjlwWo1v_nNJrue-Ndhw==', 1, 'string'),
+        ('Cam_09',     'B2-PARKING', 'B2',     '10.1.13.68',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fCPk_5bVzvA6f54c6asDneRNfFKlGRkxHYioYMBbq9J85mfiLvWgDCf01FjPe2oGsMhDYLd7U_apRZhboHxOqH1eg==', 1, 'string'),
+        ('Cam_10',     'B2-PARKING', 'B2',     '10.1.13.69',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fDQw9C51CFlYc-Ls3lINRvWyUvrhtKkN9uCsczDkcc0E_hKhENbL18hCgCwlqQEM83m5eInc8q4Y6w9gWTOalKwzA==', 1, 'string'),
+        ('Cam_11',     'B2-PARKING', 'B2',     '10.1.13.70',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fDYHfJQsQY3UdFxVeZCQ184_jcVlJvSE1f3w41my8Rnqeckrop5dRSWpD8HkDWTUc5JiaFYpQwJvF7QXrYOQlsL0g==', 1, 'string'),
+        ('Cam_12',     'B2-PARKING', 'B2',     '10.1.13.71',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fDw1Qdj1Rs4SREgTw6QMXnLgNoub-jthp1_DdFbVoSM4LISfMhwi4_YfKA2llgsrszPFcOVup_e7DAIfkc-00VuhA==', 1, 'string'),
+        ('Cam_13',     'B2-PARKING', 'B2',     '10.1.13.72',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fEA1_0Ts-N94Y_OItQemw_In7YtqAfC5sDtSKEUuB3OuySeimbMDhGznZGYHBsQ0rqCg7T4gZy2MwIE93kTHp8oVQ==', 1, 'string'),
+        ('Cam_14',     'B2-PARKING', 'B2',     '10.1.13.73',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fEI7ltsTbu8siRozaH_9zi1MVOrwBO8rumjDSVSJN_5SZlFNK3ChoaSB0VjtHH52ukLdm8hMgd535ap0fSDQho7Gg==', 1, 'string'),
+        ('ANPR-Entry', 'ENTRY-GATE', 'Ground', '10.1.13.100', 554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fG_8xKy6gcai-WzQ6_kf80AvCqmnwOJ2oDFJ7Aq_kAIXcs_gaTYHWoECpzWfmoEuNM2fpn3pyDzSF5w5E7lcTHXRw==', 1, 'string'),
+        ('ANPR-Exit',  'EXIT-GATE',  'Ground', '10.1.13.101', 554, '/Streaming/Channels/101', 'kloudspot1', 'gAAAAABp6fIGrXXkRo3nz-Yhm1IexonNM734GyEgDtrvDAY8p52FyETJt3BEwUWrfxd9ivggeG7J3-_lKInyVg95uvnLQCerFg==', 1, 'string')
+    ) AS Source (camera_id, name, floor, ip_address, rtsp_port, rtsp_path, username, password_encrypted, enabled, notes)
     ON Target.camera_id = Source.camera_id
     WHEN MATCHED THEN
         UPDATE SET
             name = Source.name,
             floor = Source.floor,
-            zone_id = Source.zone_id,
             ip_address = Source.ip_address,
             rtsp_port = Source.rtsp_port,
             rtsp_path = Source.rtsp_path,
@@ -157,13 +155,9 @@ BEGIN
             notes = Source.notes,
             updated_at = GETUTCDATE()
     WHEN NOT MATCHED THEN
-        INSERT (camera_id, name, floor, zone_id, ip_address, rtsp_port, rtsp_path, username, password_encrypted, enabled, notes)
-        VALUES (Source.camera_id, Source.name, Source.floor, Source.zone_id, Source.ip_address, Source.rtsp_port, Source.rtsp_path, Source.username, Source.password_encrypted, Source.enabled, Source.notes);
+        INSERT (camera_id, name, floor, ip_address, rtsp_port, rtsp_path, username, password_encrypted, enabled, notes)
+        VALUES (Source.camera_id, Source.name, Source.floor, Source.ip_address, Source.rtsp_port, Source.rtsp_path, Source.username, Source.password_encrypted, Source.enabled, Source.notes);
     PRINT '  Seeded 16 cameras (canonical fleet).';
-END
-ELSE IF OBJECT_ID(N'dbo.cameras', 'U') IS NOT NULL
-BEGIN
-    PRINT '  Skipped cameras seed — `zone_id` column is missing on this DB.';
 END
 GO
 
