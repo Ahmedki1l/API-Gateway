@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.config import facility_today_utc
 from app.database import get_db, scalar, rows
 from app.routers._helpers import _floor_schema
+from app.services.snapshots import resolve_snapshot_url
 from app.schemas import (
     ActiveVehicle,
     AIStatusResponse,
@@ -183,7 +184,7 @@ async def active_vehicles(db: Session = Depends(get_db)):
             slot_id=live_data.get("slot_id") or meta.get("slot_id"),
             slot_name=live_data.get("slot_name") or meta.get("slot_name"),
             vehicle_event_id=meta.get("vehicle_event_id"),
-            thumbnail_url=live_data.get("thumbnail_url") or meta["entry_snapshot_path"],
+            thumbnail_url=resolve_snapshot_url(live_data.get("thumbnail_url") or meta["entry_snapshot_path"]),
         ))
 
     return result

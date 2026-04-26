@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     # Facility-local clock offset from UTC, applied to "today" / "since-local-midnight" computations.
     facility_timezone_offset_hours: float = 2.0
 
+    # Where the PMS-AI snapshot files appear inside the gateway container.
+    # Mount the same volume PMS-AI writes to (read-only). When the directory
+    # exists, /snapshots is exposed as a StaticFiles mount and DTO snapshot_url
+    # values are rewritten from `detection_images/foo.jpg` → `/snapshots/foo.jpg`.
+    snapshots_local_dir: str = "/app/detection_images"
+    # Optional absolute origin prefix for snapshot URLs; empty → same-origin.
+    snapshots_public_base: str = ""
+
     @property
     def db_connection_string(self) -> str:
         # Local-dev fallback: DB_DRIVER=pymssql (FreeTDS-based, no system ODBC required)

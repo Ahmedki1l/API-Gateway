@@ -22,6 +22,7 @@ from app.schemas import (
     SlotListItem,
     ZoneItem,
 )
+from app.services.snapshots import resolve_snapshot_url
 from app.services.upstream import get_live_slots
 from app.shared import build_paged
 
@@ -819,7 +820,7 @@ async def get_slot_detail(slot_id: str, db: Session = Depends(get_db)):
             if ev_rows:
                 open_event = ev_rows[0]["id"]
                 vehicle_id = ev_rows[0].get("vehicle_id")
-                snapshot_url = ev_rows[0].get("snapshot_url")
+                snapshot_url = resolve_snapshot_url(ev_rows[0].get("snapshot_url"))
 
         current = {
             "state": canonical_state,

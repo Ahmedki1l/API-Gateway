@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db, scalar, rows
 from app.routers._helpers import _floor_schema
 from app.routers.entry_exit import _live_duration_seconds
+from app.services.snapshots import resolve_snapshot_url
 from app.schemas import (
     EntityActionResponse,
     EntryExitEvent,
@@ -107,7 +108,7 @@ def _event_from_row(
         direction="entry",
         camera_id=r.get("entry_camera_id"),
         event_time=r.get("entry_time"),
-        snapshot_url=r.get("entry_snapshot_path"),
+        snapshot_url=resolve_snapshot_url(r.get("entry_snapshot_path")),
         vehicle_event_id=r["id"],
     )
     exit_event: Optional[EntryExitEvent] = None
@@ -118,7 +119,7 @@ def _event_from_row(
             direction="exit",
             camera_id=r.get("exit_camera_id"),
             event_time=r.get("exit_time"),
-            snapshot_url=r.get("exit_snapshot_path"),
+            snapshot_url=resolve_snapshot_url(r.get("exit_snapshot_path")),
             vehicle_event_id=r["id"],
         )
     return VehicleEvent(
@@ -146,7 +147,7 @@ def _event_from_row(
         parked_at=r.get("parked_at"),
         slot_left_at=r.get("slot_left_at"),
         slot_camera_id=r.get("slot_camera_id"),
-        slot_snapshot_url=r.get("slot_snapshot_path"),
+        slot_snapshot_url=resolve_snapshot_url(r.get("slot_snapshot_path")),
     )
 
 

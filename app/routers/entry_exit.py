@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.config import facility_today_utc, facility_tz
 from app.database import get_db, scalar, rows
 from app.routers._helpers import _floor_schema, resolve_floor_id
+from app.services.snapshots import resolve_snapshot_url
 from app.schemas import (
     AlertItem,
     CameraRef,
@@ -74,7 +75,7 @@ def _event_from_row(r: dict, plate_number: str) -> VehicleEvent:
         direction="entry",
         camera_id=r.get("entry_camera_id"),
         event_time=r.get("entry_time"),
-        snapshot_url=r.get("entry_snapshot_path"),
+        snapshot_url=resolve_snapshot_url(r.get("entry_snapshot_path")),
         vehicle_event_id=r["id"],
     )
     exit_event: Optional[EntryExitEvent] = None
@@ -85,7 +86,7 @@ def _event_from_row(r: dict, plate_number: str) -> VehicleEvent:
             direction="exit",
             camera_id=r.get("exit_camera_id"),
             event_time=r.get("exit_time"),
-            snapshot_url=r.get("exit_snapshot_path"),
+            snapshot_url=resolve_snapshot_url(r.get("exit_snapshot_path")),
             vehicle_event_id=r["id"],
         )
     is_employee_raw = r.get("is_employee")
@@ -114,7 +115,7 @@ def _event_from_row(r: dict, plate_number: str) -> VehicleEvent:
         parked_at=r.get("parked_at"),
         slot_left_at=r.get("slot_left_at"),
         slot_camera_id=r.get("slot_camera_id"),
-        slot_snapshot_url=r.get("slot_snapshot_path"),
+        slot_snapshot_url=resolve_snapshot_url(r.get("slot_snapshot_path")),
     )
  
 VEHICLE_JOIN = """
@@ -783,5 +784,5 @@ async def get_entry_exit_detail(event_id: int, db: Session = Depends(get_db)):
         slot=slot,
         entry_camera=entry_camera,
         exit_camera=exit_camera,
-        alerts=[AlertItem(**a) for a in alert_rows],
+        alerts=[AlertItem(**{**a, "snapshot_url": resolve_snapshot_url(a.get("snapshot_url"))}) for a in alert_rows],
     )

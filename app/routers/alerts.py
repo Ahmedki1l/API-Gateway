@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.config import facility_today_utc
 from app.database import get_db, rows, scalar
 from app.routers._helpers import _floor_schema, resolve_floor_id
+from app.services.snapshots import resolve_snapshot_url
 from app.schemas import (
     AlertDetail,
     AlertItem,
@@ -222,7 +223,7 @@ def _normalize_stream_event(source_system: str, payload: dict) -> dict:
         "floor":         payload.get("floor"),
         # WS-8: floor_id on the SSE wire — populated when upstream supplies it; None otherwise.
         "floor_id":      payload.get("floor_id"),
-        "snapshot_url":  payload.get("snapshot_url") or payload.get("snapshot_path"),
+        "snapshot_url":  resolve_snapshot_url(payload.get("snapshot_url") or payload.get("snapshot_path")),
         # G-2: canonical name on the wire is `triggered_at` (matches AlertItem).
         # Accept legacy `timestamp` from upstream while we wait for upstream
         # services to align.
@@ -377,6 +378,8 @@ async def get_alerts(
         ORDER BY a.triggered_at DESC
         OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
     """, params)
+    for it in items:
+        it["snapshot_url"] = resolve_snapshot_url(it.get("snapshot_url"))
     return build_paged(items, total or 0, page, page_size)
  
  
@@ -730,7 +733,7 @@ async def get_alert(alert_id: int, db: Session = Depends(get_db)):
         triggering_camera_event_id=a.get("triggering_camera_event_id"),
         description=a.get("description"),
         location=a.get("location"),
-        snapshot_url=a.get("snapshot_url"),
+        snapshot_url=resolve_snapshot_url(a.get("snapshot_url")),
         triggered_at=a.get("triggered_at"),
         resolved_at=a.get("resolved_at"),
         is_resolved=a.get("is_resolved"),
@@ -801,6 +804,9 @@ async def export_alerts_csv(
         WHERE {where}
         ORDER BY a.triggered_at DESC
     """, params)
+
+    for row in data:
+        row["Snapshot URL"] = resolve_snapshot_url(row.get("Snapshot URL"))
 
     headers = [
         "ID", "Plate Number", "Owner", "Type", "Severity",

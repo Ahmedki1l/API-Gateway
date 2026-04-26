@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal, get_db, rows, scalar
 from app.schemas import CameraFeedItem, PagedResponse
+from app.services.snapshots import resolve_snapshot_url
 from app.shared import build_paged
 
 router = APIRouter(prefix="/camera-feeds", tags=["Camera Feeds"])
@@ -108,5 +109,8 @@ async def get_camera_feeds(
         ORDER BY timestamp DESC
         OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
     """, params)
+
+    for it in items:
+        it["snapshot_url"] = resolve_snapshot_url(it.get("snapshot_url"))
 
     return build_paged(items, total or 0, page, page_size)

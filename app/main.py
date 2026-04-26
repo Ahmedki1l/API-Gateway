@@ -1,11 +1,16 @@
+import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.routers import dashboard, alerts, entry_exit, vehicles, occupancy, camera_feeds, cameras
 from app.services import camera_monitor
+
+log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -36,6 +41,18 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+_snapshots_dir = Path(settings.snapshots_local_dir)
+if _snapshots_dir.is_dir():
+    app.mount(
+        "/snapshots",
+        StaticFiles(directory=_snapshots_dir, check_dir=False),
+        name="snapshots",
+    )
+else:
+    log.warning(
+        "snapshots_local_dir not found at %s; /snapshots disabled", _snapshots_dir
+    )
 
 app.include_router(dashboard.router)
 app.include_router(alerts.router)
