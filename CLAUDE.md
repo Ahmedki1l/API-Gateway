@@ -12,6 +12,11 @@ python run.py
 # (idempotent; creates every table the Gateway and System 1 share + sample data)
 sql/bootstrap.sql
 
+# Optional: load sample data after bootstrap so the dashboard, alerts,
+# vehicles, entry/exit, and occupancy tabs all have content to display
+# (idempotent; safe to re-run; skips on populated DBs)
+sql/seed.sql
+
 # Legacy migrations (only run on databases that pre-date Phase 2 — destructive,
 # drops zone_occupancy and zone_id/zone_name columns):
 sql/legacy_migrations/drop_zones_v2_destructive.sql

@@ -861,5 +861,6 @@ GO
 
 PRINT '──────────────────────────────────────────────';
 PRINT '  bootstrap.sql finished';
+PRINT '  For sample data on a fresh DB, run sql/seed.sql next.';
 PRINT '──────────────────────────────────────────────';
 GO

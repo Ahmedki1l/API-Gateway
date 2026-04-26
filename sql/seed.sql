@@ -110,7 +110,7 @@ GO
    ──────────────────────────────────────────────────────────────────────────── */
 DECLARE @now DATETIME2 = SYSUTCDATETIME();
 
-IF NOT EXISTS (SELECT 1 FROM dbo.slot_status WHERE slot_id = 'B1_CRO')
+IF NOT EXISTS (SELECT 1 FROM dbo.slot_status WHERE slot_id = 'B1_CRO' AND plate_number = 'ABC-1001')
 BEGIN
     INSERT INTO dbo.slot_status (slot_id, plate_number, status, time) VALUES
         ('B1_CRO', 'ABC-1001', 'OCCUPIED', DATEADD(minute, -45, @now)),
@@ -148,7 +148,7 @@ GO
    ──────────────────────────────────────────────────────────────────────────── */
 DECLARE @now DATETIME2 = SYSUTCDATETIME();
 
-IF NOT EXISTS (SELECT 1 FROM dbo.entry_exit_log eel WHERE eel.plate_number = 'ABC-1001' AND eel.event_time = DATEADD(hour, -2, @now))
+IF NOT EXISTS (SELECT 1 FROM dbo.entry_exit_log WHERE snapshot_path = 'detection_images/seed_entry_001.jpg')
 BEGIN
     INSERT INTO dbo.entry_exit_log
         (plate_number, vehicle_id, vehicle_type, gate, camera_id, event_time, parking_duration, snapshot_path, is_test, plate_confidence)
@@ -199,7 +199,7 @@ GO
    ──────────────────────────────────────────────────────────────────────────── */
 DECLARE @now DATETIME2 = SYSUTCDATETIME();
 
-IF NOT EXISTS (SELECT 1 FROM dbo.parking_sessions WHERE plate_number = 'ABC-1002' AND entry_time = DATEADD(hour, -3, @now))
+IF NOT EXISTS (SELECT 1 FROM dbo.parking_sessions WHERE entry_snapshot_path = 'detection_images/seed_entry_001.jpg')
 BEGIN
     INSERT INTO dbo.parking_sessions
         (plate_number, vehicle_id, vehicle_type, is_employee, entry_time, exit_time, duration_seconds,
@@ -246,7 +246,7 @@ GO
    ──────────────────────────────────────────────────────────────────────────── */
 DECLARE @now DATETIME2 = SYSUTCDATETIME();
 
-IF NOT EXISTS (SELECT 1 FROM dbo.alerts WHERE alert_type = 'unauthorized_entry' AND plate_number = 'BLK-9001' AND triggered_at >= DATEADD(day, -2, @now))
+IF NOT EXISTS (SELECT 1 FROM dbo.alerts WHERE snapshot_path = 'detection_images/seed_alert_001.jpg')
 BEGIN
     INSERT INTO dbo.alerts
         (alert_type, camera_id, zone_id, zone_name, slot_id, slot_number, event_type,
@@ -319,7 +319,7 @@ GO
    ──────────────────────────────────────────────────────────────────────────── */
 DECLARE @now DATETIME2 = SYSUTCDATETIME();
 
-IF NOT EXISTS (SELECT 1 FROM dbo.camera_feeds WHERE camera_id = 'ANPR-Entry' AND plate_number = 'ABC-1001' AND timestamp >= DATEADD(hour, -3, @now))
+IF NOT EXISTS (SELECT 1 FROM dbo.camera_feeds WHERE snapshot_path = 'detection_images/seed_feed_001.jpg')
 BEGIN
     INSERT INTO dbo.camera_feeds (camera_id, location_label, event_description, detection_source, plate_number, snapshot_path, timestamp) VALUES
         ('ANPR-Entry', 'Entry Gate',   'Vehicle entry detected',         'anpr',  'ABC-1001', 'detection_images/seed_feed_001.jpg', DATEADD(hour,   -2, @now)),
