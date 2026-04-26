@@ -8,13 +8,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Run the gateway (port from settings.gateway_port, default 8001)
 python run.py
 
-# One-time DB setup before first run — execute against SQL Server in SSMS
-# (idempotent; creates every table the Gateway and System 1 share + sample data)
+# One-time DB setup before first run — execute against SQL Server in SSMS.
+# bootstrap.sql is SCHEMA ONLY: tables, FKs, additive ALTERs, alembic
+# version pin. It inserts no display data. Idempotent.
 sql/bootstrap.sql
 
-# Optional: load sample data after bootstrap so the dashboard, alerts,
-# vehicles, entry/exit, and occupancy tabs all have content to display
-# (idempotent; safe to re-run; skips on populated DBs)
+# Run AFTER bootstrap.sql to load every row the gateway expects:
+# the canonical 16-camera fleet (Fernet-encrypted credentials), 30 parking
+# slots, zone_occupancy, plus sample vehicles / alerts / entry-exit /
+# sessions / camera_feeds for a populated dashboard. Idempotent.
 sql/seed.sql
 
 # Legacy migrations (only run on databases that pre-date Phase 2 — destructive,

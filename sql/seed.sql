@@ -1,21 +1,35 @@
 /* ============================================================================
-   seed.sql — sample data for the Parking System database
+   seed.sql — all data for the Parking System database
 
-   Optional companion to bootstrap.sql. Run this AFTER bootstrap.sql to
-   populate the dashboard with enough realistic rows that every tab
-   (Dashboard, Alerts, Vehicles, Entry/Exit, Occupancy) shows non-empty
-   content on a freshly bootstrapped database.
+   Companion to bootstrap.sql, which is now schema-only (DDL + additive
+   ALTERs + FKs). Run this AFTER bootstrap.sql to populate the database:
+     1. parking_slots          (30 rows — 15 per floor)
+     2. cameras                (16-row canonical fleet, MERGE-style upsert,
+                                Fernet-encrypted RTSP credentials)
+     3. zone_occupancy         (3 rows: B1 / B2 / GARAGE-TOTAL)
+     4. vehicles               (15 synthetic: employees / visitors / unknown
+                                / blacklisted)
+     5. slot_status            (current OCCUPIED/FREE state for ~20 slots)
+     6. entry_exit_log         (~31 gate crossings spanning 7 days)
+     7. parking_sessions       (~11 rows; ~5 still active)
+     8. alerts                 (18 rows over 14 days; mix of types/severities)
+     9. camera_feeds           (recent dashboard-ticker entries)
+    10. Floor alias normalization (e.g. "Ground Floor" → "Ground")
 
-   Idempotent — every block is guarded by IF NOT EXISTS / WHERE ... NOT IN
-   so re-running the file does nothing on a populated DB.
+   Idempotent — every block is guarded by IF NOT EXISTS or by MERGE so
+   re-running the file does nothing on a populated DB.
 
-   What is intentionally NOT in this file:
-     - cameras            — bootstrap.sql already seeds the canonical 16-camera
-                            fleet with encrypted credentials.
-     - alembic_version    — bootstrap.sql pins it to a specific head.
-     - real plate numbers, names, phone numbers — every value below is
-                            obviously synthetic.
-     - secrets / tokens / passwords of any kind.
+   IMPORTANT — cameras section:
+     The encrypted passwords below were created with a specific
+     CAMERAS_ENCRYPTION_KEY. If your gateway runs with a different key,
+     decryption will fail at runtime (InvalidToken); re-seed by POSTing
+     to /cameras/ with plaintext passwords so the gateway encrypts with
+     your key.
+
+   Sample-data values:
+     - No real plate numbers, names, or phone numbers — every entry is
+       obviously synthetic (ABC-1234, Test User 01, +966-5XX-XXX-001).
+     - No tokens / secrets of any kind.
 
    Run:
      sqlcmd -E -S localhost -d damanat_pms -i sql/seed.sql
@@ -37,8 +51,20 @@ PRINT '────────────────────────�
 DECLARE @now DATETIME2 = SYSUTCDATETIME();
 
 /* ────────────────────────────────────────────────────────────────────────────
-   1. parking_slots — extend the 6 bootstrap slots up to 30 (15 per floor)
+   1. parking_slots — 30 slots (15 per floor)
    ──────────────────────────────────────────────────────────────────────────── */
+IF NOT EXISTS (SELECT 1 FROM dbo.parking_slots WHERE slot_id = 'B1_CRO')
+BEGIN
+    INSERT INTO dbo.parking_slots (slot_id, slot_name, floor, is_available, is_violation_zone) VALUES
+        ('B1_CRO', 'Slot B1 CRO', 'B1', 1, 0),
+        ('B1_CTO', 'Slot B1 CTO', 'B1', 1, 0),
+        ('B1_CFO', 'Slot B1 CFO', 'B1', 1, 0),
+        ('B2_14',  'Slot B2 14',  'B2', 1, 0),
+        ('B2_15',  'Slot B2 15',  'B2', 1, 0),
+        ('B2_16',  'Slot B2 16',  'B2', 1, 0);
+    PRINT '  Seeded 6 baseline parking_slots';
+END;
+
 IF NOT EXISTS (SELECT 1 FROM dbo.parking_slots WHERE slot_id = 'B1_01')
 BEGIN
     INSERT INTO dbo.parking_slots (slot_id, slot_name, floor, is_available, is_violation_zone) VALUES
@@ -69,7 +95,14 @@ BEGIN
     PRINT '  Seeded 24 additional parking_slots (12 per floor)';
 END;
 
-/* Re-run the floor_id backfill so the new rows get their FK link. */
+/* Backfill floors lookup from the slots we just seeded (bootstrap.sql's
+   own backfill no-ops on empty DBs). Then point parking_slots.floor_id at
+   the matching floor row. */
+INSERT INTO dbo.floors (name)
+SELECT DISTINCT ps.floor FROM dbo.parking_slots ps
+WHERE ps.floor IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM dbo.floors f WHERE f.name = ps.floor);
+
 IF COL_LENGTH(N'dbo.parking_slots', N'floor_id') IS NOT NULL
     UPDATE ps SET floor_id = f.id
     FROM dbo.parking_slots ps INNER JOIN dbo.floors f ON f.name = ps.floor
@@ -77,7 +110,98 @@ IF COL_LENGTH(N'dbo.parking_slots', N'floor_id') IS NOT NULL
 GO
 
 /* ────────────────────────────────────────────────────────────────────────────
-   2. vehicles — 15 synthetic plates: employees, visitors, blacklisted
+   2. cameras — canonical 16-camera fleet (Fernet-encrypted credentials)
+   ────────────────────────────────────────────────────────────────────────────
+   MERGE so re-running updates fields without inserting duplicates.
+
+   The encrypted passwords below were created with a specific
+   CAMERAS_ENCRYPTION_KEY. If your gateway is configured with a different
+   key, decryption will fail at runtime (InvalidToken); re-seed via
+   POST /cameras/ with plaintext passwords so the gateway encrypts them
+   with your key. See app/services/crypto.py.
+   ──────────────────────────────────────────────────────────────────────────── */
+IF OBJECT_ID(N'dbo.cameras', 'U') IS NOT NULL
+   AND COL_LENGTH(N'dbo.cameras', N'zone_id') IS NOT NULL
+BEGIN
+    MERGE INTO dbo.cameras AS Target
+    USING (VALUES
+        ('Cam_01',     'GF-FRONT',   'Ground', 'string',     '10.1.13.60',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e6A6j_Qpr6-uimln8jM5osSSPctIy-0dob6PjUGWLAHTd6XIkWiSaUaKfmXNT_u4iy2W8Pr4VA45Kk4favDsOClHw==', 1, 'string'),
+        ('Cam_02',     'GF-FRONT',   'Ground', 'string',     '10.1.13.61',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e7RABH1t0SZa7kgGjwLfoObuiSkpJpxRsYQ3VGD3xxB1DeeRZ0Dka2xXztPXi2S-afIEjlVT_xBG7sf5kmL3ZI1bA==', 1, 'string'),
+        ('Cam_03',     'B1-PARKING', 'B1',     'string',     '10.1.13.62',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e-D18fZxcTrYrdfe7P8FiJVi-02hz7N9LMKSeWZpkYzNh14YFRljelTq-JBWYjuDT5n-TYAhw6bUQYY5XuK2yWdtw==', 1, 'string'),
+        ('Cam_04',     'B1-PARKING', 'B1',     'string',     '10.1.13.63',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e-gp-OCNTt8AU8c3vIVIIZwbTHSSfTPoCqal9nNQCeSaoFjTc7eBGDJSBWfmGfJ5atZEkpBoVZ_T8NO790HCZpUaA==', 1, 'string'),
+        ('Cam_05',     'B1-PARKING', 'B1',     'string',     '10.1.13.64',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e_uYUN6Qr46oV3elkRDLFd09qFaKwrgzv9I8PpWX9inFP2-RlFtmmJxVTHiqq9x6UdGJaFuTumPwyha9K60rjMdkA==', 1, 'string'),
+        ('Cam_06',     'B1-PARKING', 'B1',     'string',     '10.1.13.65',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e_2bsqW8uCeal2wXSkAxbZyrKYUFkFxUiK7SaRKSnx4AAyppzvzwFTd5BRjhFt82a_laGZ1SVLPh2Et0IxifnL6ow==', 1, 'string'),
+        ('Cam_07',     'B1-PARKING', 'B1',     'string',     '10.1.13.66',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e_9LgEh_4GCmDwEd_FHVAEMnWT0GFgMy3M-nhC4GKOOuHVN-CfAdyTHJPCtJAM1RViV-IwSObVKLzs-3GZowfFmIA==', 1, 'string'),
+        ('Cam_08',     'B1-PARKING', 'B1',     'string',     '10.1.13.67',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fAY2-AEnVw7taPduRk__zPqqrTWEf1qWzkgxsmu17x6RDZMEkrmoO7mdInTY00dUywiJkMjlwWo1v_nNJrue-Ndhw==', 1, 'string'),
+        ('Cam_09',     'B2-PARKING', 'B2',     'string',     '10.1.13.68',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fCPk_5bVzvA6f54c6asDneRNfFKlGRkxHYioYMBbq9J85mfiLvWgDCf01FjPe2oGsMhDYLd7U_apRZhboHxOqH1eg==', 1, 'string'),
+        ('Cam_10',     'B2-PARKING', 'B2',     'string',     '10.1.13.69',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fDQw9C51CFlYc-Ls3lINRvWyUvrhtKkN9uCsczDkcc0E_hKhENbL18hCgCwlqQEM83m5eInc8q4Y6w9gWTOalKwzA==', 1, 'string'),
+        ('Cam_11',     'B2-PARKING', 'B2',     'string',     '10.1.13.70',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fDYHfJQsQY3UdFxVeZCQ184_jcVlJvSE1f3w41my8Rnqeckrop5dRSWpD8HkDWTUc5JiaFYpQwJvF7QXrYOQlsL0g==', 1, 'string'),
+        ('Cam_12',     'B2-PARKING', 'B2',     'string',     '10.1.13.71',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fDw1Qdj1Rs4SREgTw6QMXnLgNoub-jthp1_DdFbVoSM4LISfMhwi4_YfKA2llgsrszPFcOVup_e7DAIfkc-00VuhA==', 1, 'string'),
+        ('Cam_13',     'B2-PARKING', 'B2',     'string',     '10.1.13.72',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fEA1_0Ts-N94Y_OItQemw_In7YtqAfC5sDtSKEUuB3OuySeimbMDhGznZGYHBsQ0rqCg7T4gZy2MwIE93kTHp8oVQ==', 1, 'string'),
+        ('Cam_14',     'B2-PARKING', 'B2',     'string',     '10.1.13.73',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fEI7ltsTbu8siRozaH_9zi1MVOrwBO8rumjDSVSJN_5SZlFNK3ChoaSB0VjtHH52ukLdm8hMgd535ap0fSDQho7Gg==', 1, 'string'),
+        ('ANPR-Entry', 'ENTRY-GATE', 'Ground', 'string',     '10.1.13.100', 554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fG_8xKy6gcai-WzQ6_kf80AvCqmnwOJ2oDFJ7Aq_kAIXcs_gaTYHWoECpzWfmoEuNM2fpn3pyDzSF5w5E7lcTHXRw==', 1, 'string'),
+        ('ANPR-Exit',  'EXIT-GATE',  'Ground', 'string',     '10.1.13.101', 554, '/Streaming/Channels/101', 'kloudspot1', 'gAAAAABp6fIGrXXkRo3nz-Yhm1IexonNM734GyEgDtrvDAY8p52FyETJt3BEwUWrfxd9ivggeG7J3-_lKInyVg95uvnLQCerFg==', 1, 'string')
+    ) AS Source (camera_id, name, floor, zone_id, ip_address, rtsp_port, rtsp_path, username, password_encrypted, enabled, notes)
+    ON Target.camera_id = Source.camera_id
+    WHEN MATCHED THEN
+        UPDATE SET
+            name = Source.name,
+            floor = Source.floor,
+            zone_id = Source.zone_id,
+            ip_address = Source.ip_address,
+            rtsp_port = Source.rtsp_port,
+            rtsp_path = Source.rtsp_path,
+            username = Source.username,
+            password_encrypted = Source.password_encrypted,
+            enabled = Source.enabled,
+            notes = Source.notes,
+            updated_at = GETUTCDATE()
+    WHEN NOT MATCHED THEN
+        INSERT (camera_id, name, floor, zone_id, ip_address, rtsp_port, rtsp_path, username, password_encrypted, enabled, notes)
+        VALUES (Source.camera_id, Source.name, Source.floor, Source.zone_id, Source.ip_address, Source.rtsp_port, Source.rtsp_path, Source.username, Source.password_encrypted, Source.enabled, Source.notes);
+    PRINT '  Seeded 16 cameras (canonical fleet).';
+END
+ELSE IF OBJECT_ID(N'dbo.cameras', 'U') IS NOT NULL
+BEGIN
+    PRINT '  Skipped cameras seed — `zone_id` column is missing on this DB.';
+END
+GO
+
+/* Ensure new camera floor names exist in floors lookup, then backfill
+   cameras.floor_id and cameras.watches_floor_id for the inserted rows. */
+INSERT INTO dbo.floors (name)
+SELECT DISTINCT t.floor FROM dbo.cameras t
+WHERE t.floor IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM dbo.floors f WHERE f.name = t.floor);
+
+IF COL_LENGTH(N'dbo.cameras', N'floor_id') IS NOT NULL
+   AND COL_LENGTH(N'dbo.cameras', N'floor') IS NOT NULL
+    UPDATE t SET floor_id = f.id
+    FROM dbo.cameras t INNER JOIN dbo.floors f ON f.name = t.floor
+    WHERE t.floor_id IS NULL;
+
+IF COL_LENGTH(N'dbo.cameras', N'watches_floor_id') IS NOT NULL
+   AND COL_LENGTH(N'dbo.cameras', N'watches_floor') IS NOT NULL
+    UPDATE t SET watches_floor_id = f.id
+    FROM dbo.cameras t INNER JOIN dbo.floors f ON f.name = t.watches_floor
+    WHERE t.watches_floor_id IS NULL;
+GO
+
+/* ────────────────────────────────────────────────────────────────────────────
+   3. zone_occupancy — line-crossing counters (B1, B2, GARAGE-TOTAL)
+   ──────────────────────────────────────────────────────────────────────────── */
+IF NOT EXISTS (SELECT 1 FROM dbo.zone_occupancy WHERE zone_id = 'B1-PARKING')
+BEGIN
+    INSERT INTO dbo.zone_occupancy (zone_id, camera_id, current_count, max_capacity, last_updated, zone_name, floor) VALUES
+        ('B1-PARKING',   'Cam_03',  7, 15, GETUTCDATE(), 'B1 Parking',   'B1'),
+        ('B2-PARKING',   'Cam_09',  5, 15, GETUTCDATE(), 'B2 Parking',   'B2'),
+        ('GARAGE-TOTAL', 'Cam_03', 12, 30, GETUTCDATE(), 'Garage Total', 'ALL');
+    PRINT '  Seeded 3 zone_occupancy rows';
+END;
+GO
+
+/* ────────────────────────────────────────────────────────────────────────────
+   4. vehicles — 15 synthetic plates: employees, visitors, blacklisted
    ──────────────────────────────────────────────────────────────────────────── */
 DECLARE @now DATETIME2 = SYSUTCDATETIME();
 
@@ -106,7 +230,7 @@ END;
 GO
 
 /* ────────────────────────────────────────────────────────────────────────────
-   3. slot_status — current state for ~20 slots (mix OCCUPIED / FREE)
+   5. slot_status — current state for ~20 slots (mix OCCUPIED / FREE)
    ──────────────────────────────────────────────────────────────────────────── */
 DECLARE @now DATETIME2 = SYSUTCDATETIME();
 
@@ -144,7 +268,7 @@ IF COL_LENGTH(N'dbo.slot_status', N'parking_slot_id') IS NOT NULL
 GO
 
 /* ────────────────────────────────────────────────────────────────────────────
-   4. entry_exit_log — last 7 days of gate crossings (~40 rows)
+   6. entry_exit_log — last 7 days of gate crossings (~31 rows)
    ──────────────────────────────────────────────────────────────────────────── */
 DECLARE @now DATETIME2 = SYSUTCDATETIME();
 
@@ -195,7 +319,7 @@ END;
 GO
 
 /* ────────────────────────────────────────────────────────────────────────────
-   5. parking_sessions — derived from entry_exit; ~5 still active
+   7. parking_sessions — derived from entry_exit; ~5 still active
    ──────────────────────────────────────────────────────────────────────────── */
 DECLARE @now DATETIME2 = SYSUTCDATETIME();
 
@@ -242,7 +366,7 @@ IF COL_LENGTH(N'dbo.parking_sessions', N'parking_slot_id') IS NOT NULL
 GO
 
 /* ────────────────────────────────────────────────────────────────────────────
-   6. alerts — last 14 days, mix of types/severities/resolved
+   8. alerts — last 14 days, mix of types/severities/resolved
    ──────────────────────────────────────────────────────────────────────────── */
 DECLARE @now DATETIME2 = SYSUTCDATETIME();
 
@@ -292,30 +416,7 @@ IF COL_LENGTH(N'dbo.alerts', N'parking_slot_id') IS NOT NULL
 GO
 
 /* ────────────────────────────────────────────────────────────────────────────
-   7. zone_occupancy — bump current_count to plausible values for the dashboard
-   ──────────────────────────────────────────────────────────────────────────── */
-DECLARE @now DATETIME2 = SYSUTCDATETIME();
-
-UPDATE dbo.zone_occupancy
-   SET current_count = CASE zone_id
-                           WHEN 'B1-PARKING'   THEN 7
-                           WHEN 'B2-PARKING'   THEN 5
-                           WHEN 'GARAGE-TOTAL' THEN 12
-                           ELSE current_count
-                       END,
-       max_capacity  = CASE zone_id
-                           WHEN 'B1-PARKING'   THEN 15
-                           WHEN 'B2-PARKING'   THEN 15
-                           WHEN 'GARAGE-TOTAL' THEN 30
-                           ELSE max_capacity
-                       END,
-       last_updated  = @now
- WHERE zone_id IN ('B1-PARKING', 'B2-PARKING', 'GARAGE-TOTAL')
-   AND (current_count = 0 OR current_count IS NULL);
-GO
-
-/* ────────────────────────────────────────────────────────────────────────────
-   8. camera_feeds — recent dashboard-ticker entries
+   9. camera_feeds — recent dashboard-ticker entries
    ──────────────────────────────────────────────────────────────────────────── */
 DECLARE @now DATETIME2 = SYSUTCDATETIME();
 
@@ -331,6 +432,92 @@ BEGIN
         ('Cam_09',     'B2 Parking',   'Slot occupancy change',          'cv',    'ABC-1005', 'detection_images/seed_feed_007.jpg', DATEADD(minute, -150,@now));
     PRINT '  Seeded camera_feeds rows';
 END;
+GO
+
+/* ────────────────────────────────────────────────────────────────────────────
+   10. Floor-name alias normalization (idempotent; safe to re-run)
+   ────────────────────────────────────────────────────────────────────────────
+   Cameras seed introduces floor='Ground'; PMS-AI may at some point write
+   floor='Ground Floor' for the same physical floor. Without normalization
+   the dashboard splits them into separate buckets. This block:
+     1. re-points integer FK columns from "Ground Floor" → "Ground";
+     2. rewrites legacy `floor` string columns on every source table;
+     3. deletes the now-empty "Ground Floor" row from `floors`.
+   Append rows to @aliases to add more name → canonical mappings.
+   ──────────────────────────────────────────────────────────────────────────── */
+DECLARE @aliases TABLE (alias NVARCHAR(50), canonical NVARCHAR(50));
+INSERT INTO @aliases (alias, canonical) VALUES
+    ('Ground Floor', 'Ground');
+    -- additional aliases here, e.g. ('GF', 'Ground'), ('Basement 1', 'B1')
+
+DECLARE @alias NVARCHAR(50), @canonical NVARCHAR(50), @from_id INT, @to_id INT;
+DECLARE alias_cur CURSOR LOCAL FAST_FORWARD FOR SELECT alias, canonical FROM @aliases;
+OPEN alias_cur;
+FETCH NEXT FROM alias_cur INTO @alias, @canonical;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    SELECT @from_id = id FROM dbo.floors WHERE name = @alias;
+    SELECT @to_id   = id FROM dbo.floors WHERE name = @canonical;
+
+    IF @from_id IS NOT NULL AND @to_id IS NOT NULL AND @from_id <> @to_id
+    BEGIN
+        IF COL_LENGTH(N'dbo.parking_slots', N'floor_id') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.parking_slots   SET floor_id = @t WHERE floor_id = @f',
+                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
+        IF COL_LENGTH(N'dbo.parking_sessions', N'floor_id') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.parking_sessions SET floor_id = @t WHERE floor_id = @f',
+                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
+        IF COL_LENGTH(N'dbo.cameras', N'floor_id') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.cameras SET floor_id = @t WHERE floor_id = @f',
+                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
+        IF COL_LENGTH(N'dbo.cameras', N'watches_floor_id') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.cameras SET watches_floor_id = @t WHERE watches_floor_id = @f',
+                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
+        IF COL_LENGTH(N'dbo.alerts', N'floor_id') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.alerts SET floor_id = @t WHERE floor_id = @f',
+                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
+        IF OBJECT_ID(N'dbo.floor_occupancy', N'U') IS NOT NULL
+           AND COL_LENGTH(N'dbo.floor_occupancy', N'floor_id') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.floor_occupancy SET floor_id = @t WHERE floor_id = @f',
+                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
+
+        IF COL_LENGTH(N'dbo.parking_slots', N'floor') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.parking_slots   SET floor = @t WHERE floor = @f',
+                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
+        IF COL_LENGTH(N'dbo.parking_sessions', N'floor') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.parking_sessions SET floor = @t WHERE floor = @f',
+                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
+        IF COL_LENGTH(N'dbo.cameras', N'floor') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.cameras SET floor = @t WHERE floor = @f',
+                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
+        IF COL_LENGTH(N'dbo.cameras', N'watches_floor') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.cameras SET watches_floor = @t WHERE watches_floor = @f',
+                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
+        IF COL_LENGTH(N'dbo.alerts', N'floor') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.alerts SET floor = @t WHERE floor = @f',
+                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
+        IF OBJECT_ID(N'dbo.floor_occupancy', N'U') IS NOT NULL
+           AND COL_LENGTH(N'dbo.floor_occupancy', N'floor') IS NOT NULL
+            EXEC sp_executesql N'UPDATE dbo.floor_occupancy SET floor = @t WHERE floor = @f',
+                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
+
+        DELETE FROM dbo.floors WHERE id = @from_id;
+        PRINT '  Normalized floor alias: ' + @alias + ' -> ' + @canonical;
+    END
+
+    FETCH NEXT FROM alias_cur INTO @alias, @canonical;
+END
+CLOSE alias_cur;
+DEALLOCATE alias_cur;
+GO
+
+/* Re-apply contiguous sort_order on floors (0..n-1). */
+;WITH ordered AS (
+    SELECT id, DENSE_RANK() OVER (ORDER BY name) - 1 AS new_order FROM dbo.floors
+)
+UPDATE f SET sort_order = o.new_order
+FROM dbo.floors f INNER JOIN ordered o ON o.id = f.id
+WHERE f.sort_order != o.new_order;
 GO
 
 PRINT '──────────────────────────────────────────────';

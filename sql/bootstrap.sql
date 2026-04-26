@@ -370,42 +370,17 @@ END;
 GO
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Sample data
+   Schema-version marker
+   ────────────────────────────────────────────────────────────────────────────
+   alembic_version is the only row this script writes — it pins the migration
+   head so PMS-AI's alembic doesn't try to re-apply migrations the consolidated
+   bootstrap already represents. All other content lives in sql/seed.sql.
    ──────────────────────────────────────────────────────────────────────────── */
-
--- Alembic version (matches Phase 4A head)
 IF NOT EXISTS (SELECT 1 FROM dbo.alembic_version WHERE version_num = 'a6b7c8d9e0f1')
 BEGIN
     DELETE FROM dbo.alembic_version;
     INSERT INTO dbo.alembic_version (version_num) VALUES ('a6b7c8d9e0f1');
-    PRINT '  Seeded alembic_version = a6b7c8d9e0f1';
-END;
-GO
-
--- Sample parking_slots — 3 per floor (B1, B2)
-IF NOT EXISTS (SELECT 1 FROM dbo.parking_slots WHERE slot_id = 'B1_CRO')
-BEGIN
-    INSERT INTO dbo.parking_slots (slot_id, slot_name, floor, is_available, is_violation_zone)
-    VALUES
-        ('B1_CRO',  'Slot B1 CRO',  'B1', 1, 0),
-        ('B1_CTO',  'Slot B1 CTO',  'B1', 1, 0),
-        ('B1_CFO',  'Slot B1 CFO',  'B1', 1, 0),
-        ('B2_14',   'Slot B2 14',   'B2', 1, 0),
-        ('B2_15',   'Slot B2 15',   'B2', 1, 0),
-        ('B2_16',   'Slot B2 16',   'B2', 1, 0);
-    PRINT '  Seeded 6 parking_slots';
-END;
-GO
-
--- Sample zone_occupancy rows (B1 / B2 / GARAGE-TOTAL)
-IF NOT EXISTS (SELECT 1 FROM dbo.zone_occupancy WHERE zone_id = 'B1-PARKING')
-BEGIN
-    INSERT INTO dbo.zone_occupancy (zone_id, camera_id, current_count, max_capacity, last_updated, zone_name, floor)
-    VALUES
-        ('B1-PARKING',   'CAM-03', 0, 3, GETUTCDATE(), 'B1 Parking',  'B1'),
-        ('B2-PARKING',   'CAM-09', 0, 3, GETUTCDATE(), 'B2 Parking',  'B2'),
-        ('GARAGE-TOTAL', 'CAM-03', 0, 6, GETUTCDATE(), 'Garage Total','ALL');
-    PRINT '  Seeded 3 zone_occupancy rows';
+    PRINT '  Pinned alembic_version = a6b7c8d9e0f1';
 END;
 GO
 
@@ -692,175 +667,8 @@ IF COL_LENGTH(N'dbo.intrusions', N'parking_slot_id') IS NOT NULL
 GO
 
 
-/* ============================================================================
-   -- Cameras seed (canonical 16-camera fleet)
-   ============================================================================
-   Inserts/updates the 16 production cameras with their RTSP credentials
-   (Fernet-encrypted, decrypted on-demand by app/services/crypto.py). MERGE
-   so re-running updates fields without inserting duplicates.
-
-   IMPORTANT: the encrypted passwords below were created with a specific
-   `CAMERAS_ENCRYPTION_KEY`. If your gateway is configured with a different
-   key, decryption will fail at runtime (`InvalidToken`) and you'll need to
-   re-seed using passwords encrypted with your key (the easiest path is
-   POST /cameras/ from a script that takes a plaintext password).
-   ============================================================================ */
-IF OBJECT_ID(N'dbo.cameras', 'U') IS NOT NULL
-   AND COL_LENGTH(N'dbo.cameras', N'zone_id') IS NOT NULL
-BEGIN
-    MERGE INTO dbo.cameras AS Target
-    USING (VALUES
-        ('Cam_01',     'GF-FRONT',   'Ground', 'string',     '10.1.13.60',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e6A6j_Qpr6-uimln8jM5osSSPctIy-0dob6PjUGWLAHTd6XIkWiSaUaKfmXNT_u4iy2W8Pr4VA45Kk4favDsOClHw==', 1, 'string'),
-        ('Cam_02',     'GF-FRONT',   'Ground', 'string',     '10.1.13.61',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e7RABH1t0SZa7kgGjwLfoObuiSkpJpxRsYQ3VGD3xxB1DeeRZ0Dka2xXztPXi2S-afIEjlVT_xBG7sf5kmL3ZI1bA==', 1, 'string'),
-        ('Cam_03',     'B1-PARKING', 'B1',     'string',     '10.1.13.62',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e-D18fZxcTrYrdfe7P8FiJVi-02hz7N9LMKSeWZpkYzNh14YFRljelTq-JBWYjuDT5n-TYAhw6bUQYY5XuK2yWdtw==', 1, 'string'),
-        ('Cam_04',     'B1-PARKING', 'B1',     'string',     '10.1.13.63',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e-gp-OCNTt8AU8c3vIVIIZwbTHSSfTPoCqal9nNQCeSaoFjTc7eBGDJSBWfmGfJ5atZEkpBoVZ_T8NO790HCZpUaA==', 1, 'string'),
-        ('Cam_05',     'B1-PARKING', 'B1',     'string',     '10.1.13.64',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e_uYUN6Qr46oV3elkRDLFd09qFaKwrgzv9I8PpWX9inFP2-RlFtmmJxVTHiqq9x6UdGJaFuTumPwyha9K60rjMdkA==', 1, 'string'),
-        ('Cam_06',     'B1-PARKING', 'B1',     'string',     '10.1.13.65',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e_2bsqW8uCeal2wXSkAxbZyrKYUFkFxUiK7SaRKSnx4AAyppzvzwFTd5BRjhFt82a_laGZ1SVLPh2Et0IxifnL6ow==', 1, 'string'),
-        ('Cam_07',     'B1-PARKING', 'B1',     'string',     '10.1.13.66',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6e_9LgEh_4GCmDwEd_FHVAEMnWT0GFgMy3M-nhC4GKOOuHVN-CfAdyTHJPCtJAM1RViV-IwSObVKLzs-3GZowfFmIA==', 1, 'string'),
-        ('Cam_08',     'B1-PARKING', 'B1',     'string',     '10.1.13.67',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fAY2-AEnVw7taPduRk__zPqqrTWEf1qWzkgxsmu17x6RDZMEkrmoO7mdInTY00dUywiJkMjlwWo1v_nNJrue-Ndhw==', 1, 'string'),
-        ('Cam_09',     'B2-PARKING', 'B2',     'string',     '10.1.13.68',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fCPk_5bVzvA6f54c6asDneRNfFKlGRkxHYioYMBbq9J85mfiLvWgDCf01FjPe2oGsMhDYLd7U_apRZhboHxOqH1eg==', 1, 'string'),
-        ('Cam_10',     'B2-PARKING', 'B2',     'string',     '10.1.13.69',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fDQw9C51CFlYc-Ls3lINRvWyUvrhtKkN9uCsczDkcc0E_hKhENbL18hCgCwlqQEM83m5eInc8q4Y6w9gWTOalKwzA==', 1, 'string'),
-        ('Cam_11',     'B2-PARKING', 'B2',     'string',     '10.1.13.70',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fDYHfJQsQY3UdFxVeZCQ184_jcVlJvSE1f3w41my8Rnqeckrop5dRSWpD8HkDWTUc5JiaFYpQwJvF7QXrYOQlsL0g==', 1, 'string'),
-        ('Cam_12',     'B2-PARKING', 'B2',     'string',     '10.1.13.71',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fDw1Qdj1Rs4SREgTw6QMXnLgNoub-jthp1_DdFbVoSM4LISfMhwi4_YfKA2llgsrszPFcOVup_e7DAIfkc-00VuhA==', 1, 'string'),
-        ('Cam_13',     'B2-PARKING', 'B2',     'string',     '10.1.13.72',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fEA1_0Ts-N94Y_OItQemw_In7YtqAfC5sDtSKEUuB3OuySeimbMDhGznZGYHBsQ0rqCg7T4gZy2MwIE93kTHp8oVQ==', 1, 'string'),
-        ('Cam_14',     'B2-PARKING', 'B2',     'string',     '10.1.13.73',  554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fEI7ltsTbu8siRozaH_9zi1MVOrwBO8rumjDSVSJN_5SZlFNK3ChoaSB0VjtHH52ukLdm8hMgd535ap0fSDQho7Gg==', 1, 'string'),
-        ('ANPR-Entry', 'ENTRY-GATE', 'Ground', 'string',     '10.1.13.100', 554, '/Streaming/Channels/101', 'kloudspot',  'gAAAAABp6fG_8xKy6gcai-WzQ6_kf80AvCqmnwOJ2oDFJ7Aq_kAIXcs_gaTYHWoECpzWfmoEuNM2fpn3pyDzSF5w5E7lcTHXRw==', 1, 'string'),
-        ('ANPR-Exit',  'EXIT-GATE',  'Ground', 'string',     '10.1.13.101', 554, '/Streaming/Channels/101', 'kloudspot1', 'gAAAAABp6fIGrXXkRo3nz-Yhm1IexonNM734GyEgDtrvDAY8p52FyETJt3BEwUWrfxd9ivggeG7J3-_lKInyVg95uvnLQCerFg==', 1, 'string')
-    ) AS Source (camera_id, name, floor, zone_id, ip_address, rtsp_port, rtsp_path, username, password_encrypted, enabled, notes)
-    ON Target.camera_id = Source.camera_id
-    WHEN MATCHED THEN
-        UPDATE SET
-            name = Source.name,
-            floor = Source.floor,
-            zone_id = Source.zone_id,
-            ip_address = Source.ip_address,
-            rtsp_port = Source.rtsp_port,
-            rtsp_path = Source.rtsp_path,
-            username = Source.username,
-            password_encrypted = Source.password_encrypted,
-            enabled = Source.enabled,
-            notes = Source.notes,
-            updated_at = GETUTCDATE()
-    WHEN NOT MATCHED THEN
-        INSERT (camera_id, name, floor, zone_id, ip_address, rtsp_port, rtsp_path, username, password_encrypted, enabled, notes)
-        VALUES (Source.camera_id, Source.name, Source.floor, Source.zone_id, Source.ip_address, Source.rtsp_port, Source.rtsp_path, Source.username, Source.password_encrypted, Source.enabled, Source.notes);
-    PRINT '  Seeded 16 cameras (canonical fleet).';
-END
-ELSE IF OBJECT_ID(N'dbo.cameras', 'U') IS NOT NULL
-BEGIN
-    PRINT '  Skipped cameras seed — `zone_id` column is missing on this DB.';
-END
-GO
-
-/* Final pass: backfill cameras.floor_id / cameras.watches_floor_id for the
-   16 rows we just inserted. (Idempotent — only updates NULLs.) */
-IF COL_LENGTH(N'dbo.cameras', N'floor_id') IS NOT NULL
-   AND COL_LENGTH(N'dbo.cameras', N'floor') IS NOT NULL
-    EXEC sp_executesql N'
-        UPDATE t SET floor_id = f.id
-        FROM dbo.cameras t INNER JOIN dbo.floors f ON f.name = t.floor
-        WHERE t.floor_id IS NULL;';
-GO
-
-
-/* ============================================================================
-   -- Normalize floor-name aliases (idempotent; safe to re-run)
-   ============================================================================
-   The cameras seed introduced `floor='Ground'`, but pre-existing data on
-   `parking_slots` (and other tables) used `floor='Ground Floor'`. They
-   refer to the same physical floor — so without normalization the gateway
-   ends up with 4 logical floors instead of 3, and the dashboard splits
-   "Ground" cameras and "Ground Floor" slots into separate buckets.
-
-   This block:
-     1. re-points every `floor_id` row from "Ground Floor" → "Ground" so no
-        FK orphans are left;
-     2. rewrites the legacy `floor` string column on every source table;
-     3. deletes the now-empty "Ground Floor" row from the `floors` lookup.
-
-   To add new aliases later, append more rows to the @aliases table.
-   ============================================================================ */
-DECLARE @aliases TABLE (alias NVARCHAR(50), canonical NVARCHAR(50));
-INSERT INTO @aliases (alias, canonical) VALUES
-    ('Ground Floor', 'Ground');
-    -- additional aliases here, e.g. ('GF', 'Ground'), ('Basement 1', 'B1')
-
-DECLARE @alias NVARCHAR(50), @canonical NVARCHAR(50), @from_id INT, @to_id INT;
-DECLARE alias_cur CURSOR LOCAL FAST_FORWARD FOR SELECT alias, canonical FROM @aliases;
-OPEN alias_cur;
-FETCH NEXT FROM alias_cur INTO @alias, @canonical;
-WHILE @@FETCH_STATUS = 0
-BEGIN
-    SELECT @from_id = id FROM dbo.floors WHERE name = @alias;
-    SELECT @to_id   = id FROM dbo.floors WHERE name = @canonical;
-
-    IF @from_id IS NOT NULL AND @to_id IS NOT NULL AND @from_id <> @to_id
-    BEGIN
-        -- 1. Re-point integer FK columns. Dynamic-SQL so missing columns no-op.
-        IF COL_LENGTH(N'dbo.parking_slots', N'floor_id') IS NOT NULL
-            EXEC sp_executesql N'UPDATE dbo.parking_slots   SET floor_id = @t WHERE floor_id = @f',
-                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
-        IF COL_LENGTH(N'dbo.parking_sessions', N'floor_id') IS NOT NULL
-            EXEC sp_executesql N'UPDATE dbo.parking_sessions SET floor_id = @t WHERE floor_id = @f',
-                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
-        IF COL_LENGTH(N'dbo.cameras', N'floor_id') IS NOT NULL
-            EXEC sp_executesql N'UPDATE dbo.cameras SET floor_id = @t WHERE floor_id = @f',
-                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
-        IF COL_LENGTH(N'dbo.cameras', N'watches_floor_id') IS NOT NULL
-            EXEC sp_executesql N'UPDATE dbo.cameras SET watches_floor_id = @t WHERE watches_floor_id = @f',
-                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
-        IF COL_LENGTH(N'dbo.alerts', N'floor_id') IS NOT NULL
-            EXEC sp_executesql N'UPDATE dbo.alerts SET floor_id = @t WHERE floor_id = @f',
-                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
-        IF OBJECT_ID(N'dbo.floor_occupancy', N'U') IS NOT NULL
-           AND COL_LENGTH(N'dbo.floor_occupancy', N'floor_id') IS NOT NULL
-            EXEC sp_executesql N'UPDATE dbo.floor_occupancy SET floor_id = @t WHERE floor_id = @f',
-                               N'@f INT, @t INT', @f = @from_id, @t = @to_id;
-
-        -- 2. Rewrite legacy string columns.
-        IF COL_LENGTH(N'dbo.parking_slots', N'floor') IS NOT NULL
-            EXEC sp_executesql N'UPDATE dbo.parking_slots   SET floor = @t WHERE floor = @f',
-                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
-        IF COL_LENGTH(N'dbo.parking_sessions', N'floor') IS NOT NULL
-            EXEC sp_executesql N'UPDATE dbo.parking_sessions SET floor = @t WHERE floor = @f',
-                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
-        IF COL_LENGTH(N'dbo.cameras', N'floor') IS NOT NULL
-            EXEC sp_executesql N'UPDATE dbo.cameras SET floor = @t WHERE floor = @f',
-                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
-        IF COL_LENGTH(N'dbo.cameras', N'watches_floor') IS NOT NULL
-            EXEC sp_executesql N'UPDATE dbo.cameras SET watches_floor = @t WHERE watches_floor = @f',
-                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
-        IF COL_LENGTH(N'dbo.alerts', N'floor') IS NOT NULL
-            EXEC sp_executesql N'UPDATE dbo.alerts SET floor = @t WHERE floor = @f',
-                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
-        IF OBJECT_ID(N'dbo.floor_occupancy', N'U') IS NOT NULL
-           AND COL_LENGTH(N'dbo.floor_occupancy', N'floor') IS NOT NULL
-            EXEC sp_executesql N'UPDATE dbo.floor_occupancy SET floor = @t WHERE floor = @f',
-                               N'@f NVARCHAR(50), @t NVARCHAR(50)', @f = @alias, @t = @canonical;
-
-        -- 3. Delete the orphaned alias row.
-        DELETE FROM dbo.floors WHERE id = @from_id;
-        PRINT '  Normalized floor alias: ' + @alias + ' -> ' + @canonical;
-    END
-
-    FETCH NEXT FROM alias_cur INTO @alias, @canonical;
-END
-CLOSE alias_cur;
-DEALLOCATE alias_cur;
-GO
-
-/* Re-apply sort_order pass after the deletion so canonical floors are
-   numbered 0..n-1 contiguously. */
-;WITH ordered AS (
-    SELECT id, DENSE_RANK() OVER (ORDER BY name) - 1 AS new_order FROM dbo.floors
-)
-UPDATE f SET sort_order = o.new_order
-FROM dbo.floors f INNER JOIN ordered o ON o.id = f.id
-WHERE f.sort_order != o.new_order;
-GO
-
 PRINT '──────────────────────────────────────────────';
-PRINT '  bootstrap.sql finished';
-PRINT '  For sample data on a fresh DB, run sql/seed.sql next.';
+PRINT '  bootstrap.sql finished — schema ready (no data inserted).';
+PRINT '  Run sql/seed.sql next to populate cameras + sample data.';
 PRINT '──────────────────────────────────────────────';
 GO
