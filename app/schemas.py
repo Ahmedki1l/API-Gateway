@@ -625,6 +625,25 @@ class CameraInternalListResponse(BaseModel):
     decryption_errors: list[dict]
 
 
+# ── Camera live-feed (HLS) ────────────────────────────────────────────────────
+# Returned by GET /cameras/{id}/feed. The Gateway opens a session against the
+# camera-server and surfaces only the playable HLS URL + bookkeeping IDs;
+# RTSP credentials and direct camera-server endpoints are never exposed.
+class CameraFeed(BaseModel):
+    camera_id: str
+    display_name: Optional[str] = None
+    stream: str
+    session_id: str
+    hls_url: str
+    embed_url: str
+    expires_at: str
+
+
+class CameraFeedClosed(BaseModel):
+    session_id: str
+    closed: bool
+
+
 class CameraKPIs(BaseModel):
     total: int
     enabled: int

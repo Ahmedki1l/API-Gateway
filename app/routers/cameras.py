@@ -8,8 +8,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
 from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -18,6 +20,8 @@ from app.schemas import (
     CameraCheckResult,
     CameraCreate,
     CameraCredentials,
+    CameraFeed,
+    CameraFeedClosed,
     CameraInternalListResponse,
     CameraItem,
     CameraKPIs,
@@ -36,6 +40,10 @@ from app.shared import build_paged, stream_csv
 from app.services.auth import require_internal_token
 
 router = APIRouter(prefix="/cameras", tags=["Cameras"])
+
+# Module-level pooled client for the camera-server. Same pattern as
+# services/upstream.py uses for System 1 / System 2.
+_camera_server = httpx.AsyncClient(base_url=settings.camera_server_url, timeout=10.0)
 
 
 # ── Camera role derivation (WS-8.E) ───────────────────────────────────────────
@@ -330,6 +338,24 @@ def _fetch_one_or_404(db: Session, camera_id: str) -> dict:
     return raw[0]
 
 
+# Polymorphic lookup: accept either the DB integer surrogate `id` or the
+# string business key `camera_id`. A path component that parses cleanly as
+# a positive integer is treated as the DB id; everything else is the
+# business key. None of the existing camera_ids in the registry are pure
+# integers, so this dispatch is unambiguous in practice.
+def _fetch_one_by_any_id_or_404(db: Session, identifier: str) -> dict:
+    if identifier.isdigit():
+        raw = rows(
+            db,
+            f"SELECT {_select_cols()} FROM cameras WHERE id = :id",
+            {"id": int(identifier)},
+        )
+        if raw:
+            return raw[0]
+        raise HTTPException(status_code=404, detail=f"Camera with id={identifier} not found")
+    return _fetch_one_or_404(db, identifier)
+
+
 @router.get("/{camera_id}", response_model=CameraItem)
 async def get_camera(camera_id: str, db: Session = Depends(get_db)):
     return _row_to_item(_fetch_one_or_404(db, camera_id))
@@ -577,6 +603,243 @@ async def get_camera_credentials(camera_id: str, request: Request, db: Session =
     caller = request.client.host if request.client else "unknown"
     print(f"[cameras] credentials read camera_id={camera_id} caller={caller}")
     return CameraCredentials(username=row.get("username"), password=password, rtsp_url=rtsp_url)
+
+
+# ── Live feed (HLS) ───────────────────────────────────────────────────────────
+# Single endpoint frontends call to obtain a playable HLS URL for a camera.
+# Verifies the camera exists + is enabled in our registry, then asks the
+# camera-server to open a session. RTSP credentials and direct camera-server
+# URLs never leave this process.
+#
+# The path param `identifier` accepts either:
+#   - the DB integer surrogate `id`        (e.g. "5")
+#   - the string business key `camera_id`  (e.g. "Cam_03")
+# It's resolved by `_fetch_one_by_any_id_or_404`.
+async def _open_feed(identifier: str, stream: str, db: Session, request: Request) -> CameraFeed:
+    """Shared logic for /feed and /feed/embed.
+
+    Verifies the camera, calls camera-server's /open, returns CameraFeed
+    with absolute hls_url (when CAMERA_FEED_PUBLIC_BASE_URL is set) and
+    a same-origin embed_url for drop-in iframe playback. Raises
+    HTTPException for 404/409/502.
+    """
+    row = _fetch_one_by_any_id_or_404(db, identifier)
+    camera_id = row["camera_id"]
+    if not row.get("enabled"):
+        raise HTTPException(status_code=409, detail=f"Camera '{camera_id}' is disabled")
+
+    try:
+        r = await _camera_server.post(
+            "/spe-camera/api/open",
+            json={"cameraId": camera_id, "stream": stream},
+        )
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Camera server unreachable: {e}")
+
+    if r.status_code != 200:
+        try:
+            detail = r.json()
+        except ValueError:
+            detail = {"error": r.text}
+        raise HTTPException(status_code=502, detail=detail)
+
+    data = r.json()
+    hls_url: str = data["hls"]["url"]
+    base = settings.camera_feed_public_base_url.rstrip("/")
+    if base and hls_url.startswith("/"):
+        hls_url = f"{base}{hls_url}"
+
+    actual_stream = data.get("stream", stream)
+    gateway_origin = f"{request.url.scheme}://{request.url.netloc}"
+    embed_url = f"{gateway_origin}/cameras/{camera_id}/feed/embed?stream={actual_stream}"
+
+    return CameraFeed(
+        camera_id=camera_id,
+        display_name=data.get("displayName") or row.get("name"),
+        stream=actual_stream,
+        session_id=data["sessionId"],
+        hls_url=hls_url,
+        embed_url=embed_url,
+        expires_at=data["expiresAt"],
+    )
+
+
+@router.get("/{identifier}/feed", response_model=CameraFeed)
+async def open_camera_feed(
+    identifier: str,
+    request: Request,
+    stream: str = Query("sub", pattern="^(main|sub)$", description="Stream quality: main (high-res) or sub (lower-res, default)"),
+    db: Session = Depends(get_db),
+):
+    return await _open_feed(identifier, stream, db, request)
+
+
+# Self-contained HTML player. Point a browser tab or <iframe src="..."> at
+# this endpoint directly — the page autoplays, fills the viewport, handles
+# HLS.js + Safari/Edge native, and best-effort closes the session on unload.
+_FEED_EMBED_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__DISPLAY__</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100vh; background: #000; overflow: hidden; }
+  video { width: 100vw; height: 100vh; object-fit: contain; background: #000; display: block; }
+  #status {
+    position: fixed; top: 12px; left: 12px;
+    color: #ccc; font: 13px/1.4 system-ui, -apple-system, sans-serif;
+    background: rgba(0,0,0,.55); padding: 6px 10px; border-radius: 4px;
+    pointer-events: none; transition: opacity .4s; max-width: 60vw;
+  }
+  #status.error { color: #ff8a80; }
+  #status.hidden { opacity: 0; }
+  #playbtn {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    color: #fff; font: 600 18px/1.2 system-ui, -apple-system, sans-serif;
+    background: rgba(255,255,255,.12); padding: 14px 26px; border: 2px solid #fff;
+    border-radius: 6px; cursor: pointer; user-select: none;
+  }
+  #playbtn.hidden { display: none; }
+</style>
+</head>
+<body>
+<video id="v" autoplay muted playsinline controls></video>
+<div id="status">Loading __DISPLAY__…</div>
+<div id="playbtn" class="hidden">▶ Click to play</div>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<script>
+(function() {
+  var HLS_URL = "__HLS_URL__";
+  var SESSION_ID = "__SESSION_ID__";
+  var GATEWAY_ORIGIN = "__GATEWAY_ORIGIN__";
+  var v = document.getElementById('v');
+  var status = document.getElementById('status');
+  var playbtn = document.getElementById('playbtn');
+
+  function setStatus(msg, isError) {
+    status.textContent = msg; status.className = isError ? 'error' : '';
+    status.classList.remove('hidden');
+    console.log('[embed]', isError ? 'ERROR:' : '', msg);
+  }
+  function hideStatusSoon() { setTimeout(function() { status.classList.add('hidden'); }, 1500); }
+  function tryPlay() {
+    var p = v.play();
+    if (p && typeof p.then === 'function') {
+      p.catch(function(err) {
+        console.log('[embed] autoplay rejected:', err && err.message);
+        playbtn.classList.remove('hidden');
+        playbtn.onclick = function() { playbtn.classList.add('hidden'); v.play(); };
+      });
+    }
+  }
+
+  // Try native first (Edge/Safari, some Chrome with HEVC extensions),
+  // fall back to HLS.js+MSE on failure or 4s timeout.
+  function tryNative() {
+    setStatus('Trying native player…');
+    v.src = HLS_URL;
+    var settled = false;
+    var timer = setTimeout(function() {
+      if (settled) return; settled = true;
+      console.log('[embed] native timed out; falling back to HLS.js');
+      tryHlsJs();
+    }, 4000);
+    v.addEventListener('loadeddata', function onLoad() {
+      if (settled) return; settled = true; clearTimeout(timer);
+      v.removeEventListener('loadeddata', onLoad);
+      console.log('[embed] native player ready'); hideStatusSoon(); tryPlay();
+    });
+    v.addEventListener('error', function onErr() {
+      if (settled) return; settled = true; clearTimeout(timer);
+      v.removeEventListener('error', onErr);
+      console.log('[embed] native failed:', v.error && v.error.code, v.error && v.error.message);
+      tryHlsJs();
+    });
+  }
+
+  function tryHlsJs() {
+    if (!window.Hls || !Hls.isSupported()) {
+      setStatus('No HLS support in this browser. Try Edge/Safari, or install HEVC Video Extensions for Chrome.', true);
+      return;
+    }
+    setStatus('Trying HLS.js fallback…');
+    v.removeAttribute('src'); v.load();
+    var hls = new Hls({ liveSyncDurationCount: 3, maxBufferLength: 10, lowLatencyMode: true });
+    hls.loadSource(HLS_URL);
+    hls.attachMedia(v);
+    hls.on(Hls.Events.MANIFEST_PARSED, function() {
+      console.log('[embed] hls.js manifest parsed'); hideStatusSoon(); tryPlay();
+    });
+    hls.on(Hls.Events.ERROR, function(_, d) {
+      console.log('[embed] hls.js error:', d.type, d.details, 'fatal=' + d.fatal);
+      if (!d.fatal) return;
+      if (d.details === 'bufferIncompatibleCodecsError') {
+        setStatus('Browser cannot decode this codec (likely HEVC). Open in Edge/Safari, or install HEVC Video Extensions for Chrome.', true);
+        hls.destroy(); return;
+      }
+      setStatus('Stream error: ' + d.details + ' (' + d.type + ')', true);
+      if (d.type === Hls.ErrorTypes.NETWORK_ERROR) { setTimeout(function(){ hls.startLoad(); }, 2000); }
+      else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) { hls.recoverMediaError(); }
+      else { hls.destroy(); }
+    });
+  }
+
+  tryNative();
+
+  window.addEventListener('beforeunload', function() {
+    try {
+      fetch(GATEWAY_ORIGIN + '/cameras/feeds/' + SESSION_ID, { method: 'DELETE', keepalive: true });
+    } catch (_) {}
+  });
+})();
+</script>
+</body>
+</html>
+"""
+
+
+@router.get("/{identifier}/feed/embed", response_class=HTMLResponse)
+async def open_camera_feed_embed(
+    identifier: str,
+    request: Request,
+    stream: str = Query("sub", pattern="^(main|sub)$"),
+    db: Session = Depends(get_db),
+):
+    feed = await _open_feed(identifier, stream, db, request)
+    gateway_origin = f"{request.url.scheme}://{request.url.netloc}"
+    html = (
+        _FEED_EMBED_HTML
+        .replace("__HLS_URL__", feed.hls_url)
+        .replace("__DISPLAY__", feed.display_name or feed.camera_id)
+        .replace("__SESSION_ID__", feed.session_id)
+        .replace("__GATEWAY_ORIGIN__", gateway_origin)
+    )
+    return HTMLResponse(html)
+
+
+# Close a feed session. Symmetric with the open endpoint so the frontend
+# never has to talk to the camera-server directly.
+@router.delete("/feeds/{session_id}", response_model=CameraFeedClosed)
+async def close_camera_feed(session_id: str):
+    try:
+        r = await _camera_server.post(
+            "/spe-camera/api/close",
+            json={"sessionId": session_id},
+        )
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Camera server unreachable: {e}")
+    if r.status_code == 404:
+        # Session expired or already closed — treat as success from the
+        # caller's perspective, since the desired end state holds.
+        return CameraFeedClosed(session_id=session_id, closed=True)
+    if r.status_code != 200:
+        try:
+            detail = r.json()
+        except ValueError:
+            detail = {"error": r.text}
+        raise HTTPException(status_code=502, detail=detail)
+    return CameraFeedClosed(session_id=session_id, closed=True)
 
 
 # ── Bulk decrypted list for upstream consumers (VideoAnalytics) ───────────────

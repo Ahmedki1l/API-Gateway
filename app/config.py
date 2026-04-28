@@ -21,6 +21,17 @@ class Settings(BaseSettings):
     cameras_encryption_key: str
     cameras_internal_token: str
 
+    # Camera-server (HLS streaming proxy). The Gateway calls
+    # POST {camera_server_url}/spe-camera/api/open from /cameras/{id}/feed
+    # to obtain an HLS URL for a client.
+    camera_server_url: str = "http://localhost:8080"
+
+    # Public-facing base URL prepended to the relative hls_url returned by
+    # camera-server (e.g. "http://localhost:8080" for dev, or your nginx
+    # public origin like "https://smart.damanat.com.sa" for production).
+    # Empty → return relative URLs unchanged.
+    camera_feed_public_base_url: str = ""
+
     camera_monitor_enabled: bool = True
     camera_monitor_interval_seconds: int = 60
     camera_monitor_tcp_timeout_seconds: float = 3.0
