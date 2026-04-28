@@ -630,6 +630,7 @@ class CameraInternalListResponse(BaseModel):
 # camera-server and surfaces only the playable HLS URL + bookkeeping IDs;
 # RTSP credentials and direct camera-server endpoints are never exposed.
 class CameraFeed(BaseModel):
+    id: int
     camera_id: str
     display_name: Optional[str] = None
     stream: str

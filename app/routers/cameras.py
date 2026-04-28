@@ -654,6 +654,7 @@ async def _open_feed(identifier: str, stream: str, db: Session, request: Request
     embed_url = f"{gateway_origin}/cameras/{camera_id}/feed/embed?stream={actual_stream}"
 
     return CameraFeed(
+        id=int(row["id"]),
         camera_id=camera_id,
         display_name=data.get("displayName") or row.get("name"),
         stream=actual_stream,
