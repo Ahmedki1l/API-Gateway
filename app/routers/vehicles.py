@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, Response, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,32 @@ from app.schemas import (
 from app.shared import build_paged, stream_csv
 
 router = APIRouter(prefix="/vehicles", tags=["Vehicles"])
+
+_UNREGISTERED_NOTE_MARKER = "Not registered"
+
+
+def _split_vehicle_note_parts(note: Optional[str]) -> list[str]:
+    if note is None:
+        return []
+    return [
+        part.strip()
+        for part in note.split(",")
+        if part.strip() and part.strip() != _UNREGISTERED_NOTE_MARKER
+    ]
+
+
+def _merge_vehicle_notes(existing_note: Optional[str], incoming_note: Optional[str]) -> Optional[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    for part in [*_split_vehicle_note_parts(existing_note), *_split_vehicle_note_parts(incoming_note)]:
+        key = part.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(part)
+
+    return ", ".join(merged) if merged else None
 
 
 def _fetch_vehicle_list_item(db: Session, vehicle_id: int) -> Optional[dict]:
@@ -153,38 +179,80 @@ def _event_from_row(
 
 # ── POST /vehicles ────────────────────────────────────────────────────────────
 @router.post("/", response_model=VehicleListItem, status_code=201)
-async def create_vehicle(body: VehicleCreate, db: Session = Depends(get_db)):
-    existing = scalar(db,
-        "SELECT COUNT(*) FROM vehicles WHERE plate_number = :p",
-        {"p": body.plate_number})
-    if existing:
-        raise HTTPException(400, f"Plate '{body.plate_number}' is already registered")
+async def create_vehicle(
+    body: VehicleCreate,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    existing_vehicle = rows(
+        db,
+        """
+        SELECT TOP 1 id, notes
+        FROM vehicles
+        WHERE plate_number = :plate
+        ORDER BY id
+        """,
+        {"plate": body.plate_number},
+    )
 
-    db.execute(text("""
-        INSERT INTO vehicles
-            (plate_number, owner_name, employee_id, vehicle_type, title, is_employee, phone, email, notes, is_registered, registered_at)
-        VALUES
-            (:plate, :owner, :emp_id, :vtype, :title, :is_employee, :phone, :email, :notes, 1, GETDATE())
-    """), {
-        "plate":  body.plate_number,
-        "owner":  body.owner_name,
-        "emp_id": body.employee_id,
-        "vtype":  body.vehicle_type,
-        "title":  body.title,
-        "is_employee": body.is_employee,
-        "phone":  body.phone,
-        "email":  body.email,
-        "notes":  body.notes,
-    })
+    vehicle_id: Optional[int] = None
+    if existing_vehicle:
+        vehicle_id = existing_vehicle[0]["id"]
+        merged_notes = _merge_vehicle_notes(existing_vehicle[0].get("notes"), body.notes)
+
+        db.execute(text("""
+            UPDATE vehicles
+            SET owner_name = :owner,
+                employee_id = :emp_id,
+                vehicle_type = :vtype,
+                title = :title,
+                is_employee = :is_employee,
+                phone = :phone,
+                email = :email,
+                notes = :notes,
+                is_registered = 1,
+                registered_at = GETDATE()
+            WHERE id = :vehicle_id
+        """), {
+            "vehicle_id": vehicle_id,
+            "owner": body.owner_name,
+            "emp_id": body.employee_id,
+            "vtype": body.vehicle_type,
+            "title": body.title,
+            "is_employee": body.is_employee,
+            "phone": body.phone,
+            "email": body.email,
+            "notes": merged_notes,
+        })
+        response.status_code = status.HTTP_200_OK
+    else:
+        db.execute(text("""
+            INSERT INTO vehicles
+                (plate_number, owner_name, employee_id, vehicle_type, title, is_employee, phone, email, notes, is_registered, registered_at)
+            VALUES
+                (:plate, :owner, :emp_id, :vtype, :title, :is_employee, :phone, :email, :notes, 1, GETDATE())
+        """), {
+            "plate":  body.plate_number,
+            "owner":  body.owner_name,
+            "emp_id": body.employee_id,
+            "vtype":  body.vehicle_type,
+            "title":  body.title,
+            "is_employee": body.is_employee,
+            "phone":  body.phone,
+            "email":  body.email,
+            "notes":  body.notes,
+        })
+        response.status_code = status.HTTP_201_CREATED
     db.commit()
 
-    new_id = scalar(db, "SELECT id FROM vehicles WHERE plate_number = :p", {"p": body.plate_number})
-    if new_id is None:
+    if vehicle_id is None:
+        vehicle_id = scalar(db, "SELECT id FROM vehicles WHERE plate_number = :p", {"p": body.plate_number})
+    if vehicle_id is None:
         # Should never happen — INSERT just succeeded — but raise a clean error.
-        raise HTTPException(500, "Vehicle inserted but could not be re-read")
-    item = _fetch_vehicle_list_item(db, new_id)
+        raise HTTPException(500, "Vehicle saved but could not be re-read")
+    item = _fetch_vehicle_list_item(db, vehicle_id)
     if item is None:
-        raise HTTPException(500, "Vehicle inserted but could not be re-read")
+        raise HTTPException(500, "Vehicle saved but could not be re-read")
     return item
 
 
