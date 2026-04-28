@@ -4,11 +4,23 @@ Covers: entry_exit_log, parking_sessions, slot_status, alerts.
 
 Run: .venv/bin/python scratch/simulate_demo.py
 """
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
 import pymssql
 import random
 from datetime import datetime, timedelta
+from app.config import settings
 
-conn = pymssql.connect(server='localhost', port=1433, user='sa', password='YourStrong!Pass1', database='damanat_pms')
+conn = pymssql.connect(
+    server=settings.db_server,
+    port=settings.db_port,
+    user=settings.db_user,
+    password=settings.db_password,
+    database=settings.db_name,
+)
 cursor = conn.cursor(as_dict=True)
 
 NOW = datetime.utcnow()
