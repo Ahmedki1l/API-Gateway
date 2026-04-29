@@ -630,6 +630,20 @@ async def get_alert(alert_id: int, db: Session = Depends(get_db)):
         """, {"sid": a["slot_id"]})
         if slot_rows:
             s = slot_rows[0]
+            # parking_slots.polygon is stored as a JSON-encoded string (NVARCHAR);
+            # SlotRef.polygon expects list[...] | None.  Parse defensively.
+            raw_polygon = s.get("polygon")
+            if isinstance(raw_polygon, str):
+                try:
+                    parsed_polygon = json.loads(raw_polygon)
+                    if not isinstance(parsed_polygon, list):
+                        parsed_polygon = None
+                except (ValueError, TypeError):
+                    parsed_polygon = None
+            elif isinstance(raw_polygon, list):
+                parsed_polygon = raw_polygon
+            else:
+                parsed_polygon = None
             slot = SlotRef(
                 id=s.get("id"),
                 slot_id=s["slot_id"],
@@ -638,7 +652,7 @@ async def get_alert(alert_id: int, db: Session = Depends(get_db)):
                 floor_id=s.get("floor_id"),
                 is_available=bool(s.get("is_available")) if s.get("is_available") is not None else True,
                 is_violation_slot=bool(s.get("is_violation_zone")) if s.get("is_violation_zone") is not None else False,
-                polygon=s.get("polygon"),
+                polygon=parsed_polygon,
             )
 
     camera = None
