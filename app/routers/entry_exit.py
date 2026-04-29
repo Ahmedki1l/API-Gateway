@@ -240,18 +240,22 @@ async def traffic_chart(
             }
             for i in range(24)
         ]
-        # DATEDIFF(HOUR, start_utc, event_time) gives 0-23. event_time is UTC,
-        # start_utc is UTC — no offset shift needed inside DATEDIFF.
         sql = """
             SELECT
-                DATEDIFF(HOUR, :start_utc, event_time)                  AS bucket_idx,
-                SUM(CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END) AS entries,
-                SUM(CASE WHEN gate LIKE '%exit%'  OR gate LIKE '%out%' THEN 1 ELSE 0 END) AS exits
-            FROM entry_exit_log
-            WHERE event_time >= :start_utc
-              AND event_time <  :end_utc
-              AND is_test = 0
-            GROUP BY DATEDIFF(HOUR, :start_utc, event_time)
+                bucket_idx,
+                SUM(is_entry) AS entries,
+                SUM(is_exit)  AS exits
+            FROM (
+                SELECT
+                    DATEDIFF(HOUR, :start_utc, event_time) AS bucket_idx,
+                    CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END AS is_entry,
+                    CASE WHEN gate LIKE '%exit%'  OR gate LIKE '%out%' THEN 1 ELSE 0 END AS is_exit
+                FROM entry_exit_log
+                WHERE event_time >= :start_utc
+                  AND event_time <  :end_utc
+                  AND is_test = 0
+            ) AS t
+            GROUP BY bucket_idx
         """
         params = {"start_utc": window_start_utc, "end_utc": window_end_utc}
 
@@ -277,14 +281,20 @@ async def traffic_chart(
         # Shift events into facility-local before bucketing by day.
         sql = """
             SELECT
-                DATEDIFF(DAY, :start_local_date, DATEADD(MINUTE, :offset_min, event_time)) AS bucket_idx,
-                SUM(CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END) AS entries,
-                SUM(CASE WHEN gate LIKE '%exit%'  OR gate LIKE '%out%' THEN 1 ELSE 0 END) AS exits
-            FROM entry_exit_log
-            WHERE event_time >= :start_utc
-              AND event_time <  :end_utc
-              AND is_test = 0
-            GROUP BY DATEDIFF(DAY, :start_local_date, DATEADD(MINUTE, :offset_min, event_time))
+                bucket_idx,
+                SUM(is_entry) AS entries,
+                SUM(is_exit)  AS exits
+            FROM (
+                SELECT
+                    DATEDIFF(DAY, :start_local_date, DATEADD(MINUTE, :offset_min, event_time)) AS bucket_idx,
+                    CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END AS is_entry,
+                    CASE WHEN gate LIKE '%exit%'  OR gate LIKE '%out%' THEN 1 ELSE 0 END AS is_exit
+                FROM entry_exit_log
+                WHERE event_time >= :start_utc
+                  AND event_time <  :end_utc
+                  AND is_test = 0
+            ) AS t
+            GROUP BY bucket_idx
         """
         params = {
             "start_local_date": window_start_local.date(),
@@ -315,14 +325,20 @@ async def traffic_chart(
         ]
         sql = """
             SELECT
-                DATEDIFF(DAY, :start_local_date, DATEADD(MINUTE, :offset_min, event_time)) AS bucket_idx,
-                SUM(CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END) AS entries,
-                SUM(CASE WHEN gate LIKE '%exit%'  OR gate LIKE '%out%' THEN 1 ELSE 0 END) AS exits
-            FROM entry_exit_log
-            WHERE event_time >= :start_utc
-              AND event_time <  :end_utc
-              AND is_test = 0
-            GROUP BY DATEDIFF(DAY, :start_local_date, DATEADD(MINUTE, :offset_min, event_time))
+                bucket_idx,
+                SUM(is_entry) AS entries,
+                SUM(is_exit)  AS exits
+            FROM (
+                SELECT
+                    DATEDIFF(DAY, :start_local_date, DATEADD(MINUTE, :offset_min, event_time)) AS bucket_idx,
+                    CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END AS is_entry,
+                    CASE WHEN gate LIKE '%exit%'  OR gate LIKE '%out%' THEN 1 ELSE 0 END AS is_exit
+                FROM entry_exit_log
+                WHERE event_time >= :start_utc
+                  AND event_time <  :end_utc
+                  AND is_test = 0
+            ) AS t
+            GROUP BY bucket_idx
         """
         params = {
             "start_local_date": window_start_local.date(),
@@ -331,6 +347,7 @@ async def traffic_chart(
             "end_utc": window_end_utc,
         }
 
+    print(f"DEBUG: traffic_chart SQL: {sql}")
     db_results = rows(db, sql, params)
     for row in db_results:
         idx = row["bucket_idx"]
