@@ -45,8 +45,10 @@ class Settings(BaseSettings):
     # exists, /snapshots is exposed as a StaticFiles mount and DTO snapshot_url
     # values are rewritten from `detection_images/foo.jpg` → `/snapshots/foo.jpg`.
     snapshots_local_dir: str = "/app/detection_images"
-    # Optional absolute origin prefix for snapshot URLs; empty → same-origin.
-    snapshots_public_base: str = ""
+    # Origin prefix for snapshot URLs. Defaults to the gateway's dev origin so
+    # `resolve_snapshot_url` always emits a fully-qualified URL; override in
+    # production with the gateway's externally-reachable origin.
+    snapshots_public_base: str = "http://localhost:8001"
 
     @property
     def db_connection_string(self) -> str:
