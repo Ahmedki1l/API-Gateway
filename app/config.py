@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     # Empty → return relative URLs unchanged.
     camera_feed_public_base_url: str = ""
 
+    # Optional path prefix inserted between the gateway origin and its route
+    # paths in externally-facing URLs (embed links, etc.).  Useful when the
+    # gateway sits behind a reverse proxy that strips a prefix, e.g.
+    # GATEWAY_PATH_PREFIX=/api  →  https://host/api/cameras/{id}/feed/embed
+    # Empty string (default) means no prefix.
+    gateway_path_prefix: str = ""
+
     camera_monitor_enabled: bool = True
     camera_monitor_interval_seconds: int = 60
     camera_monitor_tcp_timeout_seconds: float = 3.0
