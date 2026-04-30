@@ -18,12 +18,18 @@ Idempotent:
     pass --update-existing to overwrite metadata.
 
 Password handling:
-  - Default: `password_encrypted` is copied as the opaque Fernet token.
-    The target gateway must hold the same `CAMERAS_ENCRYPTION_KEY` as
-    the source DB to decrypt it. If keys differ, the ciphertexts will
-    be valid Fernet tokens that simply fail to decrypt at runtime —
-    rerun with --reset-passwords or set them via the credential API.
-  - --reset-passwords inserts NULL into password_encrypted.
+  - 14 of the 16 cameras have ciphertexts encrypted with the current
+    `CAMERAS_ENCRYPTION_KEY`; those decrypt cleanly on any gateway
+    sharing that key (i.e. the prod pod).
+  - `ANPR-Entry` and `ANPR-Exit` were encrypted with an older key
+    that nobody has anymore, so their `password_encrypted` is set to
+    NULL in this seed. After running this script, set their real
+    passwords with:
+
+        PATCH /cameras/{id}/credentials   {"password": "..."}
+
+  - --reset-passwords inserts NULL into ALL password_encrypted columns
+    (use this if the target's key has been rotated to something else).
 """
 from __future__ import annotations
 
@@ -64,7 +70,9 @@ CAMERAS: list[dict[str, Any]] = [
         'rtsp_port': 554,
         'rtsp_path': '/Streaming/Channels/101',
         'username': 'kloudspot',
-        'password_encrypted': 'gAAAAABp6fG_8xKy6gcai-WzQ6_kf80AvCqmnwOJ2oDFJ7Aq_kAIXcs_gaTYHWoECpzWfmoEuNM2fpn3pyDzSF5w5E7lcTHXRw==',
+        # Encrypted with an older key. Set the real password after seeding via
+        # PATCH /cameras/{id}/credentials (id = the new row's int PK).
+        'password_encrypted': None,
         'enabled': True,
         'notes': 'string',
     },
@@ -80,7 +88,9 @@ CAMERAS: list[dict[str, Any]] = [
         'rtsp_port': 554,
         'rtsp_path': '/Streaming/Channels/101',
         'username': 'kloudspot1',
-        'password_encrypted': 'gAAAAABp6fIGrXXkRo3nz-Yhm1IexonNM734GyEgDtrvDAY8p52FyETJt3BEwUWrfxd9ivggeG7J3-_lKInyVg95uvnLQCerFg==',
+        # Encrypted with an older key. Set the real password after seeding via
+        # PATCH /cameras/{id}/credentials (id = the new row's int PK).
+        'password_encrypted': None,
         'enabled': True,
         'notes': 'string',
     },
@@ -487,10 +497,12 @@ def main() -> int:
                     action = "would-insert"
 
             cam_summary[action] = cam_summary.get(action, 0) + 1
-            pwd_marker = (
-                "RESET" if args.reset_passwords else
-                "(same)" if cam.get("password_encrypted") else "(none)"
-            )
+            if args.reset_passwords:
+                pwd_marker = "RESET"
+            elif cam.get("password_encrypted"):
+                pwd_marker = "(same)"
+            else:
+                pwd_marker = "NULL (set via API)"
             print(
                 f"{cam['camera_id']:<14} {action:<14} {(floor_name or '-'):<8} "
                 f"{(cam.get('ip_address') or ''):<16} {cam['role']:<14} {pwd_marker}"

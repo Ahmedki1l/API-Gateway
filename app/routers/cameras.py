@@ -651,7 +651,9 @@ async def _open_feed(identifier: str, stream: str, db: Session, request: Request
 
     actual_stream = data.get("stream", stream)
     gateway_origin = f"{request.url.scheme}://{request.url.netloc}"
-    embed_url = f"{gateway_origin}/cameras/{camera_id}/feed/embed?stream={actual_stream}"
+    prefix = settings.gateway_path_prefix.strip("/")
+    path_prefix = f"/{prefix}" if prefix else ""
+    embed_url = f"{gateway_origin}{path_prefix}/cameras/{camera_id}/feed/embed?stream={actual_stream}"
 
     return CameraFeed(
         id=int(row["id"]),
