@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     snapshots_local_dir: str = "/app/detection_images"
     # Optional absolute origin prefix for snapshot URLs; empty → same-origin.
     snapshots_public_base: str = ""
+    # System 2 (VideoAnalytics) direct snapshot base URL.
+    system2_snapshots_public_base: str = ""
 
     @property
     def db_connection_string(self) -> str:
