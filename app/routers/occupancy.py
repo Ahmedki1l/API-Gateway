@@ -70,13 +70,14 @@ async def occupancy_kpis(db: Session = Depends(get_db)):
     (line-crossing) vs `/occupancy/floors[*].slot_occupancy_count` (slot-status)
     per floor to surface drift; the kpi headline no longer reflects that
     disagreement."""
-    total_spots = scalar(db, "SELECT COUNT(*) FROM parking_slots") or 0
+    total_spots = scalar(db, "SELECT COUNT(*) FROM parking_slots WHERE slot_type NOT IN ('special_zone', 'roi')") or 0
 
     # Same SQL as /occupancy/totals (slot-status, latest row per slot).
     occupied_spots = scalar(db, f"""
         SELECT COUNT(*) FROM parking_slots pk
         {_LATEST_STATUS_JOIN}
-        WHERE ss.status IS NOT NULL
+        WHERE pk.slot_type NOT IN ('special_zone', 'roi')
+          AND ss.status IS NOT NULL
           AND ss.status NOT IN ('empty', 'available', 'free', 'VACANT')
     """) or 0
 
@@ -125,6 +126,7 @@ async def get_zones(
             """
             SELECT f.name AS floor_name, COUNT(*) AS cnt
             FROM parking_slots ps JOIN floors f ON f.id = ps.floor_id
+            WHERE ps.slot_type NOT IN ('special_zone', 'roi')
             GROUP BY f.name
             """,
         )
@@ -136,6 +138,7 @@ async def get_zones(
             SELECT ps.floor AS floor_name, COUNT(*) AS cnt
             FROM parking_slots ps
             WHERE ps.floor IS NOT NULL
+              AND ps.slot_type NOT IN ('special_zone', 'roi')
             GROUP BY ps.floor
             """,
         )
@@ -288,7 +291,7 @@ async def get_slots(
         clauses.append("ps.is_violation_zone = :is_vz")
         params["is_vz"] = 1 if is_violation_zone else 0
 
-    where = " AND ".join(clauses)
+    where = " AND ".join(clauses) + " AND ps.slot_type NOT IN ('special_zone', 'roi')"
     total = scalar(db, f"SELECT COUNT(*) FROM parking_slots ps WHERE {where}", params)
 
     params["offset"]    = (page - 1) * page_size
@@ -357,7 +360,7 @@ async def export_occupancy_csv(
     # =========================
     # 1. KPI Section
     # =========================
-    total_spots = scalar(db, "SELECT COUNT(*) FROM parking_slots")
+    total_spots = scalar(db, "SELECT COUNT(*) FROM parking_slots WHERE slot_type NOT IN ('special_zone', 'roi')")
 
     occupied = scalar(db, """
         SELECT COUNT(DISTINCT ss.slot_id)
@@ -369,7 +372,9 @@ async def export_occupancy_csv(
         ) latest_ss
         ON latest_ss.slot_id = ss.slot_id
         AND latest_ss.latest = ss.time
-        WHERE ss.status NOT IN ('empty', 'available', 'free')
+        INNER JOIN parking_slots pk ON pk.slot_id = ss.slot_id
+        WHERE pk.slot_type NOT IN ('special_zone', 'roi')
+          AND ss.status NOT IN ('empty', 'available', 'free')
     """) or 0
 
     available = max((total_spots or 0) - occupied, 0)
@@ -388,6 +393,7 @@ async def export_occupancy_csv(
     floor_rows = rows(db, """
         SELECT DISTINCT floor FROM parking_slots
         WHERE floor IS NOT NULL
+          AND slot_type NOT IN ('special_zone', 'roi')
         ORDER BY floor
     """)
     floors = [r["floor"] for r in floor_rows if not floor or r["floor"] == floor]
@@ -434,7 +440,7 @@ async def export_occupancy_csv(
         )
         slot_params["search"] = f"%{search}%"
 
-    slot_where = " AND ".join(slot_clauses)
+    slot_where = " AND ".join(slot_clauses) + " AND ps.slot_type NOT IN ('special_zone', 'roi')"
 
     slots = rows(db, f"""
         SELECT
@@ -514,12 +520,12 @@ def _build_floor_occupancy(
     # else fall back to the legacy string `floor` column.
     if schema["parking_slots_floor_id"] and resolved_floor_id is not None:
         max_capacity = scalar(
-            db, "SELECT COUNT(*) FROM parking_slots WHERE floor_id = :fid",
+            db, "SELECT COUNT(*) FROM parking_slots WHERE floor_id = :fid AND slot_type NOT IN ('special_zone', 'roi')",
             {"fid": resolved_floor_id},
         ) or 0
     else:
         max_capacity = scalar(
-            db, "SELECT COUNT(*) FROM parking_slots WHERE floor = :f",
+            db, "SELECT COUNT(*) FROM parking_slots WHERE floor = :f AND slot_type NOT IN ('special_zone', 'roi')",
             {"f": floor},
         ) or 0
 
@@ -530,6 +536,7 @@ def _build_floor_occupancy(
             FROM parking_slots pk
             {_LATEST_STATUS_JOIN}
             WHERE pk.floor_id = :fid
+              AND pk.slot_type NOT IN ('special_zone', 'roi')
         """, {"fid": resolved_floor_id})
     else:
         slot_rows = rows(db, f"""
@@ -537,6 +544,7 @@ def _build_floor_occupancy(
             FROM parking_slots pk
             {_LATEST_STATUS_JOIN}
             WHERE pk.floor = :f
+              AND pk.slot_type NOT IN ('special_zone', 'roi')
         """, {"f": floor})
     slot_occupancy_count = sum(1 for r in slot_rows if _is_occupied(r.get("status")))
 
@@ -639,13 +647,14 @@ async def get_floors(
 @router.get("/totals", response_model=OccupancyTotals)
 async def get_occupancy_totals(db: Session = Depends(get_db)):
     """Garage-wide rollup — replaces the synthetic GARAGE-TOTAL zone_occupancy row."""
-    total_slots = scalar(db, "SELECT COUNT(*) FROM parking_slots") or 0
+    total_slots = scalar(db, "SELECT COUNT(*) FROM parking_slots WHERE slot_type NOT IN ('special_zone', 'roi')") or 0
 
     # occupied_slots = distinct slots with a non-vacant latest status
     occupied_slots = scalar(db, f"""
         SELECT COUNT(*) FROM parking_slots pk
         {_LATEST_STATUS_JOIN}
-        WHERE ss.status IS NOT NULL
+        WHERE pk.slot_type NOT IN ('special_zone', 'roi')
+          AND ss.status IS NOT NULL
           AND ss.status NOT IN ('empty', 'available', 'free', 'VACANT')
     """) or 0
 
@@ -703,7 +712,7 @@ async def get_slots_by_floor(
     elif floor:
         clauses.append("pk.floor = :floor")
         params["floor"] = floor
-    where = " AND ".join(clauses)
+    where = " AND ".join(clauses) + " AND pk.slot_type NOT IN ('special_zone', 'roi')"
 
     # WS-8: surface pk.id and pk.floor_id alongside legacy keys (NULL fallback).
     # COALESCE pk.floor_id with a name-based lookup so the response always
