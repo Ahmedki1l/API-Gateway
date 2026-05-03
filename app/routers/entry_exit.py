@@ -241,7 +241,7 @@ async def traffic_chart(
             for i in range(24)
         ]
         
-        # We shift event_time into local time using DATEADD before calculating the bucket index
+        # Hybrid query handles transition from Local to UTC storage
         sql = """
             SELECT
                 bucket_idx,
@@ -249,12 +249,17 @@ async def traffic_chart(
                 SUM(is_exit)  AS exits
             FROM (
                 SELECT
-                    DATEDIFF(HOUR, :start_local, DATEADD(MINUTE, :offset_min, event_time)) AS bucket_idx,
+                    DATEDIFF(HOUR, :start_local, 
+                        CASE 
+                            WHEN event_time >= :start_local THEN event_time 
+                            ELSE DATEADD(MINUTE, :offset_min, event_time) 
+                        END
+                    ) AS bucket_idx,
                     CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END AS is_entry,
                     CASE WHEN gate LIKE '%exit%'  OR gate LIKE '%out%' THEN 1 ELSE 0 END AS is_exit
                 FROM entry_exit_log
-                WHERE event_time >= :start_utc
-                  AND event_time <  :end_utc
+                WHERE ((event_time >= :start_utc AND event_time < :end_utc)
+                   OR (event_time >= :start_local AND event_time < :end_local))
                   AND is_test = 0
             ) AS t
             WHERE bucket_idx >= 0 AND bucket_idx < 24
@@ -262,6 +267,7 @@ async def traffic_chart(
         """
         params = {
             "start_local": window_start_local.replace(tzinfo=None),
+            "end_local": window_end_local.replace(tzinfo=None),
             "start_utc": window_start_utc.replace(tzinfo=None), 
             "end_utc": window_end_utc.replace(tzinfo=None),
             "offset_min": offset_minutes
