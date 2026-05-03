@@ -21,8 +21,8 @@ import httpx
 
 from app.config import settings
 
-_system1 = httpx.AsyncClient(base_url=settings.system1_base_url, timeout=10.0)
-_system2 = httpx.AsyncClient(base_url=settings.system2_base_url, timeout=10.0)
+_system1 = httpx.AsyncClient(base_url=settings.system1_base_url, timeout=30.0)
+_system2 = httpx.AsyncClient(base_url=settings.system2_base_url, timeout=30.0)
 SSE_TIMEOUT = httpx.Timeout(10.0, read=None)
 
 
