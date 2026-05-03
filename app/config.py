@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     camera_monitor_concurrency: int = 20
 
     # Facility-local clock offset from UTC, applied to "today" / "since-local-midnight" computations.
-    facility_timezone_offset_hours: float = 2.0
+    facility_timezone_offset_hours: float = 3.0
 
     # Where the PMS-AI snapshot files appear inside the gateway container.
     # Mount the same volume PMS-AI writes to (read-only). When the directory

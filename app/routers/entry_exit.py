@@ -221,17 +221,17 @@ async def traffic_chart(
     local_tz = facility_tz()
 
     if period == "daily":
-        # 24 hourly buckets, anchored on the current local hour. The window
-        # ends at `current_hour + 1h` (exclusive) and starts 24h earlier.
+        # 24 hourly buckets, anchored on the current local hour.
         now_local = datetime.now(local_tz)
         current_hour_local = now_local.replace(minute=0, second=0, microsecond=0)
         window_start_local = current_hour_local - timedelta(hours=23)
         window_end_local   = current_hour_local + timedelta(hours=1)
+        
+        # We query using UTC boundaries for performance, but bucket using local time
+        # to ensure the labels match what the user expects.
         window_start_utc = window_start_local.astimezone(timezone.utc)
         window_end_utc   = window_end_local.astimezone(timezone.utc)
 
-        # Each hour-of-day appears exactly once in a rolling 24-hour window,
-        # so the bare "HH:00" label is unambiguous.
         full_labels: list[dict] = [
             {
                 "label": (window_start_local + timedelta(hours=i)).strftime("%H:00"),
@@ -240,6 +240,8 @@ async def traffic_chart(
             }
             for i in range(24)
         ]
+        
+        # We shift event_time into local time using DATEADD before calculating the bucket index
         sql = """
             SELECT
                 bucket_idx,
@@ -247,7 +249,7 @@ async def traffic_chart(
                 SUM(is_exit)  AS exits
             FROM (
                 SELECT
-                    DATEDIFF(HOUR, :start_utc, event_time) AS bucket_idx,
+                    DATEDIFF(HOUR, :start_local, DATEADD(MINUTE, :offset_min, event_time)) AS bucket_idx,
                     CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END AS is_entry,
                     CASE WHEN gate LIKE '%exit%'  OR gate LIKE '%out%' THEN 1 ELSE 0 END AS is_exit
                 FROM entry_exit_log
@@ -255,9 +257,15 @@ async def traffic_chart(
                   AND event_time <  :end_utc
                   AND is_test = 0
             ) AS t
+            WHERE bucket_idx >= 0 AND bucket_idx < 24
             GROUP BY bucket_idx
         """
-        params = {"start_utc": window_start_utc, "end_utc": window_end_utc}
+        params = {
+            "start_local": window_start_local.replace(tzinfo=None),
+            "start_utc": window_start_utc.replace(tzinfo=None), 
+            "end_utc": window_end_utc.replace(tzinfo=None),
+            "offset_min": offset_minutes
+        }
 
     elif period == "weekly":
         # 7 daily buckets in facility-local time: today-6, …, today.
