@@ -453,10 +453,14 @@ def va_write_slot_status(
             conn.rollback()
             return False
         # 2. Append a new slot_status row (VA appends, never updates).
+        # The DB convention (since 2026-05-07) is naive facility-local; bind
+        # a Python datetime instead of MSSQL's ? so the row
+        # carries operator wall-clock time, not UTC.
+        now_naive = dt.datetime.now(_FACILITY_TZ).replace(tzinfo=None)
         cur.execute(
             "INSERT INTO slot_status (slot_id, plate_number, status, time) "
-            "VALUES (?, ?, ?, SYSUTCDATETIME())",
-            slot_id, plate, status_value,
+            "VALUES (?, ?, ?, ?)",
+            slot_id, plate, status_value, now_naive,
         )
         # 3. Read slot metadata so we can faithfully mirror alert_service.report_alert.
         cur.execute(
@@ -479,7 +483,7 @@ def va_write_slot_status(
                 )
                 if cur.fetchone() is None:
                     if snapshot_path is None:
-                        ts = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                        ts = now_naive.strftime("%Y%m%d_%H%M%S")
                         snapshot_path = (
                             f"alerts/test_vehicle_intrusion_{slot_id}_{camera_id}_{ts}.jpg"
                         )
@@ -491,21 +495,22 @@ def va_write_slot_status(
                            plate_number, severity)
                         VALUES
                           ('vehicle_intrusion', ?, ?, ?, ?, 'vehicle_detected',
-                           ?, ?, ?, 0, SYSUTCDATETIME(),
+                           ?, ?, ?, 0, ?,
                            ?, 'critical')
                         """,
                         camera_id, zone_id, zone_name, slot_id,
                         slot_label,
                         f"Unauthorized vehicle detected in {slot_label}",
                         snapshot_path,
+                        now_naive,
                         plate,
                     )
             elif not is_parked:
                 # Resolve any open alerts on this slot — mirrors alert_service.resolve_alert.
                 cur.execute(
-                    "UPDATE alerts SET is_resolved = 1, resolved_at = SYSUTCDATETIME() "
+                    "UPDATE alerts SET is_resolved = 1, resolved_at = ? "
                     "WHERE slot_id = ? AND is_resolved = 0",
-                    slot_id,
+                    now_naive, slot_id,
                 )
         conn.commit()
         return True

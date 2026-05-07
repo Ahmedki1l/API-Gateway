@@ -99,16 +99,28 @@ settings = Settings()
 def facility_tz() -> timezone:
     """The local timezone for "today"-style date math. Configurable via
     FACILITY_TIMEZONE_OFFSET_HOURS env var (default 3.0 = UTC+3, Saudi Arabia /
-    Riyadh — no DST). DB columns are stored as UTC-naive; this offset only
-    affects boundary calculations like "since local midnight today". Both the
-    Gateway and PMS-AI must run with the same value to keep "today" windows
-    aligned across services."""
+    Riyadh — no DST). The DB convention (since 2026-05-07) is naive
+    facility-local — every writer stores the operator's wall clock, not UTC.
+    Both the Gateway and PMS-AI must run with the same value to keep "today"
+    windows aligned across services."""
     return timezone(timedelta(hours=settings.facility_timezone_offset_hours))
 
 
+def facility_now_naive() -> datetime:
+    """Current facility-local datetime, NAIVE (no tzinfo). Drop-in replacement
+    for `datetime.utcnow()` / `datetime.now(UTC)` at every DB-write call site.
+    Works regardless of host OS / container TZ — `datetime.now()` alone gives
+    UTC on K8s pods running with TZ=UTC and silently lands rows 3h behind."""
+    return datetime.now(facility_tz()).replace(tzinfo=None)
+
+
 def facility_today_utc() -> datetime:
-    """UTC instant of facility-local midnight today. Use this when filtering
-    SQL columns stored in UTC to "since local midnight today"."""
+    """[name kept for back-compat; semantics shifted 2026-05-07]
+    Naive facility-local datetime of midnight today. Use this when filtering
+    SQL columns (now stored facility-local-naive) for "since local midnight
+    today". Returns naive — drop the tzinfo so it compares against naive
+    DB values without raising mixed-tz comparison errors. Despite the name,
+    no UTC is involved anymore."""
     now_local = datetime.now(facility_tz())
     midnight_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    return midnight_local.astimezone(timezone.utc)
+    return midnight_local.replace(tzinfo=None)
