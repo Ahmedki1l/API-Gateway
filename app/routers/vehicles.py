@@ -66,6 +66,14 @@ def _fetch_vehicle_list_item(db: Session, vehicle_id: int) -> Optional[dict]:
     # Pre-WS-8 DB tolerance: when ps.floor_id doesn't exist yet, emit NULL.
     ps_floor_id_col   = "floor_id" if schema["parking_sessions_floor_id"] else "NULL AS floor_id"
     ps_outer_floor_id = "ps.floor_id" if schema["parking_sessions_floor_id"] else "NULL"
+    # Prefer v.floor / v.floor_id (the canonical "where is the car right
+    # now" answer) and fall back to the parking_sessions JOIN for legacy
+    # DBs without the new vehicles columns.
+    floor_expr = "COALESCE(v.floor, ps.floor)" if cols["v_floor"] else "ps.floor"
+    floor_id_expr = (
+        f"COALESCE(v.floor_id, {ps_outer_floor_id})"
+        if cols["v_floor_id"] else f"{ps_outer_floor_id}"
+    )
     result = rows(db, f"""
         SELECT
             v.id,
@@ -80,8 +88,8 @@ def _fetch_vehicle_list_item(db: Session, vehicle_id: int) -> Optional[dict]:
             {extra},
             ps.parked_at,
             ps.status      AS parking_status,
-            ps.floor,
-            {ps_outer_floor_id} AS floor_id
+            {floor_expr}    AS floor,
+            {floor_id_expr} AS floor_id
         FROM vehicles v
         LEFT JOIN (
             SELECT
@@ -108,9 +116,18 @@ def _vehicle_extra_cols(db: Session) -> dict:
         """, {"c": col})
         return (n or 0) > 0
     return {
-        "is_employee": exists("is_employee"),
-        "phone":       exists("phone"),
-        "email":       exists("email"),
+        "is_employee":     exists("is_employee"),
+        "phone":           exists("phone"),
+        "email":           exists("email"),
+        # current_slot_id is added by PMS-AI's alembic migration
+        # c1d2e3f4a5b6_vehicles_add_current_slot_id; keep an INFORMATION_SCHEMA
+        # probe so the Gateway tolerates DBs where that migration hasn't run.
+        "current_slot_id": exists("current_slot_id"),
+        # vehicles.floor / floor_id added by migrate_vehicles_add_floor_last_seen.sql.
+        # VA writes them on every track confirmation; PMS-AI bind_slot/close_session
+        # keep them synced. Probe so older DBs without the migration still serve responses.
+        "v_floor":         exists("floor"),
+        "v_floor_id":      exists("floor_id"),
     }
 
 
@@ -349,12 +366,25 @@ async def get_vehicles(
     ps_floor_id_col   = "floor_id" if schema["parking_sessions_floor_id"] else "NULL AS floor_id"
     ps_outer_floor_id = "ps.floor_id" if schema["parking_sessions_floor_id"] else "NULL"
 
+    # current_slot_id is added by PMS-AI's alembic migration; the JOIN to
+    # parking_slots lets us surface a human-readable slot name without an
+    # extra round-trip. When the column doesn't exist, emit NULL and skip the JOIN.
+    if cols["current_slot_id"]:
+        slot_join   = "LEFT JOIN dbo.parking_slots cs ON cs.slot_id = v.current_slot_id"
+        slot_select = "v.current_slot_id, cs.slot_name AS current_slot_name"
+    else:
+        slot_join   = ""
+        slot_select = "NULL AS current_slot_id, NULL AS current_slot_name"
+
     # Shared FROM/JOIN — used by both COUNT and SELECT so they stay consistent.
+    # The `ps` subquery pulls the latest open parking_sessions row per plate
+    # plus the columns needed to build a `VehicleEvent` for `current_event`.
     base_from = f"""
         FROM all_plates ap
         LEFT JOIN dbo.vehicles v ON v.plate_number = ap.plate_number
         LEFT JOIN (
             SELECT
+                id,
                 plate_number,
                 parked_at,
                 status,
@@ -362,10 +392,24 @@ async def get_vehicles(
                 {ps_floor_id_col},
                 vehicle_type,
                 is_employee,
+                entry_time,
+                exit_time,
+                slot_id,
+                slot_number,
+                slot_left_at,
+                entry_camera_id,
+                exit_camera_id,
+                entry_snapshot_path,
+                exit_snapshot_path,
+                slot_camera_id,
+                slot_snapshot_path,
+                duration_seconds,
                 ROW_NUMBER() OVER (PARTITION BY plate_number ORDER BY entry_time DESC) AS rn
             FROM dbo.parking_sessions
             WHERE status = 'open'
         ) ps ON ps.plate_number = ap.plate_number AND ps.rn = 1
+        LEFT JOIN dbo.parking_slots pk ON pk.slot_id = ps.slot_id
+        {slot_join}
     """
 
     total = scalar(
@@ -381,6 +425,18 @@ async def get_vehicles(
         (", v.is_employee" if cols["is_employee"] else ", NULL AS is_employee") +
         (", v.phone"       if cols["phone"]       else ", NULL AS phone")       +
         (", v.email"       if cols["email"]       else ", NULL AS email")
+    )
+
+    # `floor` / `floor_id` are now real columns on `vehicles`
+    # (migrate_vehicles_add_floor_last_seen.sql). VA writes them on every
+    # track confirmation; PMS-AI bind/close keep them synced. We prefer
+    # v.* (the canonical "where is the car right now" answer) and fall
+    # back to the parking_sessions JOIN only when v.* is missing — covers
+    # legacy DBs and rows VA hasn't observed yet.
+    floor_expr = "COALESCE(v.floor, ps.floor)" if cols["v_floor"] else "ps.floor"
+    floor_id_expr = (
+        f"COALESCE(v.floor_id, {ps_outer_floor_id})"
+        if cols["v_floor_id"] else f"{ps_outer_floor_id}"
     )
 
     items = rows(db, f"""
@@ -399,8 +455,23 @@ async def get_vehicles(
             {extra},
             ps.parked_at,
             ps.status      AS parking_status,
-            ps.floor,
-            {ps_outer_floor_id} AS floor_id
+            {floor_expr}   AS floor,
+            {floor_id_expr} AS floor_id,
+            {slot_select},
+            ps.id          AS session_id,
+            ps.entry_time,
+            ps.exit_time,
+            ps.slot_id,
+            COALESCE(pk.slot_name, ps.slot_number) AS slot_name,
+            ps.slot_number,
+            ps.slot_left_at,
+            ps.entry_camera_id,
+            ps.exit_camera_id,
+            ps.entry_snapshot_path,
+            ps.exit_snapshot_path,
+            ps.slot_camera_id,
+            ps.slot_snapshot_path,
+            ps.duration_seconds
         {base_from}
         WHERE {where}
         ORDER BY
@@ -410,6 +481,50 @@ async def get_vehicles(
             ap.plate_number
         OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
     """, params)
+
+    # Build `current_event: VehicleEvent` per row when an open parking_sessions
+    # row exists. Reshape keys: `_event_from_row` expects the session id under
+    # "id" and the session status under "status"; the outer SELECT aliases them
+    # as `session_id` and `parking_status` to avoid colliding with the vehicle PK.
+    # When the car has been unbound from its slot but is still in the garage
+    # (slot_left_at IS NOT NULL, session still open), the session row retains
+    # slot_id as a historical record. For the API contract — current_event
+    # describes where the car *currently* is — we blank out slot fields in
+    # that window so they match `vehicle.current_slot_id` (which PMS-AI's
+    # unbind clears on the vehicles row).
+    for r in items:
+        if r.get("session_id") and r.get("parking_status") == "open":
+            slot_left = r.get("slot_left_at") is not None
+            event_row = {
+                "id":                  r["session_id"],
+                "status":              r.get("parking_status"),
+                "entry_time":          r.get("entry_time"),
+                "exit_time":           r.get("exit_time"),
+                "entry_camera_id":     r.get("entry_camera_id"),
+                "exit_camera_id":      r.get("exit_camera_id"),
+                "entry_snapshot_path": r.get("entry_snapshot_path"),
+                "exit_snapshot_path":  r.get("exit_snapshot_path"),
+                "slot_id":             None if slot_left else r.get("slot_id"),
+                "slot_name":           None if slot_left else r.get("slot_name"),
+                "slot_number":         None if slot_left else r.get("slot_number"),
+                "floor":               None if slot_left else r.get("floor"),
+                "floor_id":            None if slot_left else r.get("floor_id"),
+                "parked_at":           r.get("parked_at"),
+                "slot_left_at":        r.get("slot_left_at"),
+                "slot_camera_id":      r.get("slot_camera_id"),
+                "slot_snapshot_path":  r.get("slot_snapshot_path"),
+                "duration_seconds":    r.get("duration_seconds"),
+            }
+            r["current_event"] = _event_from_row(
+                event_row,
+                plate_number=r["plate_number"],
+                vehicle_id=r.get("id"),
+                owner_name=r.get("owner_name"),
+                vehicle_type=r.get("vehicle_type"),
+                is_employee=bool(r["is_employee"]) if r.get("is_employee") is not None else None,
+            )
+        else:
+            r["current_event"] = None
 
     return build_paged(items, total or 0, page, page_size)
 
@@ -512,6 +627,13 @@ async def export_vehicles_csv(
 
     is_emp_col = "v.is_employee" if cols["is_employee"] else "NULL"
 
+    if cols["current_slot_id"]:
+        slot_join_csv   = "LEFT JOIN parking_slots cs ON cs.slot_id = v.current_slot_id"
+        slot_select_csv = "v.current_slot_id  AS [Current Slot ID], cs.slot_name AS [Current Slot Name]"
+    else:
+        slot_join_csv   = ""
+        slot_select_csv = "NULL AS [Current Slot ID], NULL AS [Current Slot Name]"
+
     data = rows(db, f"""
         SELECT
             v.plate_number  AS [Plate Number],
@@ -525,6 +647,7 @@ async def export_vehicles_csv(
             CASE WHEN ps.parked_at IS NOT NULL THEN 1 ELSE 0 END AS [Currently Parked],
             ps.parked_at    AS [Parked At],
             ps.floor        AS [Floor],
+            {slot_select_csv},
             v.notes         AS [Notes]
         FROM vehicles v
         LEFT JOIN (
@@ -536,13 +659,15 @@ async def export_vehicles_csv(
             FROM parking_sessions
             WHERE status = 'open'
         ) ps ON ps.plate_number = v.plate_number AND ps.rn = 1
+        {slot_join_csv}
         WHERE {" AND ".join(clauses)}
         ORDER BY v.registered_at DESC
     """, params)
 
     headers = ["Plate Number", "Owner Name", "Vehicle Type", "Employee ID",
                "Title", "Registered", "Is Employee", "Registered At",
-               "Currently Parked", "Parked At", "Floor", "Notes"]
+               "Currently Parked", "Parked At", "Floor",
+               "Current Slot ID", "Current Slot Name", "Notes"]
     return stream_csv(data, headers, filename="vehicles.csv")
 
 
@@ -565,6 +690,13 @@ async def get_vehicle(
         (", v.email"       if cols["email"]       else ", NULL AS email")
     )
 
+    if cols["current_slot_id"]:
+        slot_join_d   = "LEFT JOIN dbo.parking_slots cs ON cs.slot_id = v.current_slot_id"
+        slot_select_d = ", v.current_slot_id, cs.slot_name AS current_slot_name"
+    else:
+        slot_join_d   = ""
+        slot_select_d = ", NULL AS current_slot_id, NULL AS current_slot_name"
+
     vehicle_rows = rows(db, f"""
         SELECT
             v.id,
@@ -577,7 +709,9 @@ async def get_vehicle(
             v.registered_at,
             v.notes
             {extra_cols}
+            {slot_select_d}
         FROM vehicles v
+        {slot_join_d}
         WHERE v.id = :vehicle_id
     """, {"vehicle_id": vehicle_id})
 
@@ -652,8 +786,14 @@ async def get_vehicle(
         is_employee=bool(v["is_employee"]) if v.get("is_employee") is not None else None,
         phone=v.get("phone"),
         email=v.get("email"),
+        current_slot_id=v.get("current_slot_id"),
+        current_slot_name=v.get("current_slot_name"),
         is_currently_parked=current_event is not None,
         current_event=current_event,
+        parked_at=current_event.parked_at if current_event else None,
+        parking_status=current_event.status if current_event else None,
+        floor=current_event.floor if current_event else None,
+        floor_id=current_event.floor_id if current_event else None,
         events_total=events_total,
         events=events,
     )

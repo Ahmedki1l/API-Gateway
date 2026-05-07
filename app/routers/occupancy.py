@@ -332,8 +332,17 @@ async def get_slots(
                 SELECT MAX(time) FROM slot_status WHERE slot_id = ps.slot_id
             )
         {floor_id_lookup_join}
+        LEFT JOIN dbo.floors fo ON fo.name = ps.floor
         WHERE {where}
-        ORDER BY ps.floor, ps.slot_name
+        -- Floor priority first (Ground=0, B1=1, B2=2 per migrate_floors_sort_order.sql),
+        -- then natural-numeric portion of slot_id, then alphabetic tiebreaker.
+        -- Produces "Ground/G1, B1/B1_CRO, B1/B2, ..., B1/B10, B1/B11_CFO, B2/B14, ..."
+        -- instead of "B1/..., B2/..., Ground/..." which the old lex sort emitted.
+        ORDER BY
+            COALESCE(fo.sort_order, 999),
+            ps.floor,
+            TRY_CAST(SUBSTRING(ps.slot_id, 2, PATINDEX('%[^0-9]%', SUBSTRING(ps.slot_id, 2, 100) + 'X') - 1) AS INT),
+            ps.slot_id
         OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
     """, params)
 
@@ -461,7 +470,11 @@ async def export_occupancy_csv(
                 WHERE slot_id = ps.slot_id
             )
         WHERE {slot_where}
-        ORDER BY ps.floor, ps.slot_name
+        -- Natural sort — see /occupancy/slots query for rationale.
+        ORDER BY
+            ps.floor,
+            TRY_CAST(SUBSTRING(ps.slot_id, 2, PATINDEX('%[^0-9]%', SUBSTRING(ps.slot_id, 2, 100) + 'X') - 1) AS INT),
+            ps.slot_id
     """, slot_params)
 
     writer.writerow(["=== SLOTS ==="])
@@ -747,8 +760,16 @@ async def get_slots_by_floor(
         FROM parking_slots pk
         {_LATEST_STATUS_JOIN}
         {floor_id_lookup_join}
+        LEFT JOIN dbo.floors fo ON fo.name = pk.floor
         WHERE {where}
-        ORDER BY pk.floor, pk.slot_name
+        -- Floor priority first (Ground, B1, B2 from floors.sort_order),
+        -- then natural-numeric portion of slot_id, then alphabetic tiebreaker.
+        -- Same shape as /occupancy/slots so the two endpoints stay consistent.
+        ORDER BY
+            COALESCE(fo.sort_order, 999),
+            pk.floor,
+            TRY_CAST(SUBSTRING(pk.slot_id, 2, PATINDEX('%[^0-9]%', SUBSTRING(pk.slot_id, 2, 100) + 'X') - 1) AS INT),
+            pk.slot_id
     """, params)
 
     # WS-8: track (floor_name, floor_id) pairs so each FloorSlotGroup carries both keys.

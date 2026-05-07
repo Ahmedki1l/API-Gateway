@@ -59,6 +59,12 @@ class VehicleRef(BaseModel):
     is_registered: bool = False
     registered_at: Optional[datetime] = None
     notes: Optional[str] = None
+    # Mirror of `vehicles.current_slot_id` — written by PMS-AI on every
+    # bind-slot (parking_session_service.py:141), cleared on unbind (:178-179).
+    # Faster than digging into current_event for "where is plate X right now?"
+    # current_slot_name is resolved via LEFT JOIN parking_slots.
+    current_slot_id: Optional[str] = None
+    current_slot_name: Optional[str] = None
 
 
 class SlotRef(BaseModel):
@@ -356,7 +362,6 @@ class VehicleListItem(VehicleRef):
     # Phase-1 of WS-8 floor refactor; populated alongside `floor` while both keys live.
     floor_id: Optional[int] = None
     current_event: Optional[VehicleEvent] = None
-    last_seen_at: Optional[datetime] = None
 
 
 # Back-compat alias so existing Gateway router imports keep working.
@@ -367,12 +372,14 @@ class VehicleStats(BaseModel):
     total_visits: int = 0
     total_parked_seconds: int = 0
     avg_stay_seconds: float = 0.0
-    last_seen_at: Optional[datetime] = None
 
 
-class VehicleDetail(VehicleRef):
+class VehicleDetail(VehicleListItem):
+    """Detail response for `GET /vehicles/{id}`. Inherits the flat
+    current-parking fields (`parked_at`, `parking_status`, `floor`,
+    `floor_id`) and `current_event` from `VehicleListItem`, then adds the
+    detail-only enrichments below."""
     is_currently_parked: bool = False
-    current_event: Optional[VehicleEvent] = None
     events_total: int = 0
     events: list[VehicleEvent] = []
     recent_alerts: list[AlertItem] = []

@@ -103,24 +103,36 @@ GO
    ──────────────────────────────────────────────────────────────────────────── */
 IF OBJECT_ID(N'dbo.cameras', 'U') IS NOT NULL
 BEGIN
+    -- camera_id is the canonical dash-uppercase form (CAM-XX, CAM-ENTRY, CAM-EXIT)
+    -- — matches what PMS-AI emits to event tables and what the dispatcher's
+    -- hardcoded zone-occupancy list checks for. `name` is unique per camera;
+    -- ops should refine the placeholder values to operational names
+    -- (e.g. "B1 — North Aisle Pillar 3"). The encrypted passwords below were
+    -- created with a specific CAMERAS_ENCRYPTION_KEY — see header note.
     MERGE INTO dbo.cameras AS Target
     USING (VALUES
-        (N'ANPR-Entry', N'ENTRY-GATE', N'Ground', N'10.1.13.100', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6fG_8xKy6gcai-WzQ6_kf80AvCqmnwOJ2oDFJ7Aq_kAIXcs_gaTYHWoECpzWfmoEuNM2fpn3pyDzSF5w5E7lcTHXRw==', 1, N'string'),
-        (N'ANPR-Exit', N'EXIT-GATE', N'Ground', N'10.1.13.101', 554, N'/Streaming/Channels/101', N'kloudspot1', N'gAAAAABp6fIGrXXkRo3nz-Yhm1IexonNM734GyEgDtrvDAY8p52FyETJt3BEwUWrfxd9ivggeG7J3-_lKInyVg95uvnLQCerFg==', 1, N'string'),
-        (N'Cam_01', N'GF-FRONT', N'Ground', N'10.1.13.60', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6e6A6j_Qpr6-uimln8jM5osSSPctIy-0dob6PjUGWLAHTd6XIkWiSaUaKfmXNT_u4iy2W8Pr4VA45Kk4favDsOClHw==', 1, N'string'),
-        (N'Cam_02', N'GF-FRONT', N'Ground', N'10.1.13.61', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6e7RABH1t0SZa7kgGjwLfoObuiSkpJpxRsYQ3VGD3xxB1DeeRZ0Dka2xXztPXi2S-afIEjlVT_xBG7sf5kmL3ZI1bA==', 1, N'string'),
-        (N'Cam_03', N'B1-PARKING', N'B1', N'10.1.13.62', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6e-D18fZxcTrYrdfe7P8FiJVi-02hz7N9LMKSeWZpkYzNh14YFRljelTq-JBWYjuDT5n-TYAhw6bUQYY5XuK2yWdtw==', 1, N'string'),
-        (N'Cam_04', N'B1-PARKING', N'B1', N'10.1.13.63', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6e-gp-OCNTt8AU8c3vIVIIZwbTHSSfTPoCqal9nNQCeSaoFjTc7eBGDJSBWfmGfJ5atZEkpBoVZ_T8NO790HCZpUaA==', 1, N'string'),
-        (N'Cam_05', N'B1-PARKING', N'B1', N'10.1.13.64', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6e_uYUN6Qr46oV3elkRDLFd09qFaKwrgzv9I8PpWX9inFP2-RlFtmmJxVTHiqq9x6UdGJaFuTumPwyha9K60rjMdkA==', 1, N'string'),
-        (N'Cam_06', N'B1-PARKING', N'B1', N'10.1.13.65', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6e_2bsqW8uCeal2wXSkAxbZyrKYUFkFxUiK7SaRKSnx4AAyppzvzwFTd5BRjhFt82a_laGZ1SVLPh2Et0IxifnL6ow==', 1, N'string'),
-        (N'Cam_07', N'B1-PARKING', N'B1', N'10.1.13.66', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6e_9LgEh_4GCmDwEd_FHVAEMnWT0GFgMy3M-nhC4GKOOuHVN-CfAdyTHJPCtJAM1RViV-IwSObVKLzs-3GZowfFmIA==', 1, N'string'),
-        (N'Cam_08', N'B1-PARKING', N'B1', N'10.1.13.67', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6fAY2-AEnVw7taPduRk__zPqqrTWEf1qWzkgxsmu17x6RDZMEkrmoO7mdInTY00dUywiJkMjlwWo1v_nNJrue-Ndhw==', 1, N'string'),
-        (N'Cam_09', N'B2-PARKING', N'B2', N'10.1.13.68', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6fCPk_5bVzvA6f54c6asDneRNfFKlGRkxHYioYMBbq9J85mfiLvWgDCf01FjPe2oGsMhDYLd7U_apRZhboHxOqH1eg==', 1, N'string'),
-        (N'Cam_10', N'B2-PARKING', N'B2', N'10.1.13.69', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6fDQw9C51CFlYc-Ls3lINRvWyUvrhtKkN9uCsczDkcc0E_hKhENbL18hCgCwlqQEM83m5eInc8q4Y6w9gWTOalKwzA==', 1, N'string'),
-        (N'Cam_11', N'B2-PARKING', N'B2', N'10.1.13.70', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6fDYHfJQsQY3UdFxVeZCQ184_jcVlJvSE1f3w41my8Rnqeckrop5dRSWpD8HkDWTUc5JiaFYpQwJvF7QXrYOQlsL0g==', 1, N'string'),
-        (N'Cam_12', N'B2-PARKING', N'B2', N'10.1.13.71', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6fDw1Qdj1Rs4SREgTw6QMXnLgNoub-jthp1_DdFbVoSM4LISfMhwi4_YfKA2llgsrszPFcOVup_e7DAIfkc-00VuhA==', 1, N'string'),
-        (N'Cam_13', N'B2-PARKING', N'B2', N'10.1.13.72', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6fEA1_0Ts-N94Y_OItQemw_In7YtqAfC5sDtSKEUuB3OuySeimbMDhGznZGYHBsQ0rqCg7T4gZy2MwIE93kTHp8oVQ==', 1, N'string'),
-        (N'Cam_14', N'B2-PARKING', N'B2', N'10.1.13.73', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6fEI7ltsTbu8siRozaH_9zi1MVOrwBO8rumjDSVSJN_5SZlFNK3ChoaSB0VjtHH52ukLdm8hMgd535ap0fSDQho7Gg==', 1, N'string')
+        -- ENTRY camera username is `kloudspott` (DOUBLE T) — verified live against the
+        -- ISAPI on 2026-05-04. `kloudspot` (single t) returns 401. The seeded ciphertext
+        -- below was encrypted with the dev CAMERAS_ENCRYPTION_KEY shipped in .env.example;
+        -- on a production deploy with a different key, re-encrypt by calling
+        -- POST /cameras/{id} with the new credentials, or run a script that uses
+        -- app.services.crypto.cipher.encrypt(<password>) before INSERT.
+        (N'CAM-ENTRY', N'Ground Entry Gate (ANPR)', N'Ground', N'10.1.13.100', 554, N'/Streaming/Channels/101', N'kloudspott', N'gAAAAABp6fG_8xKy6gcai-WzQ6_kf80AvCqmnwOJ2oDFJ7Aq_kAIXcs_gaTYHWoECpzWfmoEuNM2fpn3pyDzSF5w5E7lcTHXRw==', 1, N'string'),
+        (N'CAM-EXIT',  N'Ground Exit Gate (ANPR)',  N'Ground', N'10.1.13.101', 554, N'/Streaming/Channels/101', N'kloudspot1', N'gAAAAABp6fIGrXXkRo3nz-Yhm1IexonNM734GyEgDtrvDAY8p52FyETJt3BEwUWrfxd9ivggeG7J3-_lKInyVg95uvnLQCerFg==', 1, N'string'),
+        (N'CAM-01',    N'Ground Floor — Camera 1', N'Ground', N'10.1.13.60', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6e6A6j_Qpr6-uimln8jM5osSSPctIy-0dob6PjUGWLAHTd6XIkWiSaUaKfmXNT_u4iy2W8Pr4VA45Kk4favDsOClHw==', 1, N'string'),
+        (N'CAM-02',    N'Ground Floor — Camera 2', N'Ground', N'10.1.13.61', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6e7RABH1t0SZa7kgGjwLfoObuiSkpJpxRsYQ3VGD3xxB1DeeRZ0Dka2xXztPXi2S-afIEjlVT_xBG7sf5kmL3ZI1bA==', 1, N'string'),
+        (N'CAM-03',    N'B1 Parking — Camera 03',     N'B1',     N'10.1.13.62', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6e-D18fZxcTrYrdfe7P8FiJVi-02hz7N9LMKSeWZpkYzNh14YFRljelTq-JBWYjuDT5n-TYAhw6bUQYY5XuK2yWdtw==', 1, N'string'),
+        (N'CAM-04',    N'B1 Parking — Camera 04',     N'B1',     N'10.1.13.63', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6e-gp-OCNTt8AU8c3vIVIIZwbTHSSfTPoCqal9nNQCeSaoFjTc7eBGDJSBWfmGfJ5atZEkpBoVZ_T8NO790HCZpUaA==', 1, N'string'),
+        (N'CAM-05',    N'B1 Parking — Camera 05',     N'B1',     N'10.1.13.64', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6e_uYUN6Qr46oV3elkRDLFd09qFaKwrgzv9I8PpWX9inFP2-RlFtmmJxVTHiqq9x6UdGJaFuTumPwyha9K60rjMdkA==', 1, N'string'),
+        (N'CAM-06',    N'B1 Parking — Camera 06',     N'B1',     N'10.1.13.65', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6e_2bsqW8uCeal2wXSkAxbZyrKYUFkFxUiK7SaRKSnx4AAyppzvzwFTd5BRjhFt82a_laGZ1SVLPh2Et0IxifnL6ow==', 1, N'string'),
+        (N'CAM-07',    N'B1 Parking — Camera 07',     N'B1',     N'10.1.13.66', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6e_9LgEh_4GCmDwEd_FHVAEMnWT0GFgMy3M-nhC4GKOOuHVN-CfAdyTHJPCtJAM1RViV-IwSObVKLzs-3GZowfFmIA==', 1, N'string'),
+        (N'CAM-08',    N'B1 Parking — Camera 08',     N'B1',     N'10.1.13.67', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6fAY2-AEnVw7taPduRk__zPqqrTWEf1qWzkgxsmu17x6RDZMEkrmoO7mdInTY00dUywiJkMjlwWo1v_nNJrue-Ndhw==', 1, N'string'),
+        (N'CAM-09',    N'B2 Parking — Camera 09',     N'B2',     N'10.1.13.68', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6fCPk_5bVzvA6f54c6asDneRNfFKlGRkxHYioYMBbq9J85mfiLvWgDCf01FjPe2oGsMhDYLd7U_apRZhboHxOqH1eg==', 1, N'string'),
+        (N'CAM-10',    N'B2 Parking — Camera 10',     N'B2',     N'10.1.13.69', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6fDQw9C51CFlYc-Ls3lINRvWyUvrhtKkN9uCsczDkcc0E_hKhENbL18hCgCwlqQEM83m5eInc8q4Y6w9gWTOalKwzA==', 1, N'string'),
+        (N'CAM-11',    N'B2 Parking — Camera 11',     N'B2',     N'10.1.13.70', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6fDYHfJQsQY3UdFxVeZCQ184_jcVlJvSE1f3w41my8Rnqeckrop5dRSWpD8HkDWTUc5JiaFYpQwJvF7QXrYOQlsL0g==', 1, N'string'),
+        (N'CAM-12',    N'B2 Parking — Camera 12',     N'B2',     N'10.1.13.71', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6fDw1Qdj1Rs4SREgTw6QMXnLgNoub-jthp1_DdFbVoSM4LISfMhwi4_YfKA2llgsrszPFcOVup_e7DAIfkc-00VuhA==', 1, N'string'),
+        (N'CAM-13',    N'B2 Parking — Camera 13',     N'B2',     N'10.1.13.72', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6fEA1_0Ts-N94Y_OItQemw_In7YtqAfC5sDtSKEUuB3OuySeimbMDhGznZGYHBsQ0rqCg7T4gZy2MwIE93kTHp8oVQ==', 1, N'string'),
+        (N'CAM-14',    N'B2 Parking — Camera 14',     N'B2',     N'10.1.13.73', 554, N'/Streaming/Channels/101', N'kloudspot', N'gAAAAABp6fEI7ltsTbu8siRozaH_9zi1MVOrwBO8rumjDSVSJN_5SZlFNK3ChoaSB0VjtHH52ukLdm8hMgd535ap0fSDQho7Gg==', 1, N'string')
     ) AS Source (camera_id, name, floor, ip_address, rtsp_port, rtsp_path, username, password_encrypted, enabled, notes)
     ON Target.camera_id = Source.camera_id
     WHEN MATCHED THEN
@@ -472,13 +484,28 @@ CLOSE alias_cur;
 DEALLOCATE alias_cur;
 GO
 
-/* Re-apply contiguous sort_order on floors (0..n-1). */
-;WITH ordered AS (
-    SELECT id, DENSE_RANK() OVER (ORDER BY name) - 1 AS new_order FROM dbo.floors
-)
-UPDATE f SET sort_order = o.new_order
-FROM dbo.floors f INNER JOIN ordered o ON o.id = f.id
-WHERE f.sort_order != o.new_order;
+/* Pin the canonical operator-facing floor order: Ground first, basements
+   descending. (Was DENSE_RANK over name which sorted alphabetically and put
+   Ground last; see migrate_floors_sort_order.sql for the historical fix.) */
+UPDATE dbo.floors
+   SET sort_order = CASE name
+       WHEN N'Ground' THEN 0
+       WHEN N'B1'     THEN 1
+       WHEN N'B2'     THEN 2
+       WHEN N'B3'     THEN 3
+       WHEN N'B4'     THEN 4
+       WHEN N'B5'     THEN 5
+       ELSE 1000 + sort_order
+     END
+ WHERE sort_order != CASE name
+       WHEN N'Ground' THEN 0
+       WHEN N'B1'     THEN 1
+       WHEN N'B2'     THEN 2
+       WHEN N'B3'     THEN 3
+       WHEN N'B4'     THEN 4
+       WHEN N'B5'     THEN 5
+       ELSE 1000 + sort_order
+     END;
 GO
 
 PRINT '──────────────────────────────────────────────';

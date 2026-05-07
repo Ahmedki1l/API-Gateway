@@ -100,8 +100,13 @@ def _alert_query_bits(cols: dict) -> dict[str, str]:
         if cols["severity"]
         else (
             "CASE "
-            "WHEN a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation') THEN 'critical' "
-            "WHEN a.alert_type IN ('unknown_vehicle','named_slot_violation','overstay','capacity_exceeded') THEN 'warning' "
+            # `named_slot_violation` was renamed to `vehicle_intrusion` (canonical)
+            # but legacy rows survive until the migration in
+            # sql/migrate_named_slot_violation_to_vehicle_intrusion.sql runs.
+            # Keep the legacy name in the critical bucket so historical rows
+            # render with the correct severity in the meantime.
+            "WHEN a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation') THEN 'critical' "
+            "WHEN a.alert_type IN ('unknown_vehicle','overstay','capacity_exceeded') THEN 'warning' "
             "ELSE 'info' END"
         )
     )
@@ -152,11 +157,14 @@ def _where(search, severity, alert_type, resolved, date_from, date_to, cols, flo
             params["severity"] = severity
         else:
             if severity == "critical":
-                clauses.append("a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation')")
+                # `named_slot_violation` is the legacy name for `vehicle_intrusion`
+                # (still present on historical rows until migration runs); both map
+                # to critical.
+                clauses.append("a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation')")
             elif severity == "warning":
-                clauses.append("a.alert_type IN ('unknown_vehicle','named_slot_violation','overstay','capacity_exceeded')")
+                clauses.append("a.alert_type IN ('unknown_vehicle','overstay','capacity_exceeded')")
             else:
-                clauses.append("a.alert_type NOT IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','unknown_vehicle','named_slot_violation','overstay','capacity_exceeded')")
+                clauses.append("a.alert_type NOT IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','unknown_vehicle','overstay','capacity_exceeded')")
 
     if alert_type:
         clauses.append("a.alert_type = :alert_type")
@@ -254,7 +262,7 @@ async def alert_stats(db: Session = Depends(get_db)):
         critical_sql = """
             SELECT COUNT(*) FROM alerts
             WHERE is_resolved=0 AND is_test=0
-              AND alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation')
+              AND alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation')
         """
 
     # facility_today_utc() returns the UTC instant of facility-local midnight today.
@@ -389,7 +397,7 @@ ALERT_TEMPLATES = [
     {"alert_type": "vehicle_intrusion", "severity": "critical", "description": "Unknown vehicle entered restricted zone"},
     {"alert_type": "vehicle_violation", "severity": "critical", "description": "Illegal parking maneuver detected"},
     {"alert_type": "unknown_vehicle", "severity": "warning", "description": "Unregistered plate detected: ABC-123", "plate_number": "ABC-123"},
-    {"alert_type": "named_slot_violation", "severity": "warning", "description": "Visitor parked in CEO slot", "slot_id": "CEO-01", "slot_name": "CEO Reserved"},
+    {"alert_type": "vehicle_intrusion", "severity": "critical", "description": "Visitor parked in CEO reserved slot", "slot_id": "CEO-01", "slot_name": "CEO Reserved"},
     {"alert_type": "overstay", "severity": "warning", "description": "Vehicle exceeded 24h limit", "plate_number": "XYZ-999"},
     {"alert_type": "capacity_exceeded", "severity": "info", "description": "Floor 1 is at 95% capacity", "floor": "1"},
 ]

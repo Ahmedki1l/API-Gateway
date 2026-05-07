@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.routers import dashboard, alerts, entry_exit, vehicles, occupancy, camera_feeds, cameras
+from app.routers import admin, dashboard, alerts, entry_exit, vehicles, occupancy, camera_feeds, cameras
 from app.services import camera_monitor
 
 log = logging.getLogger(__name__)
@@ -21,6 +21,12 @@ async def lifespan(app: FastAPI):
     finally:
         await camera_monitor.stop()
 
+
+log.info(
+    "Facility TZ offset: UTC+%s (env FACILITY_TIMEZONE_OFFSET_HOURS). "
+    "PMS-AI must run with the same value or 'today' windows diverge.",
+    settings.facility_timezone_offset_hours,
+)
 
 app = FastAPI(
     title="Parking API Gateway",
@@ -61,6 +67,7 @@ app.include_router(vehicles.router)
 app.include_router(occupancy.router)
 app.include_router(camera_feeds.router)
 app.include_router(cameras.router)
+app.include_router(admin.router)
 
 
 @app.get("/health", tags=["Gateway"])
