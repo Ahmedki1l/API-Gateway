@@ -85,6 +85,18 @@ BEGIN
 END;
 GO
 
+/* Additive columns added after the original CREATE TABLE — gated by
+   COL_LENGTH so re-running the bootstrap is idempotent. These give VA a
+   place to record "where is this car right now" and let the Gateway
+   answer it from the vehicles row alone (no parking_sessions JOIN). */
+IF COL_LENGTH(N'dbo.vehicles', N'current_slot_id') IS NULL
+    ALTER TABLE dbo.vehicles ADD current_slot_id VARCHAR(50) NULL;
+IF COL_LENGTH(N'dbo.vehicles', N'floor') IS NULL
+    ALTER TABLE dbo.vehicles ADD floor NVARCHAR(50) NULL;
+IF COL_LENGTH(N'dbo.vehicles', N'floor_id') IS NULL
+    ALTER TABLE dbo.vehicles ADD floor_id INT NULL;
+GO
+
 /* ────────────────────────────────────────────────────────────────────────────
    3. parking_slots
    ──────────────────────────────────────────────────────────────────────────── */
@@ -409,9 +421,20 @@ END
 GO
 
 /* 2. Backfill floors from existing distinct parking_slots.floor values so the
-      lookup is populated before any FK column points at it. */
+      lookup is populated before any FK column points at it. The CASE pins
+      the canonical operator-facing order (Ground=0, B1=1, B2=2, …) instead
+      of alphabetic, which would put Ground after the basements. */
 INSERT INTO dbo.floors (name, sort_order)
-SELECT DISTINCT ps.floor, DENSE_RANK() OVER (ORDER BY ps.floor) - 1
+SELECT DISTINCT ps.floor,
+       CASE ps.floor
+           WHEN N'Ground' THEN 0
+           WHEN N'B1'     THEN 1
+           WHEN N'B2'     THEN 2
+           WHEN N'B3'     THEN 3
+           WHEN N'B4'     THEN 4
+           WHEN N'B5'     THEN 5
+           ELSE 1000
+       END
 FROM dbo.parking_slots ps
 WHERE ps.floor IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM dbo.floors f WHERE f.name = ps.floor);
@@ -588,13 +611,28 @@ IF COL_LENGTH(N'dbo.floor_occupancy', N'floor') IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM dbo.floors f WHERE f.name = t.floor);';
 GO
 
-/* Re-apply a stable sort_order pass (DENSE_RANK over the full set). */
-;WITH ordered AS (
-    SELECT id, DENSE_RANK() OVER (ORDER BY name) - 1 AS new_order FROM dbo.floors
-)
-UPDATE f SET sort_order = o.new_order
-FROM dbo.floors f INNER JOIN ordered o ON o.id = f.id
-WHERE f.sort_order != o.new_order;
+/* Re-apply the canonical operator-facing sort_order: Ground first (top of
+   building), then descending basements. Unknown floor names land after the
+   canonical set so they don't collide with B1/B2/etc. */
+UPDATE dbo.floors
+   SET sort_order = CASE name
+       WHEN N'Ground' THEN 0
+       WHEN N'B1'     THEN 1
+       WHEN N'B2'     THEN 2
+       WHEN N'B3'     THEN 3
+       WHEN N'B4'     THEN 4
+       WHEN N'B5'     THEN 5
+       ELSE 1000 + sort_order
+     END
+ WHERE sort_order != CASE name
+       WHEN N'Ground' THEN 0
+       WHEN N'B1'     THEN 1
+       WHEN N'B2'     THEN 2
+       WHEN N'B3'     THEN 3
+       WHEN N'B4'     THEN 4
+       WHEN N'B5'     THEN 5
+       ELSE 1000 + sort_order
+     END;
 GO
 
 /* Re-run the per-table floor_id / parking_slot_id backfills now that

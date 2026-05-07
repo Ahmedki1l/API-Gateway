@@ -98,8 +98,11 @@ settings = Settings()
 
 def facility_tz() -> timezone:
     """The local timezone for "today"-style date math. Configurable via
-    FACILITY_TIMEZONE_OFFSET_HOURS env var (default UTC+2 for the current
-    Riyadh-region deployment)."""
+    FACILITY_TIMEZONE_OFFSET_HOURS env var (default 3.0 = UTC+3, Saudi Arabia /
+    Riyadh — no DST). DB columns are stored as UTC-naive; this offset only
+    affects boundary calculations like "since local midnight today". Both the
+    Gateway and PMS-AI must run with the same value to keep "today" windows
+    aligned across services."""
     return timezone(timedelta(hours=settings.facility_timezone_offset_hours))
 
 

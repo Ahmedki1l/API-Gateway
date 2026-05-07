@@ -157,7 +157,11 @@ Plus a 15s `: keep-alive` heartbeat. On client disconnect every pump task is can
 
 ### Time-zone handling (heads up)
 
-Local time is hard-coded to **UTC+2 (Arab Standard Time)** in `routers/alerts.py:alert_stats` and `routers/entry_exit.py:entry_exit_kpis`. "Resolved today" / "today's KPIs" / "since local midnight" all derive from `timezone(timedelta(hours=2))` and convert to UTC before comparing against DB columns (which store UTC). If the deployment moves regions, this needs to change in both files — there is no central setting for it.
+The facility-local offset is centralized in `app/config.py` as `facility_timezone_offset_hours` (env `FACILITY_TIMEZONE_OFFSET_HOURS`, default `3.0` = UTC+3, Saudi Arabia / Riyadh — no DST). All "today" / "since local midnight" math (in `routers/alerts.py:alert_stats`, `routers/entry_exit.py:entry_exit_kpis`, `routers/dashboard.py:dashboard_kpis`, etc.) derives from `facility_today_utc()` in `app/config.py` and converts to UTC before comparing against DB columns (which store UTC-naive timestamps).
+
+Boot logs the active offset so ops can confirm at startup. **PMS-AI now reads the same env var** (`FACILITY_TIMEZONE_OFFSET_HOURS`) and uses its own `facility_today_utc()` helper for `/api/v1/entry-exit/count/today`, `/api/v1/stats/parking-time`, and `/api/v1/stats/daily`. Both services must run with the same value or per-service "today" windows diverge.
+
+**Caveat — Hikvision camera clocks.** The DB convention is UTC-naive. PMS-AI's `event_parser.py` parses the camera's `<dateTime>` and treats it as UTC if it ends in `Z`, otherwise stores naive. **Hikvision NVRs default to "local time without `Z`"**, so the DB may actually contain facility-local timestamps that everything treats as UTC. If you discover this is the case in your deployment, set `FACILITY_TIMEZONE_OFFSET_HOURS=0.0` (treat the DB as already facility-local) rather than 3.0, and reconfigure the cameras to send true UTC for the longer-term fix.
 
 ### Occupancy capacity sync (side effect — scheduled for removal)
 

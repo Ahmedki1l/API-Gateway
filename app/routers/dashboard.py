@@ -113,7 +113,7 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
         "SELECT COUNT(*) FROM parking_sessions WHERE status = 'open'")
 
     open_alerts = scalar(db,
-        "SELECT COUNT(*) FROM alerts WHERE is_resolved = 0")
+        "SELECT COUNT(*) FROM alerts WHERE is_resolved = 0 AND is_test = 0")
 
     return DashboardKPIs(
         total_unique_plates=unique_plates or 0,

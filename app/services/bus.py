@@ -68,7 +68,7 @@ class Broadcaster:
 
                 vehicle_alert_types = (
                     "unknown_vehicle", "overstay", "vehicle_intrusion",
-                    "vehicle_violation", "named_slot_violation",
+                    "vehicle_violation",
                     "unauthorized_parking", "parking_expired"
                 )
 
