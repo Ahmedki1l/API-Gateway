@@ -341,7 +341,10 @@ async def get_slots(
         ORDER BY
             COALESCE(fo.sort_order, 999),
             ps.floor,
-            TRY_CAST(SUBSTRING(ps.slot_id, 2, PATINDEX('%[^0-9]%', SUBSTRING(ps.slot_id, 2, 100) + 'X') - 1) AS INT),
+            CASE WHEN ps.slot_id LIKE '[A-Za-z][0-9]%'
+                 THEN TRY_CAST(SUBSTRING(ps.slot_id, 2, PATINDEX('%[^0-9]%', SUBSTRING(ps.slot_id, 2, 100) + 'X') - 1) AS INT)
+                 ELSE TRY_CAST(SUBSTRING(ps.slot_name, PATINDEX('%B[0-9]%', ps.slot_name) + 1, PATINDEX('%[^0-9]%', SUBSTRING(ps.slot_name, PATINDEX('%B[0-9]%', ps.slot_name) + 1, 100) + 'X') - 1) AS INT)
+            END,
             ps.slot_id
         OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
     """, params)
@@ -473,7 +476,10 @@ async def export_occupancy_csv(
         -- Natural sort — see /occupancy/slots query for rationale.
         ORDER BY
             ps.floor,
-            TRY_CAST(SUBSTRING(ps.slot_id, 2, PATINDEX('%[^0-9]%', SUBSTRING(ps.slot_id, 2, 100) + 'X') - 1) AS INT),
+            CASE WHEN ps.slot_id LIKE '[A-Za-z][0-9]%'
+                 THEN TRY_CAST(SUBSTRING(ps.slot_id, 2, PATINDEX('%[^0-9]%', SUBSTRING(ps.slot_id, 2, 100) + 'X') - 1) AS INT)
+                 ELSE TRY_CAST(SUBSTRING(ps.slot_name, PATINDEX('%B[0-9]%', ps.slot_name) + 1, PATINDEX('%[^0-9]%', SUBSTRING(ps.slot_name, PATINDEX('%B[0-9]%', ps.slot_name) + 1, 100) + 'X') - 1) AS INT)
+            END,
             ps.slot_id
     """, slot_params)
 
@@ -768,7 +774,10 @@ async def get_slots_by_floor(
         ORDER BY
             COALESCE(fo.sort_order, 999),
             pk.floor,
-            TRY_CAST(SUBSTRING(pk.slot_id, 2, PATINDEX('%[^0-9]%', SUBSTRING(pk.slot_id, 2, 100) + 'X') - 1) AS INT),
+            CASE WHEN pk.slot_id LIKE '[A-Za-z][0-9]%'
+                 THEN TRY_CAST(SUBSTRING(pk.slot_id, 2, PATINDEX('%[^0-9]%', SUBSTRING(pk.slot_id, 2, 100) + 'X') - 1) AS INT)
+                 ELSE TRY_CAST(SUBSTRING(pk.slot_name, PATINDEX('%B[0-9]%', pk.slot_name) + 1, PATINDEX('%[^0-9]%', SUBSTRING(pk.slot_name, PATINDEX('%B[0-9]%', pk.slot_name) + 1, 100) + 'X') - 1) AS INT)
+            END,
             pk.slot_id
     """, params)
 
