@@ -466,6 +466,42 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_parking_slots_floor_i
     CREATE INDEX ix_parking_slots_floor_id ON dbo.parking_slots(floor_id);
 GO
 
+/* 4c. parking_slots.slot_type — classifies rows for occupancy filtering.
+        'regular' (default) = counted in occupancy.
+        'special_zone' / 'roi' = excluded from occupancy (virtual / camera zones). */
+IF COL_LENGTH(N'dbo.parking_slots', N'slot_type') IS NULL
+    ALTER TABLE dbo.parking_slots ADD slot_type VARCHAR(50) NOT NULL
+        CONSTRAINT DF_parking_slots_slot_type DEFAULT ('regular');
+GO
+UPDATE dbo.parking_slots SET slot_type = 'regular' WHERE slot_type IS NULL;
+GO
+
+/* 4d. parking_slots.reservation_type — operator-facing slot classification.
+        Typical values: 'GENERAL', 'SPECIAL', 'EMPLOYEE'. Nullable
+        until backfilled so pre-existing rows are returned as-is. */
+IF COL_LENGTH(N'dbo.parking_slots', N'parking_category') IS NOT NULL
+   AND COL_LENGTH(N'dbo.parking_slots', N'reservation_type') IS NULL
+    EXEC sp_rename 'dbo.parking_slots.parking_category', 'reservation_type', 'COLUMN';
+GO
+IF COL_LENGTH(N'dbo.parking_slots', N'reservation_type') IS NULL
+    ALTER TABLE dbo.parking_slots ADD reservation_type VARCHAR(50) NULL;
+GO
+
+/* 4e. parking_slots.reserved_for — who/what the slot is reserved for
+        (free-text, e.g. 'CEO', 'CTO', an employee ID). NULL on non-reserved slots. */
+IF COL_LENGTH(N'dbo.parking_slots', N'reserved_for') IS NULL
+    ALTER TABLE dbo.parking_slots ADD reserved_for VARCHAR(200) NULL;
+GO
+
+/* 4f. Migrate reservation_type values to uppercase canonical names.
+        old 'reserved' → 'SPECIAL', old 'regular' → 'GENERAL'. Idempotent. */
+IF COL_LENGTH(N'dbo.parking_slots', N'reservation_type') IS NOT NULL
+BEGIN
+    UPDATE dbo.parking_slots SET reservation_type = 'SPECIAL' WHERE reservation_type = 'reserved';
+    UPDATE dbo.parking_slots SET reservation_type = 'GENERAL' WHERE reservation_type = 'regular' OR reservation_type IS NULL;
+END;
+GO
+
 /* 5. Dependent tables — add nullable parking_slot_id INT alongside the legacy
       VARCHAR slot_id. FK constraints are deferred to the destructive phase. */
 

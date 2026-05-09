@@ -26,39 +26,72 @@ API Gateway  (this project — FastAPI, port 8001)
 
 ## Quick Start
 
-```bash
-# 1. Create and activate a Python virtual environment (Python 3.11 recommended; 3.12 also works)
-python3.11 -m venv .venv
-source .venv/bin/activate          # (Windows: .venv\Scripts\activate)
+### Prerequisites
 
-# 2. Copy and fill in env
-cp .env.example .env
+- Python 3.11 or 3.12
+- SQL Server reachable (local SSMS, Docker, or Azure SQL Edge — see below)
+- Microsoft ODBC Driver 17 or 18 for SQL Server installed on the host
+
+### Steps
+
+```bash
+# 1. Clone and enter the repo
+git clone <repo-url>
+cd "API Gateway"
+
+# 2. Create and activate a virtual environment
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # macOS / Linux
 
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Generate the camera-credentials encryption key + internal token (REQUIRED)
+# 4. Copy the example env and fill in your values
+copy .env.example .env          # Windows
+# cp .env.example .env          # macOS / Linux
+# Key variables to set:
+#   DB_SERVER, DB_NAME, DB_USER, DB_PASSWORD  (or DB_TRUSTED_CONNECTION=True for Windows Auth)
+#   SYSTEM1_BASE_URL  (PMS-AI, default http://localhost:8080)
+#   SYSTEM2_BASE_URL  (VideoAnalytics, default http://localhost:8000)
+
+# 5. Generate the two required secrets and paste them into .env
 python -c "from cryptography.fernet import Fernet; print('CAMERAS_ENCRYPTION_KEY=' + Fernet.generate_key().decode())"
 python -c "import secrets; print('CAMERAS_INTERNAL_TOKEN=' + secrets.token_urlsafe(32))"
-# Paste both into .env. The gateway refuses to boot without them.
+# CAMERAS_ENCRYPTION_KEY  — encrypts RTSP passwords stored in the cameras table
+# CAMERAS_INTERNAL_TOKEN  — shared secret for /cameras/internal/all (used by VideoAnalytics)
 
-# 5. Run the SQL migrations (once, in order)
-#    - migrations/fix_system1_schema.sql   (existing System-1 compatibility patches)
-#    - migrations/add_cameras_table.sql    (new cameras configurator table)
-# Open both in SSMS or run via sqlcmd / docker exec — see the macOS quickstart below.
+# 6. Set up the database (run ONCE, in this order, in SSMS or sqlcmd)
+#
+#    a. Create the database if it doesn't exist:
+#       CREATE DATABASE damanat_pms;
+#
+#    b. Apply the full schema (idempotent — safe to re-run):
+sqlcmd -E -S localhost -d damanat_pms -i sql/bootstrap.sql
+#
+#    c. Load seed data — 32 parking slots, 16 cameras, zone_occupancy rows,
+#       sample vehicles / alerts / sessions (idempotent):
+sqlcmd -E -S localhost -d damanat_pms -i sql/seed.sql
 
-# 6. Start the gateway
+# 7. Start the gateway
 python run.py
-# → http://localhost:8001
-# → http://localhost:8001/docs  (Swagger UI)
+# → API:     http://localhost:8001
+# → Swagger: http://localhost:8001/docs
 ```
 
-## First-time setup on macOS (no SQL Server installed)
+> **Windows Auth shortcut (step 6):** if you set `DB_TRUSTED_CONNECTION=True` in `.env`
+> you can skip `DB_USER` / `DB_PASSWORD`. Open SSMS, connect to your instance, and run
+> `sql/bootstrap.sql` then `sql/seed.sql` from the query window instead of sqlcmd.
 
-If you don't already have a SQL Server reachable, the fastest path is Azure SQL Edge in Docker (ARM-native — runs cleanly on Apple Silicon, unlike `mssql/server` which requires Rosetta and crashes under it).
+> **Disable camera monitor during local dev** (no cameras wired up):  
+> set `CAMERA_MONITOR_ENABLED=false` in `.env` to silence TCP-probe timeouts on startup.
+
+---
+
+## First-time setup — Docker SQL Server (macOS / Linux, no SSMS)
 
 ```bash
-# 1. Start the DB
+# 1. Start Azure SQL Edge (ARM-native, works on Apple Silicon without Rosetta)
 docker run -d --name pms-mssql \
   -e "ACCEPT_EULA=Y" \
   -e "MSSQL_SA_PASSWORD=YourStrong!Pass1" \
@@ -66,41 +99,26 @@ docker run -d --name pms-mssql \
   -v pms-mssql-data:/var/opt/mssql \
   mcr.microsoft.com/azure-sql-edge:latest
 
-# 2. Load schema + migrations using a sidecar tools container
-#    (avoids needing host-side mssql-tools / msodbcsql)
-TOOLS="docker run --rm --network host -v $(pwd):/sql mcr.microsoft.com/mssql-tools \
-  /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P 'YourStrong!Pass1' -C"
-$TOOLS -Q "IF DB_ID('damanat_pms') IS NULL CREATE DATABASE damanat_pms"
-$TOOLS -d damanat_pms -i /sql/damanat_pms_full_script_portable.sql
-$TOOLS -d damanat_pms -i /sql/migrations/fix_system1_schema.sql
-$TOOLS -d damanat_pms -i /sql/migrations/add_cameras_table.sql
+# 2. Create the database and apply schema + seed via the mssql-tools sidecar
+SQLCMD="docker run --rm --network host -v $(pwd):/sql \
+  mcr.microsoft.com/mssql-tools /opt/mssql-tools/bin/sqlcmd \
+  -S localhost,1433 -U sa -P 'YourStrong!Pass1' -C"
+
+$SQLCMD -Q "IF DB_ID('damanat_pms') IS NULL CREATE DATABASE damanat_pms"
+$SQLCMD -d damanat_pms -i /sql/sql/bootstrap.sql
+$SQLCMD -d damanat_pms -i /sql/sql/seed.sql
+
+# 3. Set DB_DRIVER=ODBC Driver 18 for SQL Server in .env, then:
+python run.py
 ```
 
-### DB driver choice (pyodbc vs pymssql)
+### DB driver choice
 
-`config.py` accepts two drivers:
-
-- **`DB_DRIVER=ODBC Driver 18 for SQL Server`** (default) — uses pyodbc. Requires the Microsoft ODBC driver installed on the host: `brew tap microsoft/mssql-release ; brew install msodbcsql18 mssql-tools18`. Production deploys should use this.
-- **`DB_DRIVER=pymssql`** — uses pymssql (FreeTDS-based). Useful for local dev when host msodbcsql is unavailable (e.g. macOS Command Line Tools update pending). `pip install pymssql` and `brew install freetds`. Same SQL Server, different transport — no other code changes needed.
-
----
-
-## System 1 Schema Fixes Required
-
-Before starting the gateway, apply `migrations/fix_system1_schema.sql`.
-
-The script is idempotent and now does two jobs:
-
-1. Adds the compatibility columns the gateway expects on `alerts`, `zone_occupancy`,
-   `vehicles`, and `entry_exit_log`.
-2. Creates `parking_sessions` if it is missing and hardens the real foreign-key links
-   that already exist conceptually in PMS-AI:
-   - `entry_exit_log.vehicle_id -> vehicles.id`
-   - `entry_exit_log.matched_entry_id -> entry_exit_log.id`
-   - `parking_sessions.vehicle_id -> vehicles.id`
-
-If old orphan rows exist, the script prints a warning and skips that foreign key instead
-of failing halfway through.
+| Setting | Transport | When to use |
+|---|---|---|
+| `DB_DRIVER=ODBC Driver 18 for SQL Server` | pyodbc | Default — production and most dev environments |
+| `DB_DRIVER=ODBC Driver 17 for SQL Server` | pyodbc | Older host installs |
+| `DB_DRIVER=pymssql` | FreeTDS | macOS dev when ODBC driver unavailable (`pip install pymssql && brew install freetds`) |
 
 ---
 
@@ -153,10 +171,21 @@ of failing halfway through.
 | GET    | `/vehicles/export/csv`  | same filters as list                          |
 
 ### Occupancy
-| Method | Path                 | Query Params                        |
-|--------|----------------------|-------------------------------------|
-| GET    | `/occupancy/kpis`    | —                                   |
-| GET    | `/occupancy/zones`   | page, page_size, search, floor      |
+| Method | Path                          | Query Params                                                  |
+|--------|-------------------------------|---------------------------------------------------------------|
+| GET    | `/occupancy/kpis`             | —                                                             |
+| GET    | `/occupancy/totals`           | —                                                             |
+| GET    | `/occupancy/floors`           | page, page_size                                               |
+| GET    | `/occupancy/floors/{floor}`   | —                                                             |
+| GET    | `/occupancy/slots`            | page, page_size, floor, floor_id, is_available, reservation_type |
+| GET    | `/occupancy/slots/by-floor`   | floor, floor_id                                               |
+| GET    | `/occupancy/slots/{slot_id}`  | —                                                             |
+| GET    | `/occupancy/export`           | floor, floor_id, search                                       |
+| GET    | `/occupancy/zones`            | page, page_size, search, floor (**deprecated** — use `/floors`) |
+
+> Violation-zone slots (`is_violation_zone = 1`) are excluded from every count and list.  
+> Reserved slots can be filtered with `?reservation_type=SPECIAL`.  
+> Each slot row now includes `reservation_type` and `reserved_for` fields.
 
 ### Cameras
 | Method | Path                                | Query Params / Body                                                        |
@@ -223,39 +252,51 @@ After running once, point System 2 (VideoAnalytics) at `GET /cameras/internal/al
 ## Project Structure
 
 ```
-api_gateway/
-├── run.py                        # uvicorn entry point
+API Gateway/
+├── run.py                          # uvicorn entry point (python run.py)
 ├── requirements.txt
 ├── .env.example
-├── migrations/
-│   └── fix_system1_schema.sql    # run once on SQL Server
+├── sql/
+│   ├── bootstrap.sql               # full schema — idempotent, run first
+│   ├── seed.sql                    # 32 slots, 16 cameras, sample data — run after bootstrap
+│   └── legacy_migrations/          # destructive scripts for pre-Phase-2 databases only
 └── app/
-    ├── main.py                   # FastAPI app + middleware
-    ├── config.py                 # Settings from .env
-    ├── database.py               # SQLAlchemy engine + helpers
-    ├── shared.py                 # PagedResponse + stream_csv
-    ├── schemas.py                # Pydantic response models
+    ├── main.py                     # FastAPI app, CORS, router registration
+    ├── config.py                   # pydantic-settings → .env
+    ├── database.py                 # SQLAlchemy engine, scalar()/rows() helpers
+    ├── shared.py                   # build_paged() envelope, stream_csv()
+    ├── schemas.py                  # all Pydantic response models
     ├── services/
-    │   └── upstream.py           # httpx clients for System 1 & 2
+    │   ├── upstream.py             # httpx clients for System 1 & 2 + SSE iterators
+    │   ├── auth.py                 # require_internal_token FastAPI dependency
+    │   ├── crypto.py               # Fernet encrypt/decrypt for camera passwords
+    │   ├── camera_monitor.py       # background TCP-probe task
+    │   ├── snapshots.py            # resolve_snapshot_url() — local path → CDN URL
+    │   └── bus.py                  # in-process SSE broadcaster for /alerts/stream
     └── routers/
+        ├── _helpers.py             # _floor_schema() probe cache + floor-resolve helpers
         ├── dashboard.py
         ├── alerts.py
         ├── entry_exit.py
         ├── vehicles.py
-        └── occupancy.py
+        ├── occupancy.py
+        ├── cameras.py
+        └── camera_feeds.py
 ```
 
 ---
 
 ## What Each Router Reads
 
-| Router       | SQL Server tables used                        | Upstream calls              |
-|--------------|-----------------------------------------------|-----------------------------|
-| dashboard    | Vehicles, EntryExit, Alerts                   | Sys1 /health, Sys2 /health, Sys2 /vehicles |
-| alerts       | Alerts, Vehicles                              | none                        |
-| entry_exit   | EntryExit, Vehicles                           | none                        |
-| vehicles     | Vehicles, EntryExit                           | none                        |
-| occupancy    | ZoneOccupancy                                 | Sys2 /slots, Sys2 /stats    |
+| Router        | SQL Server tables used                                                    | Upstream calls                         |
+|---------------|---------------------------------------------------------------------------|----------------------------------------|
+| dashboard     | `vehicles`, `entry_exit_log`, `alerts`, `parking_sessions`                | Sys1 /health, Sys2 /health, Sys2 /vehicles |
+| alerts        | `alerts`, `vehicles`, `parking_slots`                                     | Sys1 SSE, Sys2 SSE (stream multiplex)  |
+| entry_exit    | `entry_exit_log`, `parking_sessions`, `vehicles`                          | none                                   |
+| vehicles      | `vehicles`, `parking_sessions`, `alerts`                                  | none                                   |
+| occupancy     | `parking_slots`, `slot_status`, `zone_occupancy`, `parking_sessions`      | Sys2 /slots (live overlay on /zones)   |
+| cameras       | `cameras`                                                                 | none                                   |
+| camera_feeds  | `camera_feeds`                                                            | none                                   |
 
 ---
 

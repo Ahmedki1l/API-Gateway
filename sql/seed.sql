@@ -5,7 +5,7 @@
    FKs). Run this AFTER bootstrap.sql to populate the database.
 
    Tables seeded:
-     1. parking_slots          (32 rows — B1 / B2 / Ground)
+     1. parking_slots          (36 rows — B1 / B2 / Ground Floor)
      2. cameras                (16-row canonical fleet, MERGE-style upsert,
                                 Fernet-encrypted RTSP credentials)
      3. zone_occupancy         (3 rows: B1 / B2 / GARAGE-TOTAL)
@@ -49,39 +49,68 @@ PRINT '────────────────────────�
 IF NOT EXISTS (SELECT 1 FROM dbo.parking_slots WHERE slot_id = 'B1_CRO')
 BEGIN
     INSERT INTO dbo.parking_slots (slot_id, slot_name, floor, is_available, is_violation_zone) VALUES
-        (N'B1_CRO', N'Slot B1 CRO', N'B1', 1, 0),
-        (N'B10_CTO', N'Slot B10 CTO', N'B1', 1, 0),
-        (N'B11_CFO', N'Slot B11_CFO', N'B1', 0, 0),
-        (N'B12', N'Slot B12', N'B1', 1, 0),
-        (N'B13_COO', N'Slot B13 COO', N'B1', 1, 0),
-        (N'B14', N'Slot B14', N'B2', 0, 0),
-        (N'B15', N'Slot B15', N'B2', 0, 0),
-        (N'B16', N'Slot B16', N'B2', 1, 0),
-        (N'B17', N'Slot B17', N'B2', 0, 0),
-        (N'B18', N'Slot B18', N'B2', 0, 0),
-        (N'B19', N'Slot B19', N'B2', 1, 0),
-        (N'B2', N'Slot B2', N'B1', 1, 0),
-        (N'B20', N'Slot B20', N'B2', 0, 0),
-        (N'B21', N'Slot B21', N'B2', 1, 0),
-        (N'B22', N'Slot B22', N'B2', 1, 0),
-        (N'B23', N'Slot B23', N'B2', 1, 0),
-        (N'B24', N'Slot B24', N'B2', 0, 0),
-        (N'B25', N'Slot B25', N'B2', 0, 0),
-        (N'B27', N'Slot B27', N'B2', 0, 0),
-        (N'B3_CEO', N'Slot B3 CEO', N'B1', 0, 0),
-        (N'B6_Reserved', N'Slot B6 Reserved', N'B1', 1, 0),
-        (N'B8', N'Slot B8', N'B1', 1, 0),
-        (N'B9', N'Slot B9', N'B1', 0, 0),
-        (N'G1', N'G1_SN', N'Ground', 0, 0),
-        (N'G2', N'Slot G2', N'Ground', 0, 0),
-        (N'G3', N'Slot G3', N'Ground', 1, 0),
-        (N'G4', N'Slot G4', N'Ground', 1, 0),
-        (N'G5', N'Slot G5', N'Ground', 0, 0),
-        (N'G6', N'Slot G6', N'Ground', 1, 0),
-        (N'GMIA', N'GMIA', N'B1', 0, 0),
-        (N'V1_Violation_1', N'Slot V1 Violation 1', N'Ground', 1, 1),
-        (N'V2_Violation_2', N'Slot V2 Violation 2', N'Ground', 1, 1);
-    PRINT '  Seeded 32 parking_slots';
+        (N'B1_CRO',          N'Slot B1 CRO',          N'B1',           1, 0),
+        (N'B1_Entrence',     N'Slot B1_Entrence',      N'B1',           1, 0),
+        (N'B10_CTO',         N'Slot B10 CTO',          N'B1',           1, 0),
+        (N'B11_CFO',         N'Slot B11_CFO',          N'B1',           0, 0),
+        (N'B12',             N'Slot B12',              N'B1',           1, 0),
+        (N'B13_COO',         N'Slot B13 COO',          N'B1',           1, 0),
+        (N'B14',             N'Slot B14',              N'B2',           0, 0),
+        (N'B15',             N'Slot B15',              N'B2',           0, 0),
+        (N'B16',             N'Slot B16',              N'B2',           1, 0),
+        (N'B17',             N'Slot B17',              N'B2',           0, 0),
+        (N'B18',             N'Slot B18',              N'B2',           0, 0),
+        (N'B19',             N'Slot B19',              N'B2',           1, 0),
+        (N'B2',              N'Slot B2',               N'B1',           1, 0),
+        (N'B20',             N'Slot B20',              N'B2',           0, 0),
+        (N'B21',             N'Slot B21',              N'B2',           1, 0),
+        (N'B22',             N'Slot B22',              N'B2',           1, 0),
+        (N'B23',             N'Slot B23',              N'B2',           1, 0),
+        (N'B24',             N'Slot B24',              N'B2',           0, 0),
+        (N'B25',             N'Slot B25',              N'B2',           0, 0),
+        (N'B27',             N'Slot B27',              N'B2',           0, 0),
+        (N'B3_CEO',          N'Slot B3 CEO',           N'B1',           0, 0),
+        (N'B6_Reserved',     N'Slot B6 Reserved',      N'B1',           1, 0),
+        (N'B8_BDM',          N'Slot B8 BDM',           N'B1',           1, 0),
+        (N'B9',              N'Slot B9',               N'B1',           0, 0),
+        (N'CAM_01__roi',     N'Global ROI Mask',       N'Ground', 1, 0),
+        (N'CAM_02__roi',     N'Global ROI Mask',       N'Ground', 1, 0),
+        (N'G1',              N'Special Needs',         N'Ground', 0, 0),
+        (N'G2',              N'Slot G2',               N'Ground', 0, 0),
+        (N'G3',              N'Slot G3',               N'Ground', 1, 0),
+        (N'G4',              N'Slot G4',               N'Ground', 1, 0),
+        (N'G5',              N'Slot G5',               N'Ground', 0, 0),
+        (N'G6',              N'Slot G6',               N'Ground', 1, 0),
+        (N'GMIA',            N'Slot B5 GMIA',          N'B1',     1, 0),
+        (N'Park_Entry',      N'Slot Park_Entry',       N'Ground', 1, 0),
+        (N'V1_Violation_1',  N'Slot V1 Violation 1',   N'Ground', 1, 1),
+        (N'V2_Violation_2',  N'Slot V2 Violation 2',   N'Ground', 1, 1);
+    PRINT '  Seeded 36 parking_slots';
+END;
+
+/* Backfill reservation_type and reserved_for when the columns exist. */
+IF COL_LENGTH(N'dbo.parking_slots', N'reservation_type') IS NOT NULL
+BEGIN
+    -- G1 is a SPECIAL (disability / special-needs) slot
+    UPDATE dbo.parking_slots SET reservation_type = 'SPECIAL',  reserved_for = NULL        WHERE slot_id = 'G1'          AND (reservation_type IS NULL OR reservation_type NOT IN ('SPECIAL', 'EMPLOYEE'));
+    -- Named EMPLOYEE slots
+    UPDATE dbo.parking_slots SET reservation_type = 'EMPLOYEE', reserved_for = 'CRO'       WHERE slot_id = 'B1_CRO'      AND (reservation_type IS NULL OR reservation_type NOT IN ('SPECIAL', 'EMPLOYEE'));
+    UPDATE dbo.parking_slots SET reservation_type = 'EMPLOYEE', reserved_for = 'CEO'       WHERE slot_id = 'B3_CEO'      AND (reservation_type IS NULL OR reservation_type NOT IN ('SPECIAL', 'EMPLOYEE'));
+    UPDATE dbo.parking_slots SET reservation_type = 'EMPLOYEE', reserved_for = 'Reserved'  WHERE slot_id = 'B6_Reserved' AND (reservation_type IS NULL OR reservation_type NOT IN ('SPECIAL', 'EMPLOYEE'));
+    UPDATE dbo.parking_slots SET reservation_type = 'EMPLOYEE', reserved_for = 'CTO'       WHERE slot_id = 'B10_CTO'     AND (reservation_type IS NULL OR reservation_type NOT IN ('SPECIAL', 'EMPLOYEE'));
+    UPDATE dbo.parking_slots SET reservation_type = 'EMPLOYEE', reserved_for = 'CFO'       WHERE slot_id = 'B11_CFO'     AND (reservation_type IS NULL OR reservation_type NOT IN ('SPECIAL', 'EMPLOYEE'));
+    UPDATE dbo.parking_slots SET reservation_type = 'EMPLOYEE', reserved_for = 'COO'       WHERE slot_id = 'B13_COO'     AND (reservation_type IS NULL OR reservation_type NOT IN ('SPECIAL', 'EMPLOYEE'));
+    UPDATE dbo.parking_slots SET reservation_type = 'EMPLOYEE', reserved_for = 'BDM'       WHERE slot_id = 'B8_BDM'      AND (reservation_type IS NULL OR reservation_type NOT IN ('SPECIAL', 'EMPLOYEE'));
+    -- All other slots default to 'GENERAL'
+    UPDATE dbo.parking_slots SET reservation_type = 'GENERAL'  WHERE reservation_type IS NULL OR reservation_type NOT IN ('SPECIAL', 'EMPLOYEE', 'GENERAL');
+END;
+
+/* Backfill slot_type when the column exists. */
+IF COL_LENGTH(N'dbo.parking_slots', N'slot_type') IS NOT NULL
+BEGIN
+    UPDATE dbo.parking_slots SET slot_type = 'parking'      WHERE slot_type IS NULL OR slot_type = 'regular';
+    UPDATE dbo.parking_slots SET slot_type = 'special_zone' WHERE slot_id IN (N'B1_Entrence', N'Park_Entry');
+    UPDATE dbo.parking_slots SET slot_type = 'roi'          WHERE slot_id IN (N'CAM_01__roi', N'CAM_02__roi');
 END;
 
 /* Backfill floors lookup from the slots we just seeded. */
@@ -231,7 +260,7 @@ BEGIN
         (N'B27', NULL, N'occupied', '2026-04-14 10:22:35.653'),
         (N'B3_CEO', NULL, N'occupied', '2026-04-14 10:22:35.183'),
         (N'B6_Reserved', NULL, N'available', '2026-04-14 10:23:05.18'),
-        (N'B8', NULL, N'available', '2026-04-14 10:13:42.14'),
+        (N'B8_BDM', NULL, N'available', '2026-04-14 10:13:42.14'),
         (N'B9', NULL, N'occupied', '2026-04-14 05:07:21.223'),
         (N'G1', NULL, N'occupied', '2026-04-14 08:20:36.567'),
         (N'G2', NULL, N'occupied', '2026-04-14 10:13:10.943'),

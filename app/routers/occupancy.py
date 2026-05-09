@@ -42,6 +42,16 @@ def _is_occupied(status: Optional[str]) -> bool:
     s = status.upper()
     return s not in ("VACANT", "EMPTY", "AVAILABLE", "FREE")
 
+
+def _slot_type_excl(alias: str = "") -> str:
+    """SQL AND-fragment that excludes non-parking slot types (special_zone, roi).
+    Returns empty string when the slot_type column doesn't exist yet — schema-compat
+    shim so the gateway keeps working on pre-migration databases."""
+    if not _floor_schema().get("parking_slots_slot_type"):
+        return ""
+    p = f"{alias}." if alias else ""
+    return f"AND {p}slot_type NOT IN ('special_zone', 'roi')"
+
 router = APIRouter(prefix="/occupancy", tags=["Occupancy"])
 
 # zone_occupancy real columns:
@@ -49,7 +59,9 @@ router = APIRouter(prefix="/occupancy", tags=["Occupancy"])
 #   last_updated, zone_name, floor
 #
 # parking_slots real columns:
-#   slot_id, slot_name, floor, polygon, is_available, is_violation_zone
+#   slot_id, slot_name, floor, polygon, is_available, is_violation_zone,
+#   slot_type, reservation_type, reserved_for
+#   + WS-8 additions: id (INT PK), floor_id (FK → floors)
 #
 # slot_status real columns:
 #   id, slot_id, plate_number, status, time
@@ -70,13 +82,17 @@ async def occupancy_kpis(db: Session = Depends(get_db)):
     (line-crossing) vs `/occupancy/floors[*].slot_occupancy_count` (slot-status)
     per floor to surface drift; the kpi headline no longer reflects that
     disagreement."""
-    total_spots = scalar(db, "SELECT COUNT(*) FROM parking_slots WHERE slot_type NOT IN ('special_zone', 'roi')") or 0
+    total_spots = scalar(
+        db,
+        f"SELECT COUNT(*) FROM parking_slots WHERE is_violation_zone = 0 {_slot_type_excl()}",
+    ) or 0
 
     # Same SQL as /occupancy/totals (slot-status, latest row per slot).
     occupied_spots = scalar(db, f"""
         SELECT COUNT(*) FROM parking_slots pk
         {_LATEST_STATUS_JOIN}
-        WHERE pk.slot_type NOT IN ('special_zone', 'roi')
+        WHERE pk.is_violation_zone = 0
+          {_slot_type_excl('pk')}
           AND ss.status IS NOT NULL
           AND ss.status NOT IN ('empty', 'available', 'free', 'VACANT')
     """) or 0
@@ -123,10 +139,11 @@ async def get_zones(
     if schema["floors_table"] and schema["parking_slots_floor_id"]:
         floor_counts = rows(
             db,
-            """
+            f"""
             SELECT f.name AS floor_name, COUNT(*) AS cnt
             FROM parking_slots ps JOIN floors f ON f.id = ps.floor_id
-            WHERE ps.slot_type NOT IN ('special_zone', 'roi')
+            WHERE ps.is_violation_zone = 0
+              {_slot_type_excl('ps')}
             GROUP BY f.name
             """,
         )
@@ -134,11 +151,12 @@ async def get_zones(
         # Pre-migration fallback: group by the legacy `floor` string column.
         floor_counts = rows(
             db,
-            """
+            f"""
             SELECT ps.floor AS floor_name, COUNT(*) AS cnt
             FROM parking_slots ps
             WHERE ps.floor IS NOT NULL
-              AND ps.slot_type NOT IN ('special_zone', 'roi')
+              AND ps.is_violation_zone = 0
+              {_slot_type_excl('ps')}
             GROUP BY ps.floor
             """,
         )
@@ -254,7 +272,7 @@ async def get_slots(
     floor: Optional[str] = Query(None),
     floor_id: Optional[int] = Query(None),
     is_available: Optional[bool] = Query(None),
-    is_violation_zone: Optional[bool] = Query(None),
+    reservation_type: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     """Paginated slot grid — joins parking_slots with the latest slot_status row.
@@ -263,11 +281,15 @@ async def get_slots(
     the per-floor grouping should call `/occupancy/slots/by-floor` instead,
     which returns `list[FloorSlotGroup]` and is the canonical home for that
     view. This endpoint always returns a `PagedResponse[SlotListItem]`.
+
+    Violation-zone rows (is_violation_zone = 1) are permanently excluded —
+    they are alert trigger areas, not real parking spaces.
     """
     # WS-8 schema-compat shim — branch on each probe (Pattern A + C).
     schema = _floor_schema()
     resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=floor)
-    clauses = ["1=1"]
+    # Violation zones are excluded unconditionally from this endpoint.
+    clauses = ["ps.is_violation_zone = 0"]
     params: dict = {}
 
     if resolved_floor_id is not None and schema["parking_slots_floor_id"]:
@@ -287,11 +309,14 @@ async def get_slots(
     if is_available is not None:
         clauses.append("ps.is_available = :is_available")
         params["is_available"] = 1 if is_available else 0
-    if is_violation_zone is not None:
-        clauses.append("ps.is_violation_zone = :is_vz")
-        params["is_vz"] = 1 if is_violation_zone else 0
+    if reservation_type is not None and schema.get("parking_slots_reservation_type"):
+        clauses.append("ps.parking_category = :reservation_type")
+        params["reservation_type"] = reservation_type
 
-    where = " AND ".join(clauses) + " AND ps.slot_type NOT IN ('special_zone', 'roi')"
+    slot_type_clause = _slot_type_excl("ps").lstrip("AND ").strip()
+    if slot_type_clause:
+        clauses.append(slot_type_clause)
+    where = " AND ".join(clauses)
     total = scalar(db, f"SELECT COUNT(*) FROM parking_slots ps WHERE {where}", params)
 
     params["offset"]    = (page - 1) * page_size
@@ -314,6 +339,8 @@ async def get_slots(
     else:
         ps_floor_id_col = "NULL AS floor_id"
         floor_id_lookup_join = ""
+    ps_category_col = "ps.parking_category AS reservation_type" if schema.get("parking_slots_reservation_type") else "NULL AS reservation_type"
+    ps_reserved_col  = "ps.reserved_for"     if schema.get("parking_slots_reserved_for")     else "NULL AS reserved_for"
     items = rows(db, f"""
         SELECT
             {ps_id_col},
@@ -323,6 +350,8 @@ async def get_slots(
             {ps_floor_id_col},
             ps.is_available,
             ps.is_violation_zone,
+            {ps_category_col},
+            {ps_reserved_col},
             ss.plate_number     AS current_plate,
             ss.status           AS current_status,
             ss.time             AS status_updated_at
@@ -372,9 +401,12 @@ async def export_occupancy_csv(
     # =========================
     # 1. KPI Section
     # =========================
-    total_spots = scalar(db, "SELECT COUNT(*) FROM parking_slots WHERE slot_type NOT IN ('special_zone', 'roi')")
+    total_spots = scalar(
+        db,
+        f"SELECT COUNT(*) FROM parking_slots WHERE is_violation_zone = 0 {_slot_type_excl()}",
+    )
 
-    occupied = scalar(db, """
+    occupied = scalar(db, f"""
         SELECT COUNT(DISTINCT ss.slot_id)
         FROM slot_status ss
         INNER JOIN (
@@ -385,7 +417,8 @@ async def export_occupancy_csv(
         ON latest_ss.slot_id = ss.slot_id
         AND latest_ss.latest = ss.time
         INNER JOIN parking_slots pk ON pk.slot_id = ss.slot_id
-        WHERE pk.slot_type NOT IN ('special_zone', 'roi')
+        WHERE pk.is_violation_zone = 0
+          {_slot_type_excl('pk')}
           AND ss.status NOT IN ('empty', 'available', 'free')
     """) or 0
 
@@ -402,10 +435,11 @@ async def export_occupancy_csv(
     # =========================
     # 2. Floors Section (replaces legacy Zones section)
     # =========================
-    floor_rows = rows(db, """
+    floor_rows = rows(db, f"""
         SELECT DISTINCT floor FROM parking_slots
         WHERE floor IS NOT NULL
-          AND slot_type NOT IN ('special_zone', 'roi')
+          AND is_violation_zone = 0
+          {_slot_type_excl()}
         ORDER BY floor
     """)
     floors = [r["floor"] for r in floor_rows if not floor or r["floor"] == floor]
@@ -452,15 +486,22 @@ async def export_occupancy_csv(
         )
         slot_params["search"] = f"%{search}%"
 
-    slot_where = " AND ".join(slot_clauses) + " AND ps.slot_type NOT IN ('special_zone', 'roi')"
+    slot_clauses.insert(0, "ps.is_violation_zone = 0")
+    slot_type_clause_csv = _slot_type_excl("ps").lstrip("AND ").strip()
+    if slot_type_clause_csv:
+        slot_clauses.append(slot_type_clause_csv)
+    slot_where = " AND ".join(slot_clauses)
 
+    exp_category_col = "ps.parking_category AS reservation_type" if schema.get("parking_slots_reservation_type") else "NULL AS reservation_type"
+    exp_reserved_col  = "ps.reserved_for"     if schema.get("parking_slots_reserved_for")     else "NULL AS reserved_for"
     slots = rows(db, f"""
         SELECT
             ps.slot_id,
             ps.slot_name,
             ps.floor,
             ps.is_available,
-            ps.is_violation_zone,
+            {exp_category_col},
+            {exp_reserved_col},
             ss.plate_number AS current_plate,
             ss.status AS current_status,
             ss.time AS status_updated_at
@@ -489,7 +530,8 @@ async def export_occupancy_csv(
         "slot_name",
         "floor",
         "is_available",
-        "is_violation_zone",
+        "reservation_type",
+        "reserved_for",
         "current_plate",
         "current_status",
         "status_updated_at"
@@ -501,7 +543,8 @@ async def export_occupancy_csv(
             s["slot_name"],
             s["floor"],
             s["is_available"],
-            s["is_violation_zone"],
+            s["reservation_type"],
+            s["reserved_for"],
             s["current_plate"],
             s["current_status"],
             s["status_updated_at"],
@@ -539,12 +582,14 @@ def _build_floor_occupancy(
     # else fall back to the legacy string `floor` column.
     if schema["parking_slots_floor_id"] and resolved_floor_id is not None:
         max_capacity = scalar(
-            db, "SELECT COUNT(*) FROM parking_slots WHERE floor_id = :fid AND slot_type NOT IN ('special_zone', 'roi')",
+            db,
+            f"SELECT COUNT(*) FROM parking_slots WHERE floor_id = :fid AND is_violation_zone = 0 {_slot_type_excl()}",
             {"fid": resolved_floor_id},
         ) or 0
     else:
         max_capacity = scalar(
-            db, "SELECT COUNT(*) FROM parking_slots WHERE floor = :f AND slot_type NOT IN ('special_zone', 'roi')",
+            db,
+            f"SELECT COUNT(*) FROM parking_slots WHERE floor = :f AND is_violation_zone = 0 {_slot_type_excl()}",
             {"f": floor},
         ) or 0
 
@@ -555,7 +600,8 @@ def _build_floor_occupancy(
             FROM parking_slots pk
             {_LATEST_STATUS_JOIN}
             WHERE pk.floor_id = :fid
-              AND pk.slot_type NOT IN ('special_zone', 'roi')
+              AND pk.is_violation_zone = 0
+              {_slot_type_excl('pk')}
         """, {"fid": resolved_floor_id})
     else:
         slot_rows = rows(db, f"""
@@ -563,7 +609,8 @@ def _build_floor_occupancy(
             FROM parking_slots pk
             {_LATEST_STATUS_JOIN}
             WHERE pk.floor = :f
-              AND pk.slot_type NOT IN ('special_zone', 'roi')
+              AND pk.is_violation_zone = 0
+              {_slot_type_excl('pk')}
         """, {"f": floor})
     slot_occupancy_count = sum(1 for r in slot_rows if _is_occupied(r.get("status")))
 
@@ -666,13 +713,17 @@ async def get_floors(
 @router.get("/totals", response_model=OccupancyTotals)
 async def get_occupancy_totals(db: Session = Depends(get_db)):
     """Garage-wide rollup — replaces the synthetic GARAGE-TOTAL zone_occupancy row."""
-    total_slots = scalar(db, "SELECT COUNT(*) FROM parking_slots WHERE slot_type NOT IN ('special_zone', 'roi')") or 0
+    total_slots = scalar(
+        db,
+        f"SELECT COUNT(*) FROM parking_slots WHERE is_violation_zone = 0 {_slot_type_excl()}",
+    ) or 0
 
     # occupied_slots = distinct slots with a non-vacant latest status
     occupied_slots = scalar(db, f"""
         SELECT COUNT(*) FROM parking_slots pk
         {_LATEST_STATUS_JOIN}
-        WHERE pk.slot_type NOT IN ('special_zone', 'roi')
+        WHERE pk.is_violation_zone = 0
+          {_slot_type_excl('pk')}
           AND ss.status IS NOT NULL
           AND ss.status NOT IN ('empty', 'available', 'free', 'VACANT')
     """) or 0
@@ -714,7 +765,8 @@ async def get_slots_by_floor(
     schema = _floor_schema()
     # WS-8: resolve either floor_id or floor name into the integer key for the WHERE clause.
     resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=floor)
-    clauses = ["1=1"]
+    # Violation zones are permanently excluded from the slot grid.
+    clauses = ["pk.is_violation_zone = 0"]
     params: dict = {}
     if resolved_floor_id is not None and schema["parking_slots_floor_id"]:
         # Hybrid filter — match by integer when the row was backfilled, else
@@ -731,7 +783,10 @@ async def get_slots_by_floor(
     elif floor:
         clauses.append("pk.floor = :floor")
         params["floor"] = floor
-    where = " AND ".join(clauses) + " AND pk.slot_type NOT IN ('special_zone', 'roi')"
+    slot_type_clause_bf = _slot_type_excl("pk").lstrip("AND ").strip()
+    if slot_type_clause_bf:
+        clauses.append(slot_type_clause_bf)
+    where = " AND ".join(clauses)
 
     # WS-8: surface pk.id and pk.floor_id alongside legacy keys (NULL fallback).
     # COALESCE pk.floor_id with a name-based lookup so the response always
@@ -751,6 +806,8 @@ async def get_slots_by_floor(
     else:
         pk_floor_id_col = "NULL AS floor_id"
         floor_id_lookup_join = ""
+    pk_category_col = "pk.parking_category AS reservation_type" if schema.get("parking_slots_reservation_type") else "NULL AS reservation_type"
+    pk_reserved_col  = "pk.reserved_for"     if schema.get("parking_slots_reserved_for")     else "NULL AS reserved_for"
     data = rows(db, f"""
         SELECT
             {pk_id_col},
@@ -760,6 +817,8 @@ async def get_slots_by_floor(
             {pk_floor_id_col},
             pk.is_available,
             pk.is_violation_zone,
+            {pk_category_col},
+            {pk_reserved_col},
             ss.plate_number     AS current_plate,
             ss.status           AS current_status,
             ss.time             AS status_updated_at
@@ -801,9 +860,10 @@ async def get_slot_detail(slot_id: str, db: Session = Depends(get_db)):
     + recent alerts. One fetch per view."""
     # WS-8 schema-compat shim — Pattern A: NULL fallback when columns missing.
     schema = _floor_schema()
-    pk_id_col = "pk.id" if schema["parking_slots_id"] else "NULL AS id"
+    pk_id_col       = "pk.id"       if schema["parking_slots_id"]       else "NULL AS id"
     pk_floor_id_col = "pk.floor_id" if schema["parking_slots_floor_id"] else "NULL AS floor_id"
-    # WS-8: surface pk.id (slot integer PK) and pk.floor_id alongside legacy keys.
+    pk_category_col = "pk.parking_category AS reservation_type" if schema.get("parking_slots_reservation_type") else "NULL AS reservation_type"
+    pk_reserved_col = "pk.reserved_for"     if schema.get("parking_slots_reserved_for")     else "NULL AS reserved_for"
     slot_rows = rows(db, f"""
         SELECT
             {pk_id_col},
@@ -813,6 +873,8 @@ async def get_slot_detail(slot_id: str, db: Session = Depends(get_db)):
             {pk_floor_id_col},
             pk.is_available,
             pk.is_violation_zone AS is_violation_slot,
+            {pk_category_col},
+            {pk_reserved_col},
             pk.polygon,
             ss.plate_number     AS current_plate,
             ss.status           AS current_status,
@@ -915,6 +977,8 @@ async def get_slot_detail(slot_id: str, db: Session = Depends(get_db)):
         floor_id=s.get("floor_id"),
         is_available=bool(s.get("is_available")) if s.get("is_available") is not None else True,
         is_violation_slot=bool(s.get("is_violation_slot")) if s.get("is_violation_slot") is not None else False,
+        reservation_type=s.get("reservation_type"),
+        reserved_for=s.get("reserved_for"),
         polygon=parsed_polygon,
         current=current,
         last_occupant=last_occupant,

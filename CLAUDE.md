@@ -127,6 +127,21 @@ and updates `cameras.last_check_at` / `last_seen_at` / `last_status`. Set
   same data grouped by floor; `/occupancy/slots/{slot_id}` returns
   `SlotDetail` (single slot + current occupancy + last_occupant + recent
   events + recent alerts).
+- `/occupancy/export` streams a CSV with KPIs, per-floor summary, and slot
+  grid — same `floor` / `search` / `reservation_type` filters as the list.
+
+**Violation-zone exclusion (permanent):** rows where `is_violation_zone = 1`
+(e.g. `V1_Violation_1`, `V2_Violation_2`) are **not parking spaces** — they
+are alert-trigger zones only. Every occupancy query that counts or lists slots
+includes `AND is_violation_zone = 0` unconditionally. `/occupancy/slots` no
+longer accepts an `?is_violation_zone=` filter param; the detail endpoint
+`/occupancy/slots/{slot_id}` will still serve a violation-zone row if one
+is requested directly by ID.
+
+**New slot fields returned by slot endpoints:** `reservation_type`
+(`'GENERAL'` / `'SPECIAL'` / `'EMPLOYEE'`) and `reserved_for` (free-text, e.g. `'CEO'`).
+`GET /occupancy/slots` accepts `?reservation_type=SPECIAL` to filter to
+reserved slots only.
 
 ### Conventions every router follows
 
@@ -170,6 +185,24 @@ Boot logs the active offset so ops can confirm at startup. **PMS-AI now reads th
 ## Tables this gateway touches
 
 `vehicles`, `parking_sessions`, `entry_exit_log`, `alerts`, `zone_occupancy`, `parking_slots`, `slot_status`, `camera_feeds`, `cameras`. Schemas live in `sql/bootstrap.sql` (the consolidated source of truth, idempotent) — read that, do not invent column names. Real column lists are also commented at the top of `routers/entry_exit.py` and `routers/occupancy.py` for the most-touched tables.
+
+### `parking_slots` columns (full list)
+
+| Column | Type | Notes |
+|---|---|---|
+| `slot_id` | `VARCHAR(50)` | Business PK (string, e.g. `B1_CRO`) |
+| `slot_name` | `VARCHAR(100)` | Display label |
+| `floor` | `VARCHAR(50)` | Legacy string floor key (`B1`, `B2`, `Ground`) |
+| `polygon` | `NVARCHAR(MAX)` | JSON-encoded polygon coords for the slot overlay |
+| `is_available` | `BIT` | Operator-managed availability flag |
+| `is_violation_zone` | `BIT` | `1` = alert-trigger area, **not a real parking space**. All occupancy endpoints permanently exclude these rows from every count and slot list. |
+| `slot_type` | `VARCHAR(50)` | Occupancy filter class: `'regular'` (default), `'special_zone'`, `'roi'`. Non-regular types are excluded from counts via `_slot_type_excl()` compat helper in `routers/occupancy.py`. |
+| `reservation_type` | `VARCHAR(50)` | Operator category: `'GENERAL'`, `'SPECIAL'`, `'EMPLOYEE'`. Nullable — NULL rows are returned as-is. Filterable via `?reservation_type=` on `GET /occupancy/slots`. |
+| `reserved_for` | `VARCHAR(200)` | Free-text: who the slot is reserved for (`'CEO'`, `'CTO'`, employee ID, …). NULL on non-reserved slots. |
+| `id` | `INT IDENTITY` | Surrogate integer PK (WS-8). Future FK target; currently a UNIQUE index, not the primary key. |
+| `floor_id` | `INT` | FK → `floors.id` (WS-8). Backfilled from the string `floor` column. |
+
+**Schema-compat shim for new columns:** `routers/_helpers.py:_floor_schema()` probes `INFORMATION_SCHEMA` for `parking_slots_slot_type`, `parking_slots_reservation_type`, and `parking_slots_reserved_for`. All three SELECT expressions fall back to `NULL AS col` when the column is absent so the gateway keeps working on pre-migration databases. When adding a filter or SELECT that touches one of these columns, check `schema.get("parking_slots_<col>")` before using it.
 
 ## Configuration
 
