@@ -55,6 +55,9 @@ def _floor_schema() -> dict:
             "floors_table":                       has_table("floors"),
             "parking_slots_id":                   has_col("parking_slots", "id"),
             "parking_slots_floor_id":             has_col("parking_slots", "floor_id"),
+            "parking_slots_slot_type":            has_col("parking_slots", "slot_type"),
+            "parking_slots_reservation_type":     has_col("parking_slots", "reservation_type"),
+            "parking_slots_reserved_for":         has_col("parking_slots", "reserved_for"),
             "parking_sessions_floor_id":          has_col("parking_sessions", "floor_id"),
             "parking_sessions_parking_slot_id":   has_col("parking_sessions", "parking_slot_id"),
             # `cameras.floor` (string) and `cameras.watches_floor` (string)

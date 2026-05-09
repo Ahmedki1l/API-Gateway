@@ -265,17 +265,11 @@ async def alert_stats(db: Session = Depends(get_db)):
               AND alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation')
         """
 
-    # facility_today_utc() returns the UTC instant of facility-local midnight today.
-    start_of_day_utc = facility_today_utc()
-
     return AlertStats(
         active_alerts=scalar(db, "SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0") or 0,
         critical_violations=scalar(db, critical_sql) or 0,
-        resolved_today=scalar(db, """
-            SELECT COUNT(*) FROM alerts
-            WHERE is_resolved=1 AND is_test=0
-              AND resolved_at >= :start_of_day
-        """, {"start_of_day": start_of_day_utc}) or 0,
+        resolved_total=scalar(db,
+            "SELECT COUNT(*) FROM alerts WHERE is_resolved=1 AND is_test=0") or 0,
     )
  
  

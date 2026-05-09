@@ -80,6 +80,8 @@ class SlotRef(BaseModel):
     is_available: bool = True
     is_violation_slot: bool = False
     polygon: Optional[list] = None
+    reservation_type: Optional[str] = None
+    reserved_for: Optional[str] = None
 
 
 class CameraRef(BaseModel):
@@ -219,7 +221,7 @@ class VehicleEvent(BaseModel):
 class AlertStats(BaseModel):
     active_alerts: int
     critical_violations: int
-    resolved_today: int
+    resolved_total: int
 
 
 class AlertItem(BaseModel):
@@ -308,8 +310,8 @@ class VehicleEventDetail(VehicleEvent):
 
 # ── Entry / Exit ──────────────────────────────────────────────────────────────
 class EntryExitKPIs(BaseModel):
-    total_vehicles_today: int
-    currently_parked: int
+    total_enter: int
+    total_exit: int
     avg_stay_minutes: float
     overstays: int
 
@@ -323,8 +325,9 @@ class TrafficBucket(BaseModel):
 # ── Vehicles ──────────────────────────────────────────────────────────────────
 class VehicleKPIs(BaseModel):
     total_vehicles: int
-    active_vehicles: int
-    employee_vehicles: int
+    unregistered: int
+    registered: int
+    employee: int
 
 
 class VehicleCreate(BaseModel):
@@ -495,6 +498,8 @@ class SlotListItem(BaseModel):
         validation_alias="is_violation_zone",
         serialization_alias="is_violation_slot",
     )
+    reservation_type: Optional[str] = None
+    reserved_for: Optional[str] = None
     current_plate: Optional[str] = None
     current_status: Optional[str] = None
     status_updated_at: Optional[datetime] = None

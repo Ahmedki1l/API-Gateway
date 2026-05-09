@@ -151,21 +151,26 @@ async def entry_exit_kpis(
         start_utc = dt_local.astimezone(timezone.utc)
         end_utc   = (dt_local + timedelta(days=1)).astimezone(timezone.utc)
         date_filter = "AND entry_time >= :start AND entry_time < :end"
+        exit_date_filter = "AND exit_time >= :start AND exit_time < :end"
         params = {"start": start_utc, "end": end_utc}
     else:
         # facility_today_utc() returns the UTC instant of facility-local midnight today.
         start_utc = facility_today_utc()
         date_filter = "AND entry_time >= :start"
+        exit_date_filter = "AND exit_time >= :start"
         params = {"start": start_utc}
 
-    total = scalar(db, f"""
-        SELECT COUNT(DISTINCT plate_number)
+    total_enter = scalar(db, f"""
+        SELECT COUNT(*)
         FROM parking_sessions
         WHERE 1=1 {date_filter}
     """, params)
 
-    currently_parked = scalar(db,
-        "SELECT COUNT(*) FROM parking_sessions WHERE status = 'open'")
+    total_exit = scalar(db, f"""
+        SELECT COUNT(*)
+        FROM parking_sessions
+        WHERE exit_time IS NOT NULL {exit_date_filter}
+    """, params)
 
     # duration_seconds → minutes average (exclude still-open sessions)
     avg_stay_sec = scalar(db, f"""
@@ -177,9 +182,7 @@ async def entry_exit_kpis(
     """, params)
     avg_stay_minutes = round((avg_stay_sec or 0) / 60, 1)
 
-    # overstay = status column set by entry_exit_service or open > 24h
-    # Removed date_filter to show all current overstays regardless of entry day
-    # Option B: Overstays = unique vehicles that entered before today's local midnight
+    # Overstays = unique vehicles that entered before today's local midnight and are still open
     overstays = scalar(db, """
         SELECT COUNT(DISTINCT plate_number)
         FROM parking_sessions
@@ -189,8 +192,8 @@ async def entry_exit_kpis(
     """, {"start_of_today": start_utc})
 
     return EntryExitKPIs(
-        total_vehicles_today=total or 0,
-        currently_parked=currently_parked or 0,
+        total_enter=total_enter or 0,
+        total_exit=total_exit or 0,
         avg_stay_minutes=avg_stay_minutes,
         overstays=overstays or 0,
     )
