@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.config import facility_today_utc, facility_tz
+from app.config import facility_today_utc, facility_tz, localize_naive
 from app.database import get_db, scalar, rows
 from app.routers._helpers import _floor_schema, resolve_floor_id
 from app.services.snapshots import resolve_snapshot_url
@@ -43,16 +43,16 @@ def _live_duration_seconds(
     All timestamps are UTC; we normalise tz-naive values to UTC so the
     arithmetic doesn't blow up on DBs that strip tzinfo.
     """
-    def _as_utc(dt):
+    def _as_aware(dt):
         if dt is None:
             return None
         if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
+            return dt.replace(tzinfo=facility_tz())
+        return dt
 
-    entry_utc = _as_utc(entry_time)
-    exit_utc = _as_utc(exit_time)
-    parked_utc = _as_utc(parked_at)
+    entry_utc = _as_aware(entry_time)
+    exit_utc = _as_aware(exit_time)
+    parked_utc = _as_aware(parked_at)
     start = entry_utc or parked_utc
     if start is None:
         return None
@@ -74,7 +74,7 @@ def _event_from_row(r: dict, plate_number: str) -> VehicleEvent:
         vehicle_id=vehicle_id,
         direction="entry",
         camera_id=r.get("entry_camera_id"),
-        event_time=r.get("entry_time"),
+        event_time=localize_naive(r.get("entry_time")),
         snapshot_url=resolve_snapshot_url(r.get("entry_snapshot_path")),
         vehicle_event_id=r["id"],
     )
@@ -85,7 +85,7 @@ def _event_from_row(r: dict, plate_number: str) -> VehicleEvent:
             vehicle_id=vehicle_id,
             direction="exit",
             camera_id=r.get("exit_camera_id"),
-            event_time=r.get("exit_time"),
+            event_time=localize_naive(r.get("exit_time")),
             snapshot_url=resolve_snapshot_url(r.get("exit_snapshot_path")),
             vehicle_event_id=r["id"],
         )
@@ -112,8 +112,8 @@ def _event_from_row(r: dict, plate_number: str) -> VehicleEvent:
         floor=r.get("floor"),
         # WS-8.E: integer-id sibling field; None on legacy rows where backfill hasn't run.
         floor_id=r.get("floor_id"),
-        parked_at=r.get("parked_at"),
-        slot_left_at=r.get("slot_left_at"),
+        parked_at=localize_naive(r.get("parked_at")),
+        slot_left_at=localize_naive(r.get("slot_left_at")),
         slot_camera_id=r.get("slot_camera_id"),
         slot_snapshot_url=resolve_snapshot_url(r.get("slot_snapshot_path")),
     )
