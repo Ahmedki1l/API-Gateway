@@ -341,9 +341,9 @@ async def get_vehicles(
         clauses.append("COALESCE(v.vehicle_type, ps.vehicle_type) = :vehicle_type")
         params["vehicle_type"] = vehicle_type
     if is_registered is True:
-        clauses.append("v.id IS NOT NULL")
+        clauses.append("v.is_registered = 1")
     elif is_registered is False:
-        clauses.append("v.id IS NULL")
+        clauses.append("(v.id IS NULL OR v.is_registered = 0)")
     if is_employee is not None and cols["is_employee"]:
         # Filter on the registry's flag when present; falls back to the session row.
         clauses.append("COALESCE(v.is_employee, ps.is_employee) = :is_employee")
@@ -453,8 +453,7 @@ async def get_vehicles(
             COALESCE(v.vehicle_type, ps.vehicle_type) AS vehicle_type,
             v.employee_id,
             v.title,
-            -- Reflect whether the plate has a registry row, not just the v.is_registered flag
-            CASE WHEN v.id IS NOT NULL THEN 1 ELSE 0 END AS is_registered,
+            CAST(v.is_registered AS BIT) AS is_registered,
             v.registered_at,
             v.notes
             {extra},
