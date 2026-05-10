@@ -310,7 +310,7 @@ async def get_slots(
         clauses.append("ps.is_available = :is_available")
         params["is_available"] = 1 if is_available else 0
     if reservation_type is not None and schema.get("parking_slots_reservation_type"):
-        clauses.append("ps.parking_category = :reservation_type")
+        clauses.append("ps.reservation_type = :reservation_type")
         params["reservation_type"] = reservation_type
 
     slot_type_clause = _slot_type_excl("ps").lstrip("AND ").strip()
@@ -339,7 +339,7 @@ async def get_slots(
     else:
         ps_floor_id_col = "NULL AS floor_id"
         floor_id_lookup_join = ""
-    ps_category_col = "ps.parking_category AS reservation_type" if schema.get("parking_slots_reservation_type") else "NULL AS reservation_type"
+    ps_category_col = "ps.reservation_type AS reservation_type" if schema.get("parking_slots_reservation_type") else "NULL AS reservation_type"
     ps_reserved_col  = "ps.reserved_for"     if schema.get("parking_slots_reserved_for")     else "NULL AS reserved_for"
     items = rows(db, f"""
         SELECT
@@ -492,7 +492,7 @@ async def export_occupancy_csv(
         slot_clauses.append(slot_type_clause_csv)
     slot_where = " AND ".join(slot_clauses)
 
-    exp_category_col = "ps.parking_category AS reservation_type" if schema.get("parking_slots_reservation_type") else "NULL AS reservation_type"
+    exp_category_col = "ps.reservation_type AS reservation_type" if schema.get("parking_slots_reservation_type") else "NULL AS reservation_type"
     exp_reserved_col  = "ps.reserved_for"     if schema.get("parking_slots_reserved_for")     else "NULL AS reserved_for"
     slots = rows(db, f"""
         SELECT
@@ -806,7 +806,7 @@ async def get_slots_by_floor(
     else:
         pk_floor_id_col = "NULL AS floor_id"
         floor_id_lookup_join = ""
-    pk_category_col = "pk.parking_category AS reservation_type" if schema.get("parking_slots_reservation_type") else "NULL AS reservation_type"
+    pk_category_col = "pk.reservation_type AS reservation_type" if schema.get("parking_slots_reservation_type") else "NULL AS reservation_type"
     pk_reserved_col  = "pk.reserved_for"     if schema.get("parking_slots_reserved_for")     else "NULL AS reserved_for"
     data = rows(db, f"""
         SELECT
@@ -862,7 +862,7 @@ async def get_slot_detail(slot_id: str, db: Session = Depends(get_db)):
     schema = _floor_schema()
     pk_id_col       = "pk.id"       if schema["parking_slots_id"]       else "NULL AS id"
     pk_floor_id_col = "pk.floor_id" if schema["parking_slots_floor_id"] else "NULL AS floor_id"
-    pk_category_col = "pk.parking_category AS reservation_type" if schema.get("parking_slots_reservation_type") else "NULL AS reservation_type"
+    pk_category_col = "pk.reservation_type AS reservation_type" if schema.get("parking_slots_reservation_type") else "NULL AS reservation_type"
     pk_reserved_col = "pk.reserved_for"     if schema.get("parking_slots_reserved_for")     else "NULL AS reserved_for"
     slot_rows = rows(db, f"""
         SELECT
