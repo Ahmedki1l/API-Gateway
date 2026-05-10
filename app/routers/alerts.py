@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
  
-from app.config import facility_today_utc
+from app.config import facility_today_utc, localize_naive
 from app.database import get_db, rows, scalar
 from app.routers._helpers import _floor_schema, resolve_floor_id
 from app.services.snapshots import resolve_snapshot_url
@@ -382,6 +382,8 @@ async def get_alerts(
     """, params)
     for it in items:
         it["snapshot_url"] = resolve_snapshot_url(it.get("snapshot_url"))
+        it["triggered_at"] = localize_naive(it.get("triggered_at"))
+        it["resolved_at"]  = localize_naive(it.get("resolved_at"))
     return build_paged(items, total or 0, page, page_size)
  
  
@@ -750,8 +752,8 @@ async def get_alert(alert_id: int, db: Session = Depends(get_db)):
         description=a.get("description"),
         location=a.get("location"),
         snapshot_url=resolve_snapshot_url(a.get("snapshot_url")),
-        triggered_at=a.get("triggered_at"),
-        resolved_at=a.get("resolved_at"),
+        triggered_at=localize_naive(a.get("triggered_at")),
+        resolved_at=localize_naive(a.get("resolved_at")),
         is_resolved=a.get("is_resolved"),
         resolved_by=a.get("resolved_by"),
         resolution_notes=a.get("resolution_notes"),

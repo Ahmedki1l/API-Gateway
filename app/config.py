@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from pydantic_settings import BaseSettings
 
@@ -112,6 +113,14 @@ def facility_now_naive() -> datetime:
     Works regardless of host OS / container TZ — `datetime.now()` alone gives
     UTC on K8s pods running with TZ=UTC and silently lands rows 3h behind."""
     return datetime.now(facility_tz()).replace(tzinfo=None)
+
+
+def localize_naive(dt: Optional[datetime]) -> Optional[datetime]:
+    """Attach facility-local tzinfo to a naive DB timestamp so it serialises
+    with the correct UTC offset (e.g. +03:00) instead of being misread as UTC."""
+    if dt is None or dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=facility_tz())
 
 
 def facility_today_utc() -> datetime:
