@@ -238,6 +238,7 @@ class AlertItem(BaseModel):
     vehicle_type: Optional[str] = None
     slot_id: Optional[str] = None
     slot_name: Optional[str] = None
+    zone_id: Optional[str] = None
     floor: Optional[str] = None
     # Phase-1 of WS-8 floor refactor; populated alongside `floor` while both keys live.
     floor_id: Optional[int] = None
@@ -269,6 +270,7 @@ class AlertStreamEventLite(BaseModel):
     severity: Optional[str] = None
     slot_id: Optional[str] = None
     slot_name: Optional[str] = None
+    zone_id: Optional[str] = None
     plate_number: Optional[str] = None
     camera_id: Optional[str] = None
     floor: Optional[str] = None
