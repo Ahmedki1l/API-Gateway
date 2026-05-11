@@ -278,21 +278,33 @@ async def create_vehicle(
 async def vehicle_kpis(db: Session = Depends(get_db)):
     cols = _vehicle_extra_cols(db)
 
-    total = scalar(db, "SELECT COUNT(*) FROM vehicles") or 0
+    employee = (
+        scalar(db, "SELECT COUNT(*) FROM vehicles WHERE is_employee = 1") or 0
+    ) if cols["is_employee"] else 0
 
-    registered = scalar(db,
-        "SELECT COUNT(*) FROM vehicles WHERE is_registered = 1") or 0
+    registered = scalar(db, """
+        SELECT COUNT(*) FROM vehicles
+        WHERE is_registered = 1
+          AND (is_employee = 0 OR is_employee IS NULL)
+    """) or 0 if cols["is_employee"] else (
+        scalar(db, "SELECT COUNT(*) FROM vehicles WHERE is_registered = 1") or 0
+    )
 
-    unregistered = total - registered
+    unregistered = scalar(db, """
+        SELECT COUNT(*) FROM vehicles
+        WHERE (is_registered = 0 OR is_registered IS NULL)
+          AND (is_employee = 0 OR is_employee IS NULL)
+    """) or 0 if cols["is_employee"] else (
+        scalar(db, "SELECT COUNT(*) FROM vehicles WHERE is_registered = 0 OR is_registered IS NULL") or 0
+    )
 
-    employee = scalar(db, "SELECT COUNT(*) FROM vehicles WHERE is_employee = 1") \
-               if cols["is_employee"] else 0
+    total = registered + unregistered + employee
 
     return VehicleKPIs(
         total_vehicles=total,
         unregistered=unregistered,
         registered=registered,
-        employee=employee or 0,
+        employee=employee,
     )
 
 
