@@ -180,12 +180,17 @@ async def entry_exit_kpis(
         WHERE exit_time IS NOT NULL {exit_date_filter}
     """, params)
 
-    # duration_seconds → minutes average (exclude still-open sessions)
+    # duration_seconds → minutes average (include open sessions using live elapsed time)
     avg_stay_sec = scalar(db, f"""
-        SELECT AVG(CAST(duration_seconds AS FLOAT))
+        SELECT AVG(CAST(
+            CASE
+                WHEN duration_seconds IS NOT NULL THEN duration_seconds
+                WHEN entry_time IS NOT NULL THEN DATEDIFF(SECOND, entry_time, GETUTCDATE())
+                ELSE NULL
+            END
+        AS FLOAT))
         FROM parking_sessions
-        WHERE status != 'open'
-          AND duration_seconds IS NOT NULL
+        WHERE entry_time IS NOT NULL
           {date_filter}
     """, params)
     avg_stay_minutes = round((avg_stay_sec or 0) / 60, 1)
