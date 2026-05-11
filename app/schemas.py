@@ -128,10 +128,9 @@ class AIStatusResponse(BaseModel):
 
 
 class DashboardKPIs(BaseModel):
-    total_unique_plates: int
-    plates_seen_today: int
-    active_now: int
-    open_alerts: int
+    free_slots: int
+    occupied_slots: int
+    critical_alerts: int
 
 
 class ActiveVehicle(BaseModel):
@@ -202,6 +201,7 @@ class VehicleEvent(BaseModel):
     vehicle_type: Optional[str] = None
     is_employee: Optional[bool] = None
     status: Optional[str] = None  # "open" | "closed" | "overstay"
+    is_overstay: bool = False
     entry: EntryExitEvent
     exit: Optional[EntryExitEvent] = None
     duration_seconds: Optional[int] = None
@@ -238,6 +238,7 @@ class AlertItem(BaseModel):
     vehicle_type: Optional[str] = None
     slot_id: Optional[str] = None
     slot_name: Optional[str] = None
+    zone_id: Optional[str] = None
     floor: Optional[str] = None
     # Phase-1 of WS-8 floor refactor; populated alongside `floor` while both keys live.
     floor_id: Optional[int] = None
@@ -269,6 +270,7 @@ class AlertStreamEventLite(BaseModel):
     severity: Optional[str] = None
     slot_id: Optional[str] = None
     slot_name: Optional[str] = None
+    zone_id: Optional[str] = None
     plate_number: Optional[str] = None
     camera_id: Optional[str] = None
     floor: Optional[str] = None

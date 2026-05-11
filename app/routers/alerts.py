@@ -105,7 +105,7 @@ def _alert_query_bits(cols: dict) -> dict[str, str]:
             # sql/migrate_named_slot_violation_to_vehicle_intrusion.sql runs.
             # Keep the legacy name in the critical bucket so historical rows
             # render with the correct severity in the meantime.
-            "WHEN a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation') THEN 'critical' "
+            "WHEN a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation') THEN 'critical' "
             "WHEN a.alert_type IN ('unknown_vehicle','overstay','capacity_exceeded') THEN 'warning' "
             "ELSE 'info' END"
         )
@@ -160,11 +160,11 @@ def _where(search, severity, alert_type, resolved, date_from, date_to, cols, flo
                 # `named_slot_violation` is the legacy name for `vehicle_intrusion`
                 # (still present on historical rows until migration runs); both map
                 # to critical.
-                clauses.append("a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation')")
+                clauses.append("a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation')")
             elif severity == "warning":
                 clauses.append("a.alert_type IN ('unknown_vehicle','overstay','capacity_exceeded')")
             else:
-                clauses.append("a.alert_type NOT IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','unknown_vehicle','overstay','capacity_exceeded')")
+                clauses.append("a.alert_type NOT IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation','unknown_vehicle','overstay','capacity_exceeded')")
 
     if alert_type:
         clauses.append("a.alert_type = :alert_type")
@@ -226,6 +226,7 @@ def _normalize_stream_event(source_system: str, payload: dict) -> dict:
         "severity":      payload.get("severity", "info"),
         "slot_id":       payload.get("slot_id"),
         "slot_name":     slot_name,
+        "zone_id":       payload.get("zone_id"),
         "plate_number":  payload.get("plate_number"),
         "camera_id":     payload.get("camera_id"),
         "floor":         payload.get("floor"),
@@ -262,7 +263,7 @@ async def alert_stats(db: Session = Depends(get_db)):
         critical_sql = """
             SELECT COUNT(*) FROM alerts
             WHERE is_resolved=0 AND is_test=0
-              AND alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation')
+              AND alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation')
         """
 
     return AlertStats(
@@ -357,6 +358,7 @@ async def get_alerts(
             {vehicle_id_col},
             {bits["slot_id_expr"]}   AS slot_id,
             {bits["slot_name_expr"]} AS slot_name,
+            a.zone_id,
             {floor_expr}             AS floor,
             {floor_id_select},
             {bits["location_expr"]}  AS location,
@@ -560,6 +562,7 @@ async def get_alert(alert_id: int, db: Session = Depends(get_db)):
             a.plate_number,
             {bits["slot_id_expr"]}   AS slot_id,
             {bits["slot_name_expr"]} AS slot_name,
+            a.zone_id,
             {floor_expr}             AS floor,
             {floor_id_select},
             {bits["location_expr"]}  AS location,
@@ -744,6 +747,7 @@ async def get_alert(alert_id: int, db: Session = Depends(get_db)):
         vehicle_type=a.get("vehicle_type"),
         slot_id=a.get("slot_id"),
         slot_name=a.get("slot_name"),
+        zone_id=a.get("zone_id"),
         floor=floor_value,
         # WS-8: integer floor_id from the floors LEFT JOIN, alongside the legacy `floor` name.
         floor_id=a.get("floor_id"),
