@@ -222,7 +222,7 @@ async def create_vehicle(
             SET owner_name = :owner,
                 employee_id = :emp_id,
                 vehicle_type = :vtype,
-                title = :title,
+                title = COALESCE(:title, title),
                 is_employee = :is_employee,
                 phone = :phone,
                 email = :email,
@@ -247,7 +247,7 @@ async def create_vehicle(
             INSERT INTO vehicles
                 (plate_number, owner_name, employee_id, vehicle_type, title, is_employee, phone, email, notes, is_registered, registered_at)
             VALUES
-                (:plate, :owner, :emp_id, :vtype, :title, :is_employee, :phone, :email, :notes, 1, GETDATE())
+                (:plate, :owner, :emp_id, :vtype, COALESCE(:title, ''), :is_employee, :phone, :email, :notes, 1, GETDATE())
         """), {
             "plate":  body.plate_number,
             "owner":  body.owner_name,
@@ -278,20 +278,20 @@ async def create_vehicle(
 async def vehicle_kpis(db: Session = Depends(get_db)):
     cols = _vehicle_extra_cols(db)
 
-    total = scalar(db, "SELECT COUNT(*) FROM vehicles")
+    total = scalar(db, "SELECT COUNT(*) FROM vehicles") or 0
 
-    unregistered = scalar(db,
-        "SELECT COUNT(*) FROM vehicles WHERE notes LIKE '%Not registered%'")
+    registered = scalar(db,
+        "SELECT COUNT(*) FROM vehicles WHERE is_registered = 1") or 0
+
+    unregistered = total - registered
 
     employee = scalar(db, "SELECT COUNT(*) FROM vehicles WHERE is_employee = 1") \
                if cols["is_employee"] else 0
 
-    registered = (total or 0) - (unregistered or 0) - (employee or 0)
-
     return VehicleKPIs(
-        total_vehicles=total or 0,
-        unregistered=unregistered or 0,
-        registered=max(registered, 0),
+        total_vehicles=total,
+        unregistered=unregistered,
+        registered=registered,
         employee=employee or 0,
     )
 

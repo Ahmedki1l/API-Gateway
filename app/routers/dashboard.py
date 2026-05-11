@@ -4,9 +4,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.config import facility_today_utc
+from app.config import localize_naive
 from app.database import get_db, scalar, rows
 from app.routers._helpers import _floor_schema
+from app.routers.alerts import _alerts_extra_cols
+from app.routers.occupancy import _slot_type_excl
 from app.services.snapshots import resolve_snapshot_url
 from app.schemas import (
     ActiveVehicle,
@@ -89,37 +91,44 @@ async def ai_status():
 
 @router.get("/kpis", response_model=DashboardKPIs)
 async def dashboard_kpis(db: Session = Depends(get_db)):
-    # Registered-vehicle count from the vehicles registry (GA-1). The previous
-    # source (parking_sessions) inflated this number with unregistered plates,
-    # making the "Total Unique Plates" tile misleading to operators. The
-    # history-based reading is now exposed separately as `plates_seen_today`.
-    unique_plates = scalar(db, """
-        SELECT COUNT(DISTINCT plate_number)
-        FROM vehicles
-        WHERE plate_number IS NOT NULL
+    slot_excl = _slot_type_excl()
+    slot_excl_pk = _slot_type_excl("pk")
+
+    total_slots = scalar(db, f"""
+        SELECT COUNT(*) FROM parking_slots
+        WHERE is_violation_zone = 0 {slot_excl}
     """)
 
-    # facility_today_utc() returns the UTC instant of facility-local midnight today.
-    start_of_today_utc = facility_today_utc()
-    plates_seen_today = scalar(db, """
-        SELECT COUNT(DISTINCT plate_number)
-        FROM entry_exit_log
-        WHERE plate_number IS NOT NULL
-          AND event_time >= :start_of_today
-    """, {"start_of_today": start_of_today_utc})
+    occupied_slots = scalar(db, f"""
+        SELECT COUNT(*) FROM parking_slots pk
+        LEFT JOIN slot_status ss
+          ON ss.slot_id = pk.slot_id
+          AND ss.time = (SELECT MAX(time) FROM slot_status WHERE slot_id = pk.slot_id)
+        WHERE pk.is_violation_zone = 0
+          {slot_excl_pk}
+          AND ss.status IS NOT NULL
+          AND UPPER(ss.status) NOT IN ('EMPTY', 'AVAILABLE', 'FREE', 'VACANT')
+    """)
 
-    # parking_sessions.status = 'open' means still inside
-    active_now = scalar(db,
-        "SELECT COUNT(*) FROM parking_sessions WHERE status = 'open'")
+    occupied_slots = occupied_slots or 0
+    free_slots = (total_slots or 0) - occupied_slots
 
-    open_alerts = scalar(db,
-        "SELECT COUNT(*) FROM alerts WHERE is_resolved = 0 AND is_test = 0")
+    cols = _alerts_extra_cols()
+    if cols["severity"]:
+        critical_sql = "SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0 AND severity='critical'"
+    else:
+        critical_sql = """
+            SELECT COUNT(*) FROM alerts
+            WHERE is_resolved=0 AND is_test=0
+              AND alert_type IN ('violence','intrusion','vehicle_intrusion',
+                                 'vehicle_violation','named_slot_violation','special_needs_violation')
+        """
+    critical_alerts = scalar(db, critical_sql)
 
     return DashboardKPIs(
-        total_unique_plates=unique_plates or 0,
-        plates_seen_today=plates_seen_today or 0,
-        active_now=active_now or 0,
-        open_alerts=open_alerts or 0,
+        free_slots=free_slots,
+        occupied_slots=occupied_slots,
+        critical_alerts=critical_alerts or 0,
     )
  
  
@@ -172,7 +181,7 @@ async def active_vehicles(db: Session = Depends(get_db)):
         result.append(ActiveVehicle(
             plate_number=plate,
             vehicle_id=meta.get("vehicle_id"),
-            entry_time=meta["entry_time"],
+            entry_time=localize_naive(meta["entry_time"]),
             owner_name=meta["owner_name"],
             vehicle_type=meta["vehicle_type"],
             is_employee=meta["is_employee"],

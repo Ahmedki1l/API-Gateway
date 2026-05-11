@@ -69,6 +69,13 @@ def _event_from_row(r: dict, plate_number: str) -> VehicleEvent:
     The row should include the joined `owner_name`, `vehicle_type`, `is_employee`
     columns (queries below alias them under those names)."""
     vehicle_id = r.get("vehicle_id")
+    _today_naive = facility_today_utc().replace(tzinfo=None)
+    entry_time_raw = r.get("entry_time")
+    is_overstay = (
+        r.get("status") in ("open", "overstay")
+        and entry_time_raw is not None
+        and entry_time_raw < _today_naive
+    )
     entry = EntryExitEvent(
         plate_number=plate_number,
         vehicle_id=vehicle_id,
@@ -98,6 +105,7 @@ def _event_from_row(r: dict, plate_number: str) -> VehicleEvent:
         vehicle_type=r.get("vehicle_type"),
         is_employee=bool(is_employee_raw) if is_employee_raw is not None else None,
         status=r.get("status"),
+        is_overstay=is_overstay,
         entry=entry,
         exit=exit_event,
         duration_seconds=_live_duration_seconds(
@@ -415,8 +423,13 @@ async def get_entry_exit(
         clauses.append("ps.is_employee = :is_employee")
         params["is_employee"] = 1 if is_employee else 0
     if status:
-        clauses.append("ps.status = :status")
-        params["status"] = status
+        if status == "overstay":
+            clauses.append("ps.status IN ('open', 'overstay')")
+            clauses.append("ps.entry_time < :overstay_cutoff")
+            params["overstay_cutoff"] = facility_today_utc()
+        else:
+            clauses.append("ps.status = :status")
+            params["status"] = status
     if date_from:
         clauses.append("CAST(ps.entry_time AS DATE) >= :date_from")
         params["date_from"] = str(date_from)
@@ -512,8 +525,13 @@ async def export_entry_exit_csv(
         clauses.append("ps.is_employee = :is_employee")
         params["is_employee"] = 1 if is_employee else 0
     if status:
-        clauses.append("ps.status = :status")
-        params["status"] = status
+        if status == "overstay":
+            clauses.append("ps.status IN ('open', 'overstay')")
+            clauses.append("ps.entry_time < :overstay_cutoff")
+            params["overstay_cutoff"] = facility_today_utc()
+        else:
+            clauses.append("ps.status = :status")
+            params["status"] = status
     if date_from:
         clauses.append("CAST(ps.entry_time AS DATE) >= :date_from")
         params["date_from"] = str(date_from)

@@ -105,7 +105,7 @@ def _alert_query_bits(cols: dict) -> dict[str, str]:
             # sql/migrate_named_slot_violation_to_vehicle_intrusion.sql runs.
             # Keep the legacy name in the critical bucket so historical rows
             # render with the correct severity in the meantime.
-            "WHEN a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation') THEN 'critical' "
+            "WHEN a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation') THEN 'critical' "
             "WHEN a.alert_type IN ('unknown_vehicle','overstay','capacity_exceeded') THEN 'warning' "
             "ELSE 'info' END"
         )
@@ -160,11 +160,11 @@ def _where(search, severity, alert_type, resolved, date_from, date_to, cols, flo
                 # `named_slot_violation` is the legacy name for `vehicle_intrusion`
                 # (still present on historical rows until migration runs); both map
                 # to critical.
-                clauses.append("a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation')")
+                clauses.append("a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation')")
             elif severity == "warning":
                 clauses.append("a.alert_type IN ('unknown_vehicle','overstay','capacity_exceeded')")
             else:
-                clauses.append("a.alert_type NOT IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','unknown_vehicle','overstay','capacity_exceeded')")
+                clauses.append("a.alert_type NOT IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation','unknown_vehicle','overstay','capacity_exceeded')")
 
     if alert_type:
         clauses.append("a.alert_type = :alert_type")
@@ -262,7 +262,7 @@ async def alert_stats(db: Session = Depends(get_db)):
         critical_sql = """
             SELECT COUNT(*) FROM alerts
             WHERE is_resolved=0 AND is_test=0
-              AND alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation')
+              AND alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation')
         """
 
     return AlertStats(
