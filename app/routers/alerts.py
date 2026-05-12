@@ -409,6 +409,10 @@ async def get_alerts(
         atype = it.get("alert_type", "")
         it["triggered_at"] = _fix_ts(it.get("triggered_at"), atype)
         it["resolved_at"]  = _fix_ts(it.get("resolved_at"),  atype)
+    items.sort(
+        key=lambda it: (it.get("triggered_at") or datetime.min).replace(tzinfo=None),
+        reverse=True,
+    )
     return build_paged(items, total or 0, page, page_size)
  
  
@@ -853,6 +857,13 @@ async def export_alerts_csv(
 
     for row in data:
         row["Snapshot URL"] = resolve_snapshot_url(row.get("Snapshot URL"))
+        atype = row.get("Type", "")
+        row["Triggered At"] = _fix_ts(row.get("Triggered At"), atype)
+        row["Resolved At"]  = _fix_ts(row.get("Resolved At"),  atype)
+    data.sort(
+        key=lambda r: (r.get("Triggered At") or datetime.min).replace(tzinfo=None),
+        reverse=True,
+    )
 
     headers = [
         "ID", "Plate Number", "Owner", "Type", "Severity",
