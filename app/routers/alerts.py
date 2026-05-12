@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
  
-from app.config import facility_today_utc, utc_naive_to_local
+from app.config import facility_today_utc, localize_naive
 from app.database import get_db, rows, scalar
 from app.routers._helpers import _floor_schema, resolve_floor_id
 from app.services.snapshots import resolve_snapshot_url
@@ -29,26 +29,9 @@ from app.services.upstream import iter_system1_alert_events, iter_system2_alert_
 from app.services.bus import alerts_bus
 from app.shared import build_paged, stream_csv
  
-# Alert types written by System 2 (VideoAnalytics) — triggered_at stored as
-# UTC naive via DEFAULT GETUTCDATE(). Must be converted to facility-local.
-# System 1 (PMS-AI) alert types write facility-local naive directly.
-_SYSTEM2_UTC_TYPES = frozenset({
-    "violation",
-    "vehicle_violation",
-    "vehicle_intrusion",
-    "named_slot_violation",
-    "special_needs_violation",
-})
-
-
-def _fix_ts(dt, alert_type: str):
-    """Return triggered_at/resolved_at with correct timezone handling.
-    System 2 types: UTC naive → convert to local. Others: pass through."""
-    if dt is None:
-        return None
-    if alert_type in _SYSTEM2_UTC_TYPES:
-        return utc_naive_to_local(dt)
-    return dt
+def _fix_ts(dt, alert_type: str = ""):
+    """Attach facility-local tz to a naive DB timestamp for serialisation."""
+    return localize_naive(dt)
 
 
 router = APIRouter(prefix="/alerts", tags=["Alerts"])
@@ -401,7 +384,7 @@ async def get_alerts(
         -- WS-8: integer floor_id alongside the legacy `floor` name string.
         {floors_join}
         WHERE {where}
-        ORDER BY a.triggered_at DESC
+        ORDER BY a.triggered_at DESC, a.id DESC
         OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
     """, params)
     for it in items:
@@ -409,10 +392,6 @@ async def get_alerts(
         atype = it.get("alert_type", "")
         it["triggered_at"] = _fix_ts(it.get("triggered_at"), atype)
         it["resolved_at"]  = _fix_ts(it.get("resolved_at"),  atype)
-    items.sort(
-        key=lambda it: (it.get("triggered_at") or datetime.min).replace(tzinfo=None),
-        reverse=True,
-    )
     return build_paged(items, total or 0, page, page_size)
  
  
@@ -756,7 +735,7 @@ async def get_alert(alert_id: int, db: Session = Depends(get_db)):
               (a.plate_number IS NOT NULL AND a.plate_number = :plate)
               OR ({bits["slot_id_expr"]} IS NOT NULL AND {bits["slot_id_expr"]} = :slot)
           )
-        ORDER BY a.triggered_at DESC
+        ORDER BY a.triggered_at DESC, a.id DESC
     """, {"id": alert_id, "plate": a.get("plate_number"), "slot": a.get("slot_id"),
           "triggered_at": a["triggered_at"]})
 
@@ -852,7 +831,7 @@ async def export_alerts_csv(
         {bits["slot_join"]}
         LEFT JOIN vehicles v ON v.plate_number = a.plate_number
         WHERE {where}
-        ORDER BY a.triggered_at DESC
+        ORDER BY a.triggered_at DESC, a.id DESC
     """, params)
 
     for row in data:
@@ -860,11 +839,6 @@ async def export_alerts_csv(
         atype = row.get("Type", "")
         row["Triggered At"] = _fix_ts(row.get("Triggered At"), atype)
         row["Resolved At"]  = _fix_ts(row.get("Resolved At"),  atype)
-    data.sort(
-        key=lambda r: (r.get("Triggered At") or datetime.min).replace(tzinfo=None),
-        reverse=True,
-    )
-
     headers = [
         "ID", "Plate Number", "Owner", "Type", "Severity",
         "Slot ID", "Slot Name", "Location", "Camera",
