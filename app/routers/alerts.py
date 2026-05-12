@@ -396,6 +396,7 @@ ALERT_TEMPLATES = [
     {"alert_type": "vehicle_violation", "severity": "critical", "description": "Illegal parking maneuver detected"},
     {"alert_type": "unknown_vehicle", "severity": "warning", "description": "Unregistered plate detected: ABC-123", "plate_number": "ABC-123"},
     {"alert_type": "vehicle_intrusion", "severity": "critical", "description": "Visitor parked in CEO reserved slot", "slot_id": "CEO-01", "slot_name": "CEO Reserved"},
+    {"alert_type": "special_needs_violation", "severity": "critical", "description": "Unauthorized vehicle in special needs slot"},
     {"alert_type": "overstay", "severity": "warning", "description": "Vehicle exceeded 24h limit", "plate_number": "XYZ-999"},
     {"alert_type": "capacity_exceeded", "severity": "info", "description": "Floor 1 is at 95% capacity", "floor": "1"},
 ]

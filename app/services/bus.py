@@ -1,9 +1,9 @@
 import asyncio
 import random
 import string
-from datetime import datetime
 from typing import Set, List, Optional
 
+from app.config import facility_now_naive
 from app.database import SessionLocal, rows
 
 def generate_plate():
@@ -77,7 +77,7 @@ class Broadcaster:
 
                     # Basic fields
                     template["id"] = random.randint(100000, 999999)
-                    template["triggered_at"] = datetime.now().isoformat()
+                    template["triggered_at"] = facility_now_naive().isoformat()
 
                     # Always assign camera_id
                     template["camera_id"] = generate_camera_id()
