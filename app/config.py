@@ -117,10 +117,24 @@ def facility_now_naive() -> datetime:
 
 def localize_naive(dt: Optional[datetime]) -> Optional[datetime]:
     """Attach facility-local tzinfo to a naive DB timestamp so it serialises
-    with the correct UTC offset (e.g. +03:00) instead of being misread as UTC."""
+    with the correct UTC offset (e.g. +03:00) instead of being misread as UTC.
+    Use only when the DB column is already facility-local-naive (the new convention
+    since 2026-05-07). For UTC-naive columns written by PMS-AI (e.g. triggered_at,
+    resolved_at in the alerts table), use utc_naive_to_local() instead."""
     if dt is None or dt.tzinfo is not None:
         return dt
     return dt.replace(tzinfo=facility_tz())
+
+
+def utc_naive_to_local(dt: Optional[datetime]) -> Optional[datetime]:
+    """Convert a UTC-naive DB timestamp to a facility-local-aware datetime.
+    PMS-AI writes some columns (e.g. alerts.triggered_at / resolved_at) with
+    datetime.utcnow(), so they are UTC-naive and must be shifted before attaching
+    the tz offset. localize_naive() would produce 07:25+03:00 (= 04:25 UTC) for a
+    07:25 UTC value; this function produces 10:25+03:00 (= 07:25 UTC) — correct."""
+    if dt is None or dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=timezone.utc).astimezone(facility_tz())
 
 
 def facility_today_utc() -> datetime:
