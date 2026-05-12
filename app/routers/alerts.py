@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
  
-from app.config import facility_today_utc
+from app.config import facility_today_utc, utc_naive_to_local
 from app.database import get_db, rows, scalar
 from app.routers._helpers import _floor_schema, resolve_floor_id
 from app.services.snapshots import resolve_snapshot_url
@@ -29,6 +29,27 @@ from app.services.upstream import iter_system1_alert_events, iter_system2_alert_
 from app.services.bus import alerts_bus
 from app.shared import build_paged, stream_csv
  
+# Alert types written by System 2 (VideoAnalytics) — triggered_at stored as
+# UTC naive via DEFAULT GETUTCDATE(). Must be converted to facility-local.
+# System 1 (PMS-AI) alert types write facility-local naive directly.
+_SYSTEM2_UTC_TYPES = frozenset({
+    "vehicle_violation",
+    "vehicle_intrusion",
+    "named_slot_violation",
+    "special_needs_violation",
+})
+
+
+def _fix_ts(dt, alert_type: str):
+    """Return triggered_at/resolved_at with correct timezone handling.
+    System 2 types: UTC naive → convert to local. Others: pass through."""
+    if dt is None:
+        return None
+    if alert_type in _SYSTEM2_UTC_TYPES:
+        return utc_naive_to_local(dt)
+    return dt
+
+
 router = APIRouter(prefix="/alerts", tags=["Alerts"])
  
  
@@ -384,7 +405,9 @@ async def get_alerts(
     """, params)
     for it in items:
         it["snapshot_url"] = resolve_snapshot_url(it.get("snapshot_url"))
-        # triggered_at / resolved_at are facility-local naive in the DB — pass through as-is.
+        atype = it.get("alert_type", "")
+        it["triggered_at"] = _fix_ts(it.get("triggered_at"), atype)
+        it["resolved_at"]  = _fix_ts(it.get("resolved_at"),  atype)
     return build_paged(items, total or 0, page, page_size)
  
  
@@ -756,8 +779,8 @@ async def get_alert(alert_id: int, db: Session = Depends(get_db)):
         description=a.get("description"),
         location=a.get("location"),
         snapshot_url=resolve_snapshot_url(a.get("snapshot_url")),
-        triggered_at=a.get("triggered_at"),
-        resolved_at=a.get("resolved_at"),
+        triggered_at=_fix_ts(a.get("triggered_at"), a.get("alert_type", "")),
+        resolved_at=_fix_ts(a.get("resolved_at"),  a.get("alert_type", "")),
         is_resolved=a.get("is_resolved"),
         resolved_by=a.get("resolved_by"),
         resolution_notes=a.get("resolution_notes"),

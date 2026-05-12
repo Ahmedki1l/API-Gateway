@@ -50,6 +50,20 @@ def check(label, db_value, expected_display, *, allow_seconds=2):
 # ---------------------------------------------------------------------------
 # Build 1000 test cases
 # ---------------------------------------------------------------------------
+SYSTEM2_UTC_TYPES = {"vehicle_violation", "vehicle_intrusion", "named_slot_violation", "special_needs_violation"}
+SYSTEM1_LOCAL_TYPES = {"unknown_vehicle", "overstay", "capacity_exceeded", "violence", "intrusion"}
+
+FACILITY_TZ_OBJ = timezone(FACILITY_OFFSET)
+
+def fix_ts(dt, alert_type):
+    """Mirror of _fix_ts in alerts.py."""
+    if dt is None:
+        return None
+    if alert_type in SYSTEM2_UTC_TYPES:
+        # UTC naive -> local aware
+        return dt.replace(tzinfo=timezone.utc).astimezone(FACILITY_TZ_OBJ)
+    return dt  # local naive pass-through
+
 PASS = FAIL = 0
 errors = []
 
@@ -59,44 +73,43 @@ utc_now   = now_utc()
 OFFSETS_MINUTES = [0, 1, 5, 15, 30, 60, 90, 120, 180, 240, 360, 480, 720, 1440, 2880]
 
 print("=" * 60)
-print("CASE A: System 1 alerts — DB stores facility-local naive")
-print("  These are correct: gateway passes through, frontend shows right time.")
+print("CASE A: System 1 alerts -- DB stores facility-local naive")
+print("  Pass-through: frontend receives naive ISO, treats as local.")
 print("=" * 60)
 case_a_pass = case_a_fail = 0
-for minutes_ago in OFFSETS_MINUTES:
-    for _ in range(int(1000 / len(OFFSETS_MINUTES))):
-        # System 1 writes facility_now_naive() — local time
-        db_val = local_now - timedelta(minutes=minutes_ago, seconds=random.randint(0, 59))
-        expected = db_val  # pass-through: displayed = DB value
-        ok = check(f"local {minutes_ago}m ago", db_val, expected)
-        if ok: case_a_pass += 1
-        else:  case_a_fail += 1; errors.append(f"Case A {minutes_ago}m")
+for atype in SYSTEM1_LOCAL_TYPES:
+    for minutes_ago in OFFSETS_MINUTES:
+        for _ in range(13):
+            db_val = local_now - timedelta(minutes=minutes_ago, seconds=random.randint(0, 59))
+            result = fix_ts(db_val, atype)
+            # naive pass-through: result == db_val, no tzinfo
+            ok = result == db_val and result.tzinfo is None
+            if ok: case_a_pass += 1
+            else:  case_a_fail += 1; errors.append(f"A {atype} {minutes_ago}m")
 PASS += case_a_pass; FAIL += case_a_fail
 print(f"  Result: {case_a_pass} PASS, {case_a_fail} FAIL\n")
 
 print("=" * 60)
-print("CASE B: System 2 alerts — DB stores UTC naive (DEFAULT GETUTCDATE())")
-print("  These are WRONG by design: gateway can't fix without DB change.")
-print("  Frontend will display 3h behind local time.")
+print("CASE B: System 2 alerts -- DB stores UTC naive (GETUTCDATE() default)")
+print("  _fix_ts converts UTC->local for these types.")
 print("=" * 60)
-case_b_correct = case_b_wrong = 0
-for minutes_ago in OFFSETS_MINUTES:
-    for _ in range(int(1000 / len(OFFSETS_MINUTES))):
-        utc_val = utc_now - timedelta(minutes=minutes_ago, seconds=random.randint(0, 59))
-        # What user SHOULD see (local time of the event):
-        correct_local = utc_val + FACILITY_OFFSET
-        # What user WILL see (UTC value treated as local by browser):
-        gw_out = simulate_gateway(utc_val)
-        displayed = frontend_display(gw_out.isoformat())
-        diff_minutes = (correct_local - displayed).total_seconds() / 60
-        wrong = abs(diff_minutes - 180) < 1  # ~3h behind = known System 2 issue
-        if wrong:
-            case_b_wrong += 1
-        else:
-            case_b_correct += 1
-            print(f"  UNEXPECTED: utc {minutes_ago}m ago — diff={diff_minutes:.1f}m")
-print(f"  Result: {case_b_wrong} show 3h-behind (expected, System 2 DB issue), "
-      f"{case_b_correct} unexpected\n")
+case_b_pass = case_b_fail = 0
+for atype in SYSTEM2_UTC_TYPES:
+    for minutes_ago in OFFSETS_MINUTES:
+        for _ in range(16):
+            utc_val = utc_now - timedelta(minutes=minutes_ago, seconds=random.randint(0, 59))
+            result = fix_ts(utc_val, atype)
+            # Should be aware +03:00 and time == utc_val + 3h
+            expected_naive = utc_val + FACILITY_OFFSET
+            if result is None:
+                case_b_fail += 1; errors.append(f"B {atype} None result"); continue
+            result_naive = result.replace(tzinfo=None)
+            diff = abs((result_naive - expected_naive).total_seconds())
+            ok = diff < 1 and result.utcoffset() == FACILITY_OFFSET
+            if ok: case_b_pass += 1
+            else:  case_b_fail += 1; errors.append(f"B {atype} {minutes_ago}m diff={diff:.1f}s")
+PASS += case_b_pass; FAIL += case_b_fail
+print(f"  Result: {case_b_pass} PASS, {case_b_fail} FAIL\n")
 
 print("=" * 60)
 print("CASE C: None / null timestamps")
