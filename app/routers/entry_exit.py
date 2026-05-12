@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.config import facility_today_utc, facility_tz, localize_naive
+from app.config import facility_now_naive, facility_today_utc, facility_tz, localize_naive
 from app.database import get_db, scalar, rows
 from app.routers._helpers import _floor_schema, resolve_floor_id
 from app.services.snapshots import resolve_snapshot_url
@@ -180,19 +180,22 @@ async def entry_exit_kpis(
         WHERE exit_time IS NOT NULL {exit_date_filter}
     """, params)
 
-    # duration_seconds → minutes average (include open sessions using live elapsed time)
+    # duration_seconds → minutes average (include open sessions using live elapsed time).
+    # DB stores facility-local naive timestamps; use facility_now_naive() not GETUTCDATE()
+    # to avoid a negative DATEDIFF when the local clock is ahead of UTC.
+    now_naive = facility_now_naive()
     avg_stay_sec = scalar(db, f"""
         SELECT AVG(CAST(
             CASE
                 WHEN duration_seconds IS NOT NULL THEN duration_seconds
-                WHEN entry_time IS NOT NULL THEN DATEDIFF(SECOND, entry_time, GETUTCDATE())
+                WHEN entry_time IS NOT NULL THEN DATEDIFF(SECOND, entry_time, :now_naive)
                 ELSE NULL
             END
         AS FLOAT))
         FROM parking_sessions
         WHERE entry_time IS NOT NULL
           {date_filter}
-    """, params)
+    """, {**params, "now_naive": now_naive})
     avg_stay_minutes = round((avg_stay_sec or 0) / 60, 1)
 
     # Overstays = unique vehicles that entered before today's local midnight and are still open
