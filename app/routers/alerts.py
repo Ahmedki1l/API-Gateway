@@ -33,6 +33,7 @@ from app.shared import build_paged, stream_csv
 # UTC naive via DEFAULT GETUTCDATE(). Must be converted to facility-local.
 # System 1 (PMS-AI) alert types write facility-local naive directly.
 _SYSTEM2_UTC_TYPES = frozenset({
+    "violation",
     "vehicle_violation",
     "vehicle_intrusion",
     "named_slot_violation",

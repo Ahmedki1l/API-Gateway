@@ -50,7 +50,7 @@ def check(label, db_value, expected_display, *, allow_seconds=2):
 # ---------------------------------------------------------------------------
 # Build 1000 test cases
 # ---------------------------------------------------------------------------
-SYSTEM2_UTC_TYPES = {"vehicle_violation", "vehicle_intrusion", "named_slot_violation", "special_needs_violation"}
+SYSTEM2_UTC_TYPES = {"violation", "vehicle_violation", "vehicle_intrusion", "named_slot_violation", "special_needs_violation"}
 SYSTEM1_LOCAL_TYPES = {"unknown_vehicle", "overstay", "capacity_exceeded", "violence", "intrusion"}
 
 FACILITY_TZ_OBJ = timezone(FACILITY_OFFSET)
