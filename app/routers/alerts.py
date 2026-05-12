@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
  
-from app.config import facility_today_utc, localize_naive, utc_naive_to_local
+from app.config import facility_today_utc, localize_naive, smart_localize, utc_naive_to_local
 from app.database import get_db, rows, scalar
 from app.routers._helpers import _floor_schema, resolve_floor_id
 from app.services.snapshots import resolve_snapshot_url
@@ -205,6 +205,16 @@ def _where(search, severity, alert_type, resolved, date_from, date_to, cols, flo
     return " AND ".join(clauses), params
  
  
+def _normalize_ts_str(ts: str) -> str:
+    """Parse a timestamp string, auto-detect UTC vs local, return facility-local naive ISO."""
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        result = smart_localize(dt)
+        return result.replace(tzinfo=None).isoformat() if result else ts
+    except Exception:
+        return ts
+
+
 def _normalize_stream_event(source_system: str, payload: dict) -> dict:
     """Translate an upstream SSE payload (PMS-AI, VideoAnalytics, or
     in-process test bus) into the canonical `AlertStreamEventLite` shape.
@@ -218,6 +228,9 @@ def _normalize_stream_event(source_system: str, payload: dict) -> dict:
     slot_name = payload.get("slot_name")
     if not slot_name and payload.get("slot_number"):
         slot_name = str(payload["slot_number"])
+
+    ts_raw = payload.get("triggered_at") or payload.get("timestamp")
+    triggered_at = _normalize_ts_str(ts_raw) if ts_raw else None
 
     return {
         "id":            payload.get("id") or payload.get("alert_id"),
@@ -233,10 +246,7 @@ def _normalize_stream_event(source_system: str, payload: dict) -> dict:
         # WS-8: floor_id on the SSE wire — populated when upstream supplies it; None otherwise.
         "floor_id":      payload.get("floor_id"),
         "snapshot_url":  resolve_snapshot_url(payload.get("snapshot_url") or payload.get("snapshot_path")),
-        # G-2: canonical name on the wire is `triggered_at` (matches AlertItem).
-        # Accept legacy `timestamp` from upstream while we wait for upstream
-        # services to align.
-        "triggered_at":  payload.get("triggered_at") or payload.get("timestamp"),
+        "triggered_at":  triggered_at,
         "is_alert":      payload.get("is_alert", True),
     }
  
@@ -384,8 +394,8 @@ async def get_alerts(
     """, params)
     for it in items:
         it["snapshot_url"] = resolve_snapshot_url(it.get("snapshot_url"))
-        it["triggered_at"] = utc_naive_to_local(it.get("triggered_at"))
-        it["resolved_at"]  = utc_naive_to_local(it.get("resolved_at"))
+        it["triggered_at"] = smart_localize(it.get("triggered_at"))
+        it["resolved_at"]  = smart_localize(it.get("resolved_at"))
     return build_paged(items, total or 0, page, page_size)
  
  
@@ -757,8 +767,8 @@ async def get_alert(alert_id: int, db: Session = Depends(get_db)):
         description=a.get("description"),
         location=a.get("location"),
         snapshot_url=resolve_snapshot_url(a.get("snapshot_url")),
-        triggered_at=utc_naive_to_local(a.get("triggered_at")),
-        resolved_at=utc_naive_to_local(a.get("resolved_at")),
+        triggered_at=smart_localize(a.get("triggered_at")),
+        resolved_at=smart_localize(a.get("resolved_at")),
         is_resolved=a.get("is_resolved"),
         resolved_by=a.get("resolved_by"),
         resolution_notes=a.get("resolution_notes"),

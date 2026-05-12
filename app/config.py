@@ -127,14 +127,31 @@ def localize_naive(dt: Optional[datetime]) -> Optional[datetime]:
 
 
 def utc_naive_to_local(dt: Optional[datetime]) -> Optional[datetime]:
-    """Convert a UTC-naive DB timestamp to a facility-local-aware datetime.
-    PMS-AI writes some columns (e.g. alerts.triggered_at / resolved_at) with
-    datetime.utcnow(), so they are UTC-naive and must be shifted before attaching
-    the tz offset. localize_naive() would produce 07:25+03:00 (= 04:25 UTC) for a
-    07:25 UTC value; this function produces 10:25+03:00 (= 07:25 UTC) — correct."""
+    """Convert a UTC-naive DB timestamp to a facility-local-aware datetime."""
     if dt is None or dt.tzinfo is not None:
         return dt
     return dt.replace(tzinfo=timezone.utc).astimezone(facility_tz())
+
+
+def smart_localize(dt: Optional[datetime]) -> Optional[datetime]:
+    """Auto-detect whether a naive timestamp is UTC or facility-local and return
+    a facility-local-aware datetime.
+
+    - Aware datetimes are converted to facility-local tz directly.
+    - Naive datetimes: compared against datetime.utcnow() and facility_now_naive().
+      Whichever the value is closest to is assumed to be its timezone.
+      Reliable for events within ~90 min of now; older records near the
+      FACILITY_TIMEZONE_OFFSET_HOURS boundary may occasionally misclassify."""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(facility_tz())
+    now_local = facility_now_naive()
+    diff_local = abs((now_local - dt).total_seconds())
+    diff_utc   = abs((datetime.utcnow() - dt).total_seconds())
+    if diff_utc < diff_local:
+        return dt.replace(tzinfo=timezone.utc).astimezone(facility_tz())
+    return dt.replace(tzinfo=facility_tz())
 
 
 def facility_today_utc() -> datetime:
