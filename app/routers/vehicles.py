@@ -465,7 +465,7 @@ async def get_vehicles(
             COALESCE(v.vehicle_type, ps.vehicle_type) AS vehicle_type,
             v.employee_id,
             v.title,
-            CAST(v.is_registered AS BIT) AS is_registered,
+            CAST(COALESCE(v.is_registered, 0) AS BIT) AS is_registered,
             v.registered_at,
             v.notes
             {extra},
