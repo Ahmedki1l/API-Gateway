@@ -212,12 +212,18 @@ async def create_vehicle(
         {"plate": body.plate_number},
     )
 
+    is_registered_int = 1 if body.is_registered else 0
+
     vehicle_id: Optional[int] = None
     if existing_vehicle:
         vehicle_id = existing_vehicle[0]["id"]
         merged_notes = _merge_vehicle_notes(existing_vehicle[0].get("notes"), body.notes)
 
-        db.execute(text("""
+        # Stamp registered_at only when the caller is registering the plate; on an
+        # explicit unregister, preserve the historical "first registered at" timestamp.
+        registered_at_set = ", registered_at = GETDATE()" if body.is_registered else ""
+
+        db.execute(text(f"""
             UPDATE vehicles
             SET owner_name = :owner,
                 employee_id = :emp_id,
@@ -227,8 +233,7 @@ async def create_vehicle(
                 phone = :phone,
                 email = :email,
                 notes = :notes,
-                is_registered = 1,
-                registered_at = GETDATE()
+                is_registered = :is_registered{registered_at_set}
             WHERE id = :vehicle_id
         """), {
             "vehicle_id": vehicle_id,
@@ -240,6 +245,7 @@ async def create_vehicle(
             "phone": body.phone,
             "email": body.email,
             "notes": merged_notes,
+            "is_registered": is_registered_int,
         })
         response.status_code = status.HTTP_200_OK
     else:
@@ -247,7 +253,9 @@ async def create_vehicle(
             INSERT INTO vehicles
                 (plate_number, owner_name, employee_id, vehicle_type, title, is_employee, phone, email, notes, is_registered, registered_at)
             VALUES
-                (:plate, :owner, :emp_id, :vtype, COALESCE(:title, ''), :is_employee, :phone, :email, :notes, 1, GETDATE())
+                (:plate, :owner, :emp_id, :vtype, COALESCE(:title, ''), :is_employee, :phone, :email, :notes,
+                 :is_registered,
+                 CASE WHEN :is_registered = 1 THEN GETDATE() ELSE NULL END)
         """), {
             "plate":  body.plate_number,
             "owner":  body.owner_name,
@@ -258,6 +266,7 @@ async def create_vehicle(
             "phone":  body.phone,
             "email":  body.email,
             "notes":  body.notes,
+            "is_registered": is_registered_int,
         })
         response.status_code = status.HTTP_201_CREATED
     db.commit()
@@ -575,11 +584,33 @@ async def update_vehicle(
             raise HTTPException(400,
                 f"Plate '{safe_updates['plate_number']}' is already registered to another vehicle")
 
-    set_clause = ", ".join(f"{k} = :{k}" for k in safe_updates)
+    # Promotion (false/null → true): strip the "Not registered" marker from notes
+    # and stamp registered_at. Read current state so a true → true edit doesn't
+    # reset registered_at; the cleanup only runs on an actual transition.
+    stamp_registered_at = False
+    if safe_updates.get("is_registered") is True:
+        current = rows(
+            db,
+            "SELECT is_registered, notes FROM vehicles WHERE id = :id",
+            {"id": vehicle_id},
+        )
+        if not current:
+            raise HTTPException(404, "Vehicle not found")
+        if not current[0].get("is_registered"):
+            base_notes = safe_updates.get("notes", current[0].get("notes"))
+            safe_updates["notes"] = _merge_vehicle_notes(None, base_notes)
+            stamp_registered_at = True
+
+    if "is_registered" in safe_updates:
+        safe_updates["is_registered"] = 1 if safe_updates["is_registered"] else 0
+
+    set_parts = [f"{k} = :{k}" for k in safe_updates]
+    if stamp_registered_at:
+        set_parts.append("registered_at = GETDATE()")
     safe_updates["vehicle_id"] = vehicle_id
 
     result = db.execute(
-        text(f"UPDATE vehicles SET {set_clause} WHERE id = :vehicle_id"),
+        text(f"UPDATE vehicles SET {', '.join(set_parts)} WHERE id = :vehicle_id"),
         safe_updates,
     )
     db.commit()

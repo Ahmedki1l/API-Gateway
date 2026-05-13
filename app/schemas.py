@@ -339,6 +339,9 @@ class VehicleCreate(BaseModel):
     vehicle_type: Optional[str] = None
     title: Optional[str] = None
     is_employee: Optional[bool] = False
+    # Default True preserves the "register this plate" semantics POST has always had —
+    # callers can now explicitly POST is_registered=false to create an unregistered placeholder.
+    is_registered: Optional[bool] = True
     phone: Optional[str] = None
     email: Optional[str] = None
     notes: Optional[str] = None
@@ -347,12 +350,16 @@ class VehicleCreate(BaseModel):
 class VehicleUpdate(BaseModel):
     plate_number: Optional[str] = None
     owner_name: Optional[str] = None
+    employee_id: Optional[str] = None
     vehicle_type: Optional[str] = None
     title: Optional[str] = None
-    notes: Optional[str] = None
     is_employee: Optional[bool] = False
+    # None means "no change". Flipping false → true also clears the "Not registered"
+    # note marker and stamps registered_at (see routers/vehicles.py:update_vehicle).
+    is_registered: Optional[bool] = None
     phone: Optional[str] = None
     email: Optional[str] = None
+    notes: Optional[str] = None
 
 
 class VehicleListItem(VehicleRef):
