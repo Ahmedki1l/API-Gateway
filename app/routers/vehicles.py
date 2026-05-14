@@ -630,9 +630,26 @@ async def delete_vehicle(
     vehicle_id: int,
     db: Session = Depends(get_db),
 ):
+    has_alerts_vehicle_id = (scalar(db, """
+        SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = 'alerts' AND COLUMN_NAME = 'vehicle_id'
+    """) or 0) > 0
+    if has_alerts_vehicle_id:
+        db.execute(
+            text("UPDATE alerts SET vehicle_id = NULL WHERE vehicle_id = :vid"),
+            {"vid": vehicle_id},
+        )
+    db.execute(
+        text("DELETE FROM entry_exit_log WHERE vehicle_id = :vid"),
+        {"vid": vehicle_id},
+    )
+    db.execute(
+        text("DELETE FROM parking_sessions WHERE vehicle_id = :vid"),
+        {"vid": vehicle_id},
+    )
     result = db.execute(
-        text("DELETE FROM vehicles WHERE id = :vehicle_id"),
-        {"vehicle_id": vehicle_id},
+        text("DELETE FROM vehicles WHERE id = :vid"),
+        {"vid": vehicle_id},
     )
     db.commit()
     if result.rowcount == 0:
