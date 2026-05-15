@@ -735,59 +735,20 @@ async def export_vehicles_csv(
     return stream_csv(data, headers, filename="vehicles.csv")
 
 
-def _fetch_vehicle_detail(
+def _fetch_vehicle_events(
     db: Session,
-    where_clause: str,
-    where_params: dict,
-) -> Optional[VehicleDetail]:
-    """Fetch a single vehicle by an arbitrary WHERE clause (id, plate, …),
-    bundle its parking-event history, and return the full `VehicleDetail`.
-
-    Returns None when the row doesn't exist — callers raise 404 themselves
-    so the message can name the missing identifier.
-
-    Shared by GET /vehicles/{id} and GET /vehicles/by-plate/{plate}.
+    plate: str,
+    vehicle_pk: Optional[int],
+    *,
+    owner_name: Optional[str] = None,
+    vehicle_type: Optional[str] = None,
+    is_employee: Optional[bool] = None,
+) -> tuple[int, list[VehicleEvent]]:
+    """Pull a plate's parking-event history (bounded TOP 500) and return
+    `(events_total, events)`. Shared by registered and unregistered plate
+    lookups so the event shape is identical in both cases.
     """
-    cols = _vehicle_extra_cols(db)
     schema = _floor_schema()
-
-    extra_cols = (
-        (", v.is_employee" if cols["is_employee"] else ", NULL AS is_employee") +
-        (", v.phone"       if cols["phone"]       else ", NULL AS phone")       +
-        (", v.email"       if cols["email"]       else ", NULL AS email")
-    )
-
-    if cols["current_slot_id"]:
-        slot_join_d   = "LEFT JOIN dbo.parking_slots cs ON cs.slot_id = v.current_slot_id"
-        slot_select_d = ", v.current_slot_id, cs.slot_name AS current_slot_name"
-    else:
-        slot_join_d   = ""
-        slot_select_d = ", NULL AS current_slot_id, NULL AS current_slot_name"
-
-    vehicle_rows = rows(db, f"""
-        SELECT
-            v.id,
-            v.plate_number,
-            v.owner_name,
-            v.vehicle_type,
-            v.employee_id,
-            v.title,
-            v.is_registered,
-            v.registered_at,
-            v.notes
-            {extra_cols}
-            {slot_select_d}
-        FROM vehicles v
-        {slot_join_d}
-        WHERE {where_clause}
-    """, where_params)
-
-    if not vehicle_rows:
-        return None
-
-    v = vehicle_rows[0]
-    plate = v["plate_number"]
-
     events_total = scalar(
         db,
         "SELECT COUNT(*) FROM parking_sessions ps WHERE ps.plate_number = :plate",
@@ -825,19 +786,143 @@ def _fetch_vehicle_detail(
         ORDER BY ps.entry_time DESC
     """, {"plate": plate})
 
+    events = [
+        _event_from_row(
+            r, plate, vehicle_pk,
+            owner_name=owner_name,
+            vehicle_type=vehicle_type,
+            is_employee=is_employee,
+        )
+        for r in event_rows
+    ]
+    return events_total, events
+
+
+def _fetch_unregistered_vehicle_detail(
+    db: Session,
+    plate: str,
+) -> Optional[VehicleDetail]:
+    """Build a `VehicleDetail` for a plate that has parking-session history
+    but no row in the `vehicles` registry. Mirrors how the list endpoint
+    (`GET /vehicles/?is_registered=false`) surfaces unregistered plates:
+    `id = null`, `is_registered = false`, vehicle_type / is_employee pulled
+    from the most-recent session.
+
+    Returns None when the plate has no rows in `parking_sessions` either —
+    caller raises 404.
+    """
+    # Pull whatever metadata the most-recent session has, plus a quick
+    # existence check (TOP 1 doubles as the gate for the 404 path).
+    latest_session = rows(db, """
+        SELECT TOP 1 vehicle_type, is_employee
+        FROM parking_sessions
+        WHERE plate_number = :plate
+        ORDER BY entry_time DESC
+    """, {"plate": plate})
+
+    if not latest_session:
+        return None
+
+    sess = latest_session[0]
+    sess_vehicle_type = sess.get("vehicle_type")
+    sess_is_employee = bool(sess["is_employee"]) if sess.get("is_employee") is not None else None
+
+    events_total, events = _fetch_vehicle_events(
+        db, plate, vehicle_pk=None,
+        owner_name=None,
+        vehicle_type=sess_vehicle_type,
+        is_employee=sess_is_employee,
+    )
+    current_event = next((e for e in events if e.status == "open"), None)
+
+    return VehicleDetail(
+        id=None,
+        plate_number=plate,
+        owner_name=None,
+        vehicle_type=sess_vehicle_type,
+        employee_id=None,
+        title=None,
+        is_registered=False,
+        registered_at=None,
+        notes=None,
+        is_employee=sess_is_employee,
+        phone=None,
+        email=None,
+        current_slot_id=None,
+        current_slot_name=None,
+        is_currently_parked=current_event is not None,
+        current_event=current_event,
+        parked_at=current_event.parked_at if current_event else None,
+        parking_status=current_event.status if current_event else None,
+        floor=current_event.floor if current_event else None,
+        floor_id=current_event.floor_id if current_event else None,
+        events_total=events_total,
+        events=events,
+    )
+
+
+def _fetch_vehicle_detail(
+    db: Session,
+    where_clause: str,
+    where_params: dict,
+) -> Optional[VehicleDetail]:
+    """Fetch a single vehicle by an arbitrary WHERE clause (id, plate, …),
+    bundle its parking-event history, and return the full `VehicleDetail`.
+
+    Returns None when the row doesn't exist — callers raise 404 themselves
+    so the message can name the missing identifier.
+
+    Shared by GET /vehicles/{id} and GET /vehicles/by-plate/{plate}.
+    """
+    cols = _vehicle_extra_cols(db)
+
+    extra_cols = (
+        (", v.is_employee" if cols["is_employee"] else ", NULL AS is_employee") +
+        (", v.phone"       if cols["phone"]       else ", NULL AS phone")       +
+        (", v.email"       if cols["email"]       else ", NULL AS email")
+    )
+
+    if cols["current_slot_id"]:
+        slot_join_d   = "LEFT JOIN dbo.parking_slots cs ON cs.slot_id = v.current_slot_id"
+        slot_select_d = ", v.current_slot_id, cs.slot_name AS current_slot_name"
+    else:
+        slot_join_d   = ""
+        slot_select_d = ", NULL AS current_slot_id, NULL AS current_slot_name"
+
+    vehicle_rows = rows(db, f"""
+        SELECT
+            v.id,
+            v.plate_number,
+            v.owner_name,
+            v.vehicle_type,
+            v.employee_id,
+            v.title,
+            v.is_registered,
+            v.registered_at,
+            v.notes
+            {extra_cols}
+            {slot_select_d}
+        FROM vehicles v
+        {slot_join_d}
+        WHERE {where_clause}
+    """, where_params)
+
+    if not vehicle_rows:
+        return None
+
+    v = vehicle_rows[0]
+    plate = v["plate_number"]
     vehicle_pk = v["id"]
     v_owner = v.get("owner_name")
     v_type = v.get("vehicle_type")
     v_is_emp = bool(v["is_employee"]) if v.get("is_employee") is not None else None
-    events = [
-        _event_from_row(
-            r, plate, vehicle_pk,
-            owner_name=v_owner,
-            vehicle_type=v_type,
-            is_employee=v_is_emp,
-        )
-        for r in event_rows
-    ]
+
+    events_total, events = _fetch_vehicle_events(
+        db, plate, vehicle_pk,
+        owner_name=v_owner,
+        vehicle_type=v_type,
+        is_employee=v_is_emp,
+    )
     current_event = next((e for e in events if e.status == "open"), None)
 
     return VehicleDetail(
@@ -876,16 +961,21 @@ async def get_vehicle_by_plate(
     db: Session = Depends(get_db),
 ):
     """Look up a vehicle by its plate number. Same response shape as
-    GET /vehicles/{id} — full detail with parking-event history. Returns 404
-    when the plate isn't registered in the `vehicles` table (for unregistered
-    plates that exist only in `parking_sessions`, use
-    GET /vehicles/?search={plate}&is_currently_parked=true instead).
+    GET /vehicles/{id} — full detail with parking-event history.
+
+    Surfaces unregistered plates too: if the plate has no row in `vehicles`
+    but does have parking-session history, the response is built from the
+    most-recent session with `id = null` and `is_registered = false`.
+    Returns 404 only when the plate is absent from both tables.
     """
     detail = _fetch_vehicle_detail(
         db,
         "v.plate_number = :plate",
         {"plate": plate_number},
     )
+    if detail is None:
+        # Not in `vehicles` — fall back to the parking_sessions-only build.
+        detail = _fetch_unregistered_vehicle_detail(db, plate_number)
     if detail is None:
         raise HTTPException(404, f"Vehicle with plate '{plate_number}' not found")
     return detail
