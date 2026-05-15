@@ -14,7 +14,7 @@ import re
 from datetime import datetime
 from typing import Generic, Literal, Optional, TypeVar
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator, model_validator
 
 T = TypeVar("T")
 
@@ -81,8 +81,9 @@ class SlotRef(BaseModel):
     is_available: bool = True
     is_violation_slot: bool = False
     # True when VA covers this slot (has polygon coords and emits slot_status
-    # events). False on operator-entered blind/unmonitored rows.
-    is_monitored: bool = True
+    # events). False on operator-entered blind/unmonitored rows. Strict —
+    # accepts only `true` / `false`, rejects `1` / `0` / `"yes"` etc.
+    is_monitored: StrictBool = True
     polygon: Optional[list] = None
     reservation_type: Optional[str] = None
     reserved_for: Optional[str] = None
@@ -609,7 +610,8 @@ class SlotListItem(BaseModel):
     )
     # True when VA covers this slot. False on operator-entered blind rows
     # (no polygon, no slot_status events). Frontend should badge these.
-    is_monitored: bool = True
+    # Strict — accepts only `true` / `false`.
+    is_monitored: StrictBool = True
     reservation_type: Optional[str] = None
     reserved_for: Optional[str] = None
     current_plate: Optional[str] = None

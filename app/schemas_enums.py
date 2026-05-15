@@ -8,8 +8,36 @@ Defined once here so the same vocabulary lives in:
 
 All enums inherit `str, Enum` so they serialize as their string value and
 plug into `Query(...)` / `Field(...)` annotations directly.
+
+Also exposes `StrictQueryBool` — a query-param boolean that accepts ONLY
+the strings `"true"` or `"false"` (rejects `"1"`, `"0"`, `"yes"`, `"on"`,
+etc.). Use when the operator wants the contract to be strict on boolean
+filters.
 """
 from enum import Enum
+from typing import Annotated
+
+from pydantic import BeforeValidator
+
+
+def _strict_query_bool(v):
+    """Accept only `true` / `false` strings (case-insensitive) or actual
+    Python booleans. Rejects integers, `"1"` / `"0"`, `"yes"` / `"no"`."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s == "true":
+            return True
+        if s == "false":
+            return False
+    raise ValueError("must be 'true' or 'false'")
+
+
+# Use on query params where you want strict bool input from URL strings.
+# `StrictBool` (Pydantic) only accepts Python bools — fine for JSON bodies,
+# wrong for query params (where everything arrives as a string).
+StrictQueryBool = Annotated[bool, BeforeValidator(_strict_query_bool)]
 
 
 class AlertSeverity(str, Enum):

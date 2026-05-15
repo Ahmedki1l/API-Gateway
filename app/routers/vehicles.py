@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Path, Query, HTTPException, Response, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -735,15 +735,18 @@ async def export_vehicles_csv(
     return stream_csv(data, headers, filename="vehicles.csv")
 
 
-# ── GET /vehicles/{vehicle_id} ────────────────────────────────────────────────
-# Declared LAST so FastAPI matches the specific routes (/kpis, /export/csv) first.
-@router.get("/{vehicle_id}", response_model=VehicleDetail)
-async def get_vehicle(
-    vehicle_id: int,
-    db: Session = Depends(get_db),
-):
-    """Return a vehicle by id with its full parking-event history (entries + exits).
-    For filtered/paginated event queries, use GET /entry-exit/by-vehicle/{vehicle_id}.
+def _fetch_vehicle_detail(
+    db: Session,
+    where_clause: str,
+    where_params: dict,
+) -> Optional[VehicleDetail]:
+    """Fetch a single vehicle by an arbitrary WHERE clause (id, plate, …),
+    bundle its parking-event history, and return the full `VehicleDetail`.
+
+    Returns None when the row doesn't exist — callers raise 404 themselves
+    so the message can name the missing identifier.
+
+    Shared by GET /vehicles/{id} and GET /vehicles/by-plate/{plate}.
     """
     cols = _vehicle_extra_cols(db)
     schema = _floor_schema()
@@ -776,11 +779,11 @@ async def get_vehicle(
             {slot_select_d}
         FROM vehicles v
         {slot_join_d}
-        WHERE v.id = :vehicle_id
-    """, {"vehicle_id": vehicle_id})
+        WHERE {where_clause}
+    """, where_params)
 
     if not vehicle_rows:
-        raise HTTPException(404, "Vehicle not found")
+        return None
 
     v = vehicle_rows[0]
     plate = v["plate_number"]
@@ -861,3 +864,49 @@ async def get_vehicle(
         events_total=events_total,
         events=events,
     )
+
+
+# ── GET /vehicles/by-plate/{plate_number} ─────────────────────────────────────
+# Declared BEFORE /{vehicle_id} so FastAPI matches it cleanly. The int-typed
+# `/{vehicle_id}` wouldn't catch `by-plate/...` anyway (different shape), but
+# the explicit ordering keeps the routing intent visible.
+@router.get("/by-plate/{plate_number}", response_model=VehicleDetail)
+async def get_vehicle_by_plate(
+    plate_number: str = Path(..., min_length=2, max_length=20),
+    db: Session = Depends(get_db),
+):
+    """Look up a vehicle by its plate number. Same response shape as
+    GET /vehicles/{id} — full detail with parking-event history. Returns 404
+    when the plate isn't registered in the `vehicles` table (for unregistered
+    plates that exist only in `parking_sessions`, use
+    GET /vehicles/?search={plate}&is_currently_parked=true instead).
+    """
+    detail = _fetch_vehicle_detail(
+        db,
+        "v.plate_number = :plate",
+        {"plate": plate_number},
+    )
+    if detail is None:
+        raise HTTPException(404, f"Vehicle with plate '{plate_number}' not found")
+    return detail
+
+
+# ── GET /vehicles/{vehicle_id} ────────────────────────────────────────────────
+# Declared LAST so FastAPI matches the specific routes (/kpis, /export/csv,
+# /by-plate/...) first.
+@router.get("/{vehicle_id}", response_model=VehicleDetail)
+async def get_vehicle(
+    vehicle_id: int,
+    db: Session = Depends(get_db),
+):
+    """Return a vehicle by id with its full parking-event history (entries + exits).
+    For filtered/paginated event queries, use GET /entry-exit/by-vehicle/{vehicle_id}.
+    """
+    detail = _fetch_vehicle_detail(
+        db,
+        "v.id = :vehicle_id",
+        {"vehicle_id": vehicle_id},
+    )
+    if detail is None:
+        raise HTTPException(404, "Vehicle not found")
+    return detail

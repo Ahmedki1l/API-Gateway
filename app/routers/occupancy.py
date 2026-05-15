@@ -22,7 +22,7 @@ from app.schemas import (
     SlotListItem,
     ZoneItem,
 )
-from app.schemas_enums import ReservationType
+from app.schemas_enums import ReservationType, StrictQueryBool
 from app.services.snapshots import resolve_snapshot_url
 from app.services.upstream import get_live_slots
 from app.shared import build_paged
@@ -304,9 +304,13 @@ async def get_slots(
     floor: Optional[str] = Query(None),
     floor_id: Optional[int] = Query(None),
     is_available: Optional[bool] = Query(None),
-    is_monitored: Optional[bool] = Query(
+    is_monitored: Optional[StrictQueryBool] = Query(
         None,
-        description="Filter by camera coverage. true = VA covers this slot, false = blind spot.",
+        description=(
+            "Filter by camera coverage. Accepts only `true` or `false` "
+            "(case-insensitive). `true` = VA covers this slot, `false` = "
+            "blind spot. Rejects `1` / `0` / `yes` / `no`."
+        ),
     ),
     reservation_type: Optional[ReservationType] = Query(None),
     db: Session = Depends(get_db),
