@@ -493,7 +493,19 @@ IF COL_LENGTH(N'dbo.parking_slots', N'reserved_for') IS NULL
     ALTER TABLE dbo.parking_slots ADD reserved_for VARCHAR(200) NULL;
 GO
 
-/* 4f. Migrate reservation_type values to uppercase canonical names.
+/* 4f. parking_slots.is_monitored — blind-spot flag.
+        1 (default) = VA covers this slot; row has polygon coords and slot_status
+        events. 0 = un-monitored / blind slot; operator-entered row with NULL
+        polygon. Counted toward floor capacity but excluded from VA-driven
+        occupancy counts (VA can't observe a slot it doesn't have a polygon for). */
+IF COL_LENGTH(N'dbo.parking_slots', N'is_monitored') IS NULL
+    ALTER TABLE dbo.parking_slots ADD is_monitored BIT NOT NULL
+        CONSTRAINT DF_parking_slots_is_monitored DEFAULT (1);
+GO
+UPDATE dbo.parking_slots SET is_monitored = 1 WHERE is_monitored IS NULL;
+GO
+
+/* 4g. Migrate reservation_type values to uppercase canonical names.
         old 'reserved' → 'SPECIAL', old 'regular' → 'GENERAL'. Idempotent. */
 IF COL_LENGTH(N'dbo.parking_slots', N'reservation_type') IS NOT NULL
 BEGIN

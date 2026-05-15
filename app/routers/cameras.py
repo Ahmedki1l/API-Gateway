@@ -30,6 +30,7 @@ from app.schemas import (
     EntityActionResponse,
     PagedResponse,
 )
+from app.schemas_enums import CameraRole
 from app.config import settings
 from app.routers._helpers import _floor_schema, resolve_floor_id
 from app.services.camera_monitor import check_one, derive_is_online
@@ -255,7 +256,7 @@ async def list_cameras(
     enabled: Optional[bool] = Query(None),
     is_online: Optional[bool] = Query(None),
     last_status: Optional[str] = Query(None),
-    role: Optional[str] = Query(None, description="entry|exit|floor_counting|slot_detection|other"),
+    role: Optional[CameraRole] = Query(None),
     watches_floor: Optional[str] = Query(None),
     # WS-8.E: integer-id sibling filter; wins over `?watches_floor=` when both are sent.
     watches_floor_id: Optional[int] = Query(None),
@@ -916,7 +917,7 @@ async def export_cameras_csv(
     enabled: Optional[bool] = Query(None),
     is_online: Optional[bool] = Query(None),
     last_status: Optional[str] = Query(None),
-    role: Optional[str] = Query(None),
+    role: Optional[CameraRole] = Query(None),
     watches_floor: Optional[str] = Query(None),
     # WS-8.E: integer-id sibling filter; wins over `?watches_floor=` when both are sent.
     watches_floor_id: Optional[int] = Query(None),

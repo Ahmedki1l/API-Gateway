@@ -24,6 +24,7 @@ from app.schemas import (
     SuccessResponse,
     VehicleRef,
 )
+from app.schemas_enums import AlertSeverity, AlertType
 from app.services.auth import require_internal_token
 from app.services.upstream import iter_system1_alert_events, iter_system2_alert_events
 from app.services.bus import alerts_bus
@@ -284,8 +285,8 @@ async def get_alerts(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = Query(None),
-    severity: Optional[str] = Query(None),
-    alert_type: Optional[str] = Query(None),
+    severity: Optional[AlertSeverity] = Query(None),
+    alert_type: Optional[AlertType] = Query(None),
     resolved: Optional[bool] = Query(None),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
@@ -800,8 +801,8 @@ async def delete_alert(alert_id: int, db: Session = Depends(get_db)):
 @router.get("/export/csv")
 async def export_alerts_csv(
     search: Optional[str] = Query(None),
-    severity: Optional[str] = Query(None),
-    alert_type: Optional[str] = Query(None),
+    severity: Optional[AlertSeverity] = Query(None),
+    alert_type: Optional[AlertType] = Query(None),
     resolved: Optional[bool] = Query(None),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),

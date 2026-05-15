@@ -10,10 +10,11 @@ Phase 2 target state:
   - Camera carries `role` + `watches_floor`/`watches_slots`.
   - SSE alert stream emits AlertStreamEvent.
 """
+import re
 from datetime import datetime
 from typing import Generic, Literal, Optional, TypeVar
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator, model_validator
 
 T = TypeVar("T")
 
@@ -79,6 +80,10 @@ class SlotRef(BaseModel):
     floor_id: Optional[int] = None
     is_available: bool = True
     is_violation_slot: bool = False
+    # True when VA covers this slot (has polygon coords and emits slot_status
+    # events). False on operator-entered blind/unmonitored rows. Strict —
+    # accepts only `true` / `false`, rejects `1` / `0` / `"yes"` etc.
+    is_monitored: StrictBool = True
     polygon: Optional[list] = None
     reservation_type: Optional[str] = None
     reserved_for: Optional[str] = None
@@ -129,7 +134,15 @@ class AIStatusResponse(BaseModel):
 
 class DashboardKPIs(BaseModel):
     free_slots: int
+    # Slots whose latest VA `slot_status` row reads non-vacant. Restricted to
+    # `is_monitored = 1` rows — a slot VA can't observe can't be reported as
+    # occupied. Pair with `parked_vehicles` to surface the blind-spot gap.
     occupied_slots: int
+    # Cars physically in the garage right now: count of open `parking_sessions`
+    # rows (line-crossing source of truth). `parked_vehicles - occupied_slots`
+    # is the count of cars VA can't place in a monitored slot — i.e. parked in
+    # a blind spot, parked in an unmarked area, or still driving.
+    parked_vehicles: int
     critical_alerts: int
 
 
@@ -332,12 +345,52 @@ class VehicleKPIs(BaseModel):
     employee: int
 
 
+# Permissive plate-number pattern. Accepts Latin letters, Arabic-Indic digits
+# (U+0600–U+06FF), Western digits, spaces, dashes, and dots. Tightened
+# deliberately not-too-far in round one — locking down to a specific Saudi
+# plate spec needs sign-off from Eng. Ayman.
+_PLATE_PATTERN = re.compile(r"^[A-Za-z0-9؀-ۿ][A-Za-z0-9؀-ۿ\s\-.]{0,19}$")
+_PHONE_PATTERN = re.compile(r"^\+?\d[\d\s\-]{5,19}$")
+_EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+def _validate_plate(v: str) -> str:
+    v = v.strip()
+    if not _PLATE_PATTERN.match(v):
+        raise ValueError(
+            "plate_number must be 2–20 characters: letters (Latin or Arabic-Indic), "
+            "digits, spaces, dashes, or dots; cannot start with whitespace/punctuation"
+        )
+    return v
+
+
+def _validate_email(v: Optional[str]) -> Optional[str]:
+    if v is None or v == "":
+        return v
+    v = v.strip()
+    if not _EMAIL_PATTERN.match(v):
+        raise ValueError("email must be a valid email address")
+    return v
+
+
+def _validate_phone(v: Optional[str]) -> Optional[str]:
+    if v is None or v == "":
+        return v
+    v = v.strip()
+    if not _PHONE_PATTERN.match(v):
+        raise ValueError(
+            "phone must be 6–20 digits, optionally prefixed with '+' and "
+            "containing spaces or dashes"
+        )
+    return v
+
+
 class VehicleCreate(BaseModel):
-    plate_number: str
-    owner_name: Optional[str] = None
-    employee_id: Optional[str] = None
-    vehicle_type: Optional[str] = None
-    title: Optional[str] = None
+    plate_number: str = Field(..., min_length=2, max_length=20)
+    owner_name: Optional[str] = Field(None, max_length=200)
+    employee_id: Optional[str] = Field(None, max_length=50)
+    vehicle_type: Optional[str] = Field(None, max_length=50)
+    title: Optional[str] = Field(None, max_length=200)
     is_employee: Optional[bool] = False
     # Default True preserves the "register this plate" semantics POST has always had —
     # callers can now explicitly POST is_registered=false to create an unregistered placeholder.
@@ -346,13 +399,34 @@ class VehicleCreate(BaseModel):
     email: Optional[str] = None
     notes: Optional[str] = None
 
+    @field_validator("plate_number")
+    @classmethod
+    def _norm_plate(cls, v: str) -> str:
+        return _validate_plate(v)
+
+    @field_validator("email")
+    @classmethod
+    def _norm_email(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_email(v)
+
+    @field_validator("phone")
+    @classmethod
+    def _norm_phone(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_phone(v)
+
+    @model_validator(mode="after")
+    def _check_employee(self):
+        if self.is_employee and not (self.employee_id and self.employee_id.strip()):
+            raise ValueError("employee_id is required when is_employee=true")
+        return self
+
 
 class VehicleUpdate(BaseModel):
-    plate_number: Optional[str] = None
-    owner_name: Optional[str] = None
-    employee_id: Optional[str] = None
-    vehicle_type: Optional[str] = None
-    title: Optional[str] = None
+    plate_number: Optional[str] = Field(None, min_length=2, max_length=20)
+    owner_name: Optional[str] = Field(None, max_length=200)
+    employee_id: Optional[str] = Field(None, max_length=50)
+    vehicle_type: Optional[str] = Field(None, max_length=50)
+    title: Optional[str] = Field(None, max_length=200)
     is_employee: Optional[bool] = False
     # None means "no change". Flipping false → true also clears the "Not registered"
     # note marker and stamps registered_at (see routers/vehicles.py:update_vehicle).
@@ -360,6 +434,21 @@ class VehicleUpdate(BaseModel):
     phone: Optional[str] = None
     email: Optional[str] = None
     notes: Optional[str] = None
+
+    @field_validator("plate_number")
+    @classmethod
+    def _norm_plate(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_plate(v) if v is not None else None
+
+    @field_validator("email")
+    @classmethod
+    def _norm_email(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_email(v)
+
+    @field_validator("phone")
+    @classmethod
+    def _norm_phone(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_phone(v)
 
 
 class VehicleListItem(VehicleRef):
@@ -412,6 +501,12 @@ class OccupancyKPIs(BaseModel):
     slot_occupied_spots: int = 0
     overall_utilization: float
     total_vehicles: int
+    # Blind-spot accounting (parking_slots.is_monitored): `monitored_slots` is
+    # the count VA can observe; `unmonitored_slots` is the rest. `total_spots`
+    # already counts both. Frontend can render "X slots not monitored" hints
+    # from these.
+    monitored_slots: int = 0
+    unmonitored_slots: int = 0
 
 
 class OccupancyTotals(BaseModel):
@@ -452,6 +547,12 @@ class FloorOccupancy(BaseModel):
     cars_in_floor: int = 0
     slots_occupied: int = 0
     cars_unparked: int = 0  # max(cars_in_floor - slots_occupied, 0)
+    # Blind-spot accounting (parking_slots.is_monitored). `max_capacity` is the
+    # true floor size (monitored + unmonitored slots). `monitored_capacity` is
+    # the slice VA can observe; `unmonitored_count` is the rest. Frontend uses
+    # the gap to render "X blind spots on this floor" hints.
+    monitored_capacity: int = 0
+    unmonitored_count: int = 0
 
 
 class SlotOccupancy(BaseModel):
@@ -507,6 +608,10 @@ class SlotListItem(BaseModel):
         validation_alias="is_violation_zone",
         serialization_alias="is_violation_slot",
     )
+    # True when VA covers this slot. False on operator-entered blind rows
+    # (no polygon, no slot_status events). Frontend should badge these.
+    # Strict — accepts only `true` / `false`.
+    is_monitored: StrictBool = True
     reservation_type: Optional[str] = None
     reserved_for: Optional[str] = None
     current_plate: Optional[str] = None

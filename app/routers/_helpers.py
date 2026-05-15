@@ -58,6 +58,7 @@ def _floor_schema() -> dict:
             "parking_slots_slot_type":            has_col("parking_slots", "slot_type"),
             "parking_slots_reservation_type":     has_col("parking_slots", "reservation_type"),
             "parking_slots_reserved_for":         has_col("parking_slots", "reserved_for"),
+            "parking_slots_is_monitored":         has_col("parking_slots", "is_monitored"),
             "parking_sessions_floor_id":          has_col("parking_sessions", "floor_id"),
             "parking_sessions_parking_slot_id":   has_col("parking_sessions", "parking_slot_id"),
             # `cameras.floor` (string) and `cameras.watches_floor` (string)

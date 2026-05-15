@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Path, Query, HTTPException, Response, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -735,56 +735,20 @@ async def export_vehicles_csv(
     return stream_csv(data, headers, filename="vehicles.csv")
 
 
-# ── GET /vehicles/{vehicle_id} ────────────────────────────────────────────────
-# Declared LAST so FastAPI matches the specific routes (/kpis, /export/csv) first.
-@router.get("/{vehicle_id}", response_model=VehicleDetail)
-async def get_vehicle(
-    vehicle_id: int,
-    db: Session = Depends(get_db),
-):
-    """Return a vehicle by id with its full parking-event history (entries + exits).
-    For filtered/paginated event queries, use GET /entry-exit/by-vehicle/{vehicle_id}.
+def _fetch_vehicle_events(
+    db: Session,
+    plate: str,
+    vehicle_pk: Optional[int],
+    *,
+    owner_name: Optional[str] = None,
+    vehicle_type: Optional[str] = None,
+    is_employee: Optional[bool] = None,
+) -> tuple[int, list[VehicleEvent]]:
+    """Pull a plate's parking-event history (bounded TOP 500) and return
+    `(events_total, events)`. Shared by registered and unregistered plate
+    lookups so the event shape is identical in both cases.
     """
-    cols = _vehicle_extra_cols(db)
     schema = _floor_schema()
-
-    extra_cols = (
-        (", v.is_employee" if cols["is_employee"] else ", NULL AS is_employee") +
-        (", v.phone"       if cols["phone"]       else ", NULL AS phone")       +
-        (", v.email"       if cols["email"]       else ", NULL AS email")
-    )
-
-    if cols["current_slot_id"]:
-        slot_join_d   = "LEFT JOIN dbo.parking_slots cs ON cs.slot_id = v.current_slot_id"
-        slot_select_d = ", v.current_slot_id, cs.slot_name AS current_slot_name"
-    else:
-        slot_join_d   = ""
-        slot_select_d = ", NULL AS current_slot_id, NULL AS current_slot_name"
-
-    vehicle_rows = rows(db, f"""
-        SELECT
-            v.id,
-            v.plate_number,
-            v.owner_name,
-            v.vehicle_type,
-            v.employee_id,
-            v.title,
-            v.is_registered,
-            v.registered_at,
-            v.notes
-            {extra_cols}
-            {slot_select_d}
-        FROM vehicles v
-        {slot_join_d}
-        WHERE v.id = :vehicle_id
-    """, {"vehicle_id": vehicle_id})
-
-    if not vehicle_rows:
-        raise HTTPException(404, "Vehicle not found")
-
-    v = vehicle_rows[0]
-    plate = v["plate_number"]
-
     events_total = scalar(
         db,
         "SELECT COUNT(*) FROM parking_sessions ps WHERE ps.plate_number = :plate",
@@ -822,19 +786,80 @@ async def get_vehicle(
         ORDER BY ps.entry_time DESC
     """, {"plate": plate})
 
+    events = [
+        _event_from_row(
+            r, plate, vehicle_pk,
+            owner_name=owner_name,
+            vehicle_type=vehicle_type,
+            is_employee=is_employee,
+        )
+        for r in event_rows
+    ]
+    return events_total, events
+
+
+def _fetch_vehicle_detail(
+    db: Session,
+    where_clause: str,
+    where_params: dict,
+) -> Optional[VehicleDetail]:
+    """Fetch a single vehicle by an arbitrary WHERE clause (id, plate, …),
+    bundle its parking-event history, and return the full `VehicleDetail`.
+
+    Returns None when the row doesn't exist — callers raise 404 themselves
+    so the message can name the missing identifier.
+
+    Shared by GET /vehicles/{id} and GET /vehicles/by-plate/{plate}.
+    """
+    cols = _vehicle_extra_cols(db)
+
+    extra_cols = (
+        (", v.is_employee" if cols["is_employee"] else ", NULL AS is_employee") +
+        (", v.phone"       if cols["phone"]       else ", NULL AS phone")       +
+        (", v.email"       if cols["email"]       else ", NULL AS email")
+    )
+
+    if cols["current_slot_id"]:
+        slot_join_d   = "LEFT JOIN dbo.parking_slots cs ON cs.slot_id = v.current_slot_id"
+        slot_select_d = ", v.current_slot_id, cs.slot_name AS current_slot_name"
+    else:
+        slot_join_d   = ""
+        slot_select_d = ", NULL AS current_slot_id, NULL AS current_slot_name"
+
+    vehicle_rows = rows(db, f"""
+        SELECT
+            v.id,
+            v.plate_number,
+            v.owner_name,
+            v.vehicle_type,
+            v.employee_id,
+            v.title,
+            v.is_registered,
+            v.registered_at,
+            v.notes
+            {extra_cols}
+            {slot_select_d}
+        FROM vehicles v
+        {slot_join_d}
+        WHERE {where_clause}
+    """, where_params)
+
+    if not vehicle_rows:
+        return None
+
+    v = vehicle_rows[0]
+    plate = v["plate_number"]
     vehicle_pk = v["id"]
     v_owner = v.get("owner_name")
     v_type = v.get("vehicle_type")
     v_is_emp = bool(v["is_employee"]) if v.get("is_employee") is not None else None
-    events = [
-        _event_from_row(
-            r, plate, vehicle_pk,
-            owner_name=v_owner,
-            vehicle_type=v_type,
-            is_employee=v_is_emp,
-        )
-        for r in event_rows
-    ]
+
+    events_total, events = _fetch_vehicle_events(
+        db, plate, vehicle_pk,
+        owner_name=v_owner,
+        vehicle_type=v_type,
+        is_employee=v_is_emp,
+    )
     current_event = next((e for e in events if e.status == "open"), None)
 
     return VehicleDetail(
@@ -861,3 +886,53 @@ async def get_vehicle(
         events_total=events_total,
         events=events,
     )
+
+
+# ── GET /vehicles/by-plate/{plate_number} ─────────────────────────────────────
+# Declared BEFORE /{vehicle_id} so FastAPI matches it cleanly. The int-typed
+# `/{vehicle_id}` wouldn't catch `by-plate/...` anyway (different shape), but
+# the explicit ordering keeps the routing intent visible.
+@router.get("/by-plate/{plate_number}", response_model=VehicleDetail)
+async def get_vehicle_by_plate(
+    plate_number: str = Path(..., min_length=2, max_length=20),
+    db: Session = Depends(get_db),
+):
+    """Look up a vehicle by its plate number. Same response shape as
+    GET /vehicles/{id} — full detail with parking-event history.
+
+    Returns rows whether `is_registered` is true or false, as long as the
+    plate has a row in the `vehicles` table — the returned `id` is what
+    the frontend uses for PUT / DELETE follow-ups. Returns 404 when no row
+    exists in `vehicles` for that plate, even if `parking_sessions`
+    contains the plate (an id-less response would leave the row unusable
+    for management operations).
+    """
+    detail = _fetch_vehicle_detail(
+        db,
+        "v.plate_number = :plate",
+        {"plate": plate_number},
+    )
+    if detail is None:
+        raise HTTPException(404, f"Vehicle with plate '{plate_number}' not found")
+    return detail
+
+
+# ── GET /vehicles/{vehicle_id} ────────────────────────────────────────────────
+# Declared LAST so FastAPI matches the specific routes (/kpis, /export/csv,
+# /by-plate/...) first.
+@router.get("/{vehicle_id}", response_model=VehicleDetail)
+async def get_vehicle(
+    vehicle_id: int,
+    db: Session = Depends(get_db),
+):
+    """Return a vehicle by id with its full parking-event history (entries + exits).
+    For filtered/paginated event queries, use GET /entry-exit/by-vehicle/{vehicle_id}.
+    """
+    detail = _fetch_vehicle_detail(
+        db,
+        "v.id = :vehicle_id",
+        {"vehicle_id": vehicle_id},
+    )
+    if detail is None:
+        raise HTTPException(404, "Vehicle not found")
+    return detail
