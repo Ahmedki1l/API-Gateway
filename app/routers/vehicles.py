@@ -798,69 +798,6 @@ def _fetch_vehicle_events(
     return events_total, events
 
 
-def _fetch_unregistered_vehicle_detail(
-    db: Session,
-    plate: str,
-) -> Optional[VehicleDetail]:
-    """Build a `VehicleDetail` for a plate that has parking-session history
-    but no row in the `vehicles` registry. Mirrors how the list endpoint
-    (`GET /vehicles/?is_registered=false`) surfaces unregistered plates:
-    `id = null`, `is_registered = false`, vehicle_type / is_employee pulled
-    from the most-recent session.
-
-    Returns None when the plate has no rows in `parking_sessions` either —
-    caller raises 404.
-    """
-    # Pull whatever metadata the most-recent session has, plus a quick
-    # existence check (TOP 1 doubles as the gate for the 404 path).
-    latest_session = rows(db, """
-        SELECT TOP 1 vehicle_type, is_employee
-        FROM parking_sessions
-        WHERE plate_number = :plate
-        ORDER BY entry_time DESC
-    """, {"plate": plate})
-
-    if not latest_session:
-        return None
-
-    sess = latest_session[0]
-    sess_vehicle_type = sess.get("vehicle_type")
-    sess_is_employee = bool(sess["is_employee"]) if sess.get("is_employee") is not None else None
-
-    events_total, events = _fetch_vehicle_events(
-        db, plate, vehicle_pk=None,
-        owner_name=None,
-        vehicle_type=sess_vehicle_type,
-        is_employee=sess_is_employee,
-    )
-    current_event = next((e for e in events if e.status == "open"), None)
-
-    return VehicleDetail(
-        id=None,
-        plate_number=plate,
-        owner_name=None,
-        vehicle_type=sess_vehicle_type,
-        employee_id=None,
-        title=None,
-        is_registered=False,
-        registered_at=None,
-        notes=None,
-        is_employee=sess_is_employee,
-        phone=None,
-        email=None,
-        current_slot_id=None,
-        current_slot_name=None,
-        is_currently_parked=current_event is not None,
-        current_event=current_event,
-        parked_at=current_event.parked_at if current_event else None,
-        parking_status=current_event.status if current_event else None,
-        floor=current_event.floor if current_event else None,
-        floor_id=current_event.floor_id if current_event else None,
-        events_total=events_total,
-        events=events,
-    )
-
-
 def _fetch_vehicle_detail(
     db: Session,
     where_clause: str,
@@ -963,19 +900,18 @@ async def get_vehicle_by_plate(
     """Look up a vehicle by its plate number. Same response shape as
     GET /vehicles/{id} — full detail with parking-event history.
 
-    Surfaces unregistered plates too: if the plate has no row in `vehicles`
-    but does have parking-session history, the response is built from the
-    most-recent session with `id = null` and `is_registered = false`.
-    Returns 404 only when the plate is absent from both tables.
+    Returns rows whether `is_registered` is true or false, as long as the
+    plate has a row in the `vehicles` table — the returned `id` is what
+    the frontend uses for PUT / DELETE follow-ups. Returns 404 when no row
+    exists in `vehicles` for that plate, even if `parking_sessions`
+    contains the plate (an id-less response would leave the row unusable
+    for management operations).
     """
     detail = _fetch_vehicle_detail(
         db,
         "v.plate_number = :plate",
         {"plate": plate_number},
     )
-    if detail is None:
-        # Not in `vehicles` — fall back to the parking_sessions-only build.
-        detail = _fetch_unregistered_vehicle_detail(db, plate_number)
     if detail is None:
         raise HTTPException(404, f"Vehicle with plate '{plate_number}' not found")
     return detail
