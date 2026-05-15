@@ -8,7 +8,7 @@ from app.config import localize_naive
 from app.database import get_db, scalar, rows
 from app.routers._helpers import _floor_schema
 from app.routers.alerts import _alerts_extra_cols
-from app.routers.occupancy import _monitored_only, _slot_type_excl
+from app.routers.occupancy import _monitored_only, _parked_vehicles_count, _slot_type_excl
 from app.services.snapshots import resolve_snapshot_url
 from app.schemas import (
     ActiveVehicle,
@@ -95,10 +95,11 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
 
     `occupied_slots` is sourced from VA's `slot_status` table and restricted to
     monitored slots — it's the count of slot polygons VA currently sees a car in.
-    `parked_vehicles` is sourced from open `parking_sessions` (line-crossing at
-    entry/exit cameras) — the count of cars physically in the garage. The two
-    differ when cars park in blind spots or unmarked areas; the gap pairs with
-    `OccupancyKPIs.unmonitored_slots` to render blind-spot hints.
+    `parked_vehicles` combines open `parking_sessions` (line-crossing on B1/B2
+    ramps) with Ground floor's occupied monitored slots (no ramp camera on
+    Ground, so slot-status is the only signal there) — the count of cars
+    physically in the garage. The gap `parked_vehicles - occupied_slots`,
+    paired with `OccupancyKPIs.unmonitored_slots`, surfaces blind-spot hints.
     """
     slot_excl = _slot_type_excl()
     slot_excl_pk = _slot_type_excl("pk")
@@ -124,9 +125,7 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
     occupied_slots = occupied_slots or 0
     free_slots = (total_slots or 0) - occupied_slots
 
-    parked_vehicles = scalar(
-        db, "SELECT COUNT(*) FROM parking_sessions WHERE status = 'open'"
-    ) or 0
+    parked_vehicles = _parked_vehicles_count(db)
 
     cols = _alerts_extra_cols()
     if cols["severity"]:
