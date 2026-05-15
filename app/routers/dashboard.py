@@ -8,7 +8,7 @@ from app.config import localize_naive
 from app.database import get_db, scalar, rows
 from app.routers._helpers import _floor_schema
 from app.routers.alerts import _alerts_extra_cols
-from app.routers.occupancy import _slot_type_excl
+from app.routers.occupancy import _monitored_only, _slot_type_excl
 from app.services.snapshots import resolve_snapshot_url
 from app.schemas import (
     ActiveVehicle,
@@ -91,8 +91,18 @@ async def ai_status():
 
 @router.get("/kpis", response_model=DashboardKPIs)
 async def dashboard_kpis(db: Session = Depends(get_db)):
+    """Dashboard headline counters.
+
+    `occupied_slots` is sourced from VA's `slot_status` table and restricted to
+    monitored slots — it's the count of slot polygons VA currently sees a car in.
+    `parked_vehicles` is sourced from open `parking_sessions` (line-crossing at
+    entry/exit cameras) — the count of cars physically in the garage. The two
+    differ when cars park in blind spots or unmarked areas; the gap pairs with
+    `OccupancyKPIs.unmonitored_slots` to render blind-spot hints.
+    """
     slot_excl = _slot_type_excl()
     slot_excl_pk = _slot_type_excl("pk")
+    monitored_pk = _monitored_only("pk")
 
     total_slots = scalar(db, f"""
         SELECT COUNT(*) FROM parking_slots
@@ -106,12 +116,17 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
           AND ss.time = (SELECT MAX(time) FROM slot_status WHERE slot_id = pk.slot_id)
         WHERE pk.is_violation_zone = 0
           {slot_excl_pk}
+          {monitored_pk}
           AND ss.status IS NOT NULL
           AND UPPER(ss.status) NOT IN ('EMPTY', 'AVAILABLE', 'FREE', 'VACANT')
     """)
 
     occupied_slots = occupied_slots or 0
     free_slots = (total_slots or 0) - occupied_slots
+
+    parked_vehicles = scalar(
+        db, "SELECT COUNT(*) FROM parking_sessions WHERE status = 'open'"
+    ) or 0
 
     cols = _alerts_extra_cols()
     if cols["severity"]:
@@ -128,6 +143,7 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
     return DashboardKPIs(
         free_slots=free_slots,
         occupied_slots=occupied_slots,
+        parked_vehicles=parked_vehicles,
         critical_alerts=critical_alerts or 0,
     )
  

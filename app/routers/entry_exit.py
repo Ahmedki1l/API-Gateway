@@ -20,6 +20,7 @@ from app.schemas import (
     VehicleEventDetail,
     VehicleRef,
 )
+from app.schemas_enums import EntryExitDirection, ParkingSessionStatus
 from app.shared import build_paged, stream_csv
 
 router = APIRouter(prefix="/entry-exit", tags=["Entry/Exit"])
@@ -399,7 +400,7 @@ async def get_entry_exit(
     # WS-8.E: integer-id sibling filter; wins over `?floor=` when both are sent.
     floor_id: Optional[int] = Query(None),
     is_employee: Optional[bool] = Query(None),
-    status: Optional[str] = Query(None, description="open | closed | overstay | unknown_exit"),
+    status: Optional[ParkingSessionStatus] = Query(None),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
     min_duration_seconds: Optional[int] = Query(None, ge=0),
@@ -506,7 +507,7 @@ async def export_entry_exit_csv(
     # WS-8.E: integer-id sibling filter; wins over `?floor=` when both are sent.
     floor_id: Optional[int] = Query(None),
     is_employee: Optional[bool] = Query(None),
-    status: Optional[str] = Query(None),
+    status: Optional[ParkingSessionStatus] = Query(None),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
     min_duration_seconds: Optional[int] = Query(None, ge=0),
@@ -592,8 +593,8 @@ async def get_events_by_vehicle(
     vehicle_id: int,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    status: Optional[str] = Query(None, description="open | closed | overstay | unknown_exit"),
-    direction: Optional[str] = Query(
+    status: Optional[ParkingSessionStatus] = Query(None),
+    direction: Optional[EntryExitDirection] = Query(
         None,
         description="entry → only events with an entry; exit → only events with an exit recorded; null → both",
     ),
