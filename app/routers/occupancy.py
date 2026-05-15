@@ -73,47 +73,6 @@ def _monitored_col(alias: str = "") -> str:
     p = f"{alias}." if alias else ""
     return f"{p}is_monitored"
 
-
-# Ground floor lacks a ramp / line-crossing camera, so cars parked there don't
-# produce open parking_sessions rows (see entry_exit.py comment: "slot
-# occupation on the Ground Floor / direct slot detection without a prior
-# entry event"). The slot-status table is the only signal of a Ground-floor
-# presence. `_parked_vehicles_count` adds the two signals so the headline
-# count of "cars in the garage right now" includes Ground floor.
-_GROUND_FLOOR_NAME = "Ground"
-
-
-def _parked_vehicles_count(db: Session) -> int:
-    """Total cars physically in the garage right now.
-
-    Combines two complementary signals:
-    - Open `parking_sessions` rows — line-crossing entries from B1/B2 ramps.
-    - Occupied monitored slots on the Ground floor — direct slot detection,
-      since Ground has no ramp camera producing sessions.
-
-    The two sources are intentionally additive — the design assumption is
-    that Ground floor cars never produce `parking_sessions` rows, so there
-    is no overlap to deduplicate. If a future deployment wires a Ground-floor
-    ramp camera, this helper needs a carve-out (sessions WHERE floor !=
-    'Ground') to avoid double-counting.
-    """
-    sessions_count = scalar(
-        db, "SELECT COUNT(*) FROM parking_sessions WHERE status = 'open'"
-    ) or 0
-
-    ground_occupied = scalar(db, f"""
-        SELECT COUNT(*) FROM parking_slots pk
-        {_LATEST_STATUS_JOIN}
-        WHERE pk.floor = :ground
-          AND pk.is_violation_zone = 0
-          {_slot_type_excl('pk')}
-          {_monitored_only('pk')}
-          AND ss.status IS NOT NULL
-          AND ss.status NOT IN ('empty', 'available', 'free', 'VACANT')
-    """, {"ground": _GROUND_FLOOR_NAME}) or 0
-
-    return sessions_count + ground_occupied
-
 router = APIRouter(prefix="/occupancy", tags=["Occupancy"])
 
 # zone_occupancy real columns:
@@ -171,9 +130,9 @@ async def occupancy_kpis(db: Session = Depends(get_db)):
     available_spots = max(total_spots - occupied_spots, 0)
     overall_utilization = round(occupied_spots / total_spots * 100, 1) if total_spots else 0.0
 
-    # Combined "cars in garage now" — open sessions (B1/B2 line-crossing)
-    # plus Ground floor occupied slots (direct slot detection, no ramp).
-    active_vehicles = _parked_vehicles_count(db)
+    active_vehicles = scalar(
+        db, "SELECT COUNT(*) FROM parking_sessions WHERE status = 'open'"
+    )
 
     return OccupancyKPIs(
         total_spots=total_spots,
@@ -181,7 +140,7 @@ async def occupancy_kpis(db: Session = Depends(get_db)):
         occupied_spots=occupied_spots,
         slot_occupied_spots=occupied_spots,
         overall_utilization=overall_utilization,
-        total_vehicles=active_vehicles,
+        total_vehicles=active_vehicles or 0,
         monitored_slots=monitored_slots,
         unmonitored_slots=unmonitored_slots,
     )
@@ -851,8 +810,9 @@ async def get_occupancy_totals(db: Session = Depends(get_db)):
           AND ss.status NOT IN ('empty', 'available', 'free', 'VACANT')
     """) or 0
 
-    # Combined "cars in garage now" — see _parked_vehicles_count docstring.
-    total_vehicles = _parked_vehicles_count(db)
+    total_vehicles = scalar(
+        db, "SELECT COUNT(*) FROM parking_sessions WHERE status = 'open'"
+    ) or 0
 
     available_slots = max(total_slots - occupied_slots, 0)
     overall = round(occupied_slots / total_slots * 100, 1) if total_slots else 0.0
