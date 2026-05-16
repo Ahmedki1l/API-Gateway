@@ -84,9 +84,38 @@ class SlotRef(BaseModel):
     # events). False on operator-entered blind/unmonitored rows. Strict —
     # accepts only `true` / `false`, rejects `1` / `0` / `"yes"` etc.
     is_monitored: StrictBool = True
+    # Runtime indicator: true when an unresolved violation alert (e.g., wrong
+    # car in a reserved/handicap slot, vehicle intrusion) currently targets
+    # this slot. Different from `is_violation_slot` (which is a static "this
+    # slot is a violation zone" config). The FE recolors the slot when this
+    # flips true. Goes false the moment the underlying alert is resolved.
+    has_active_violation: StrictBool = False
+    # The alert_type of the most-recent unresolved violation alert on this
+    # slot — null when none. One of the violation-style AlertType values
+    # (`vehicle_violation`, `named_slot_violation`, `special_needs_violation`,
+    # `vehicle_intrusion`). FE picks the icon / tooltip text per type.
+    # Typed Optional[str] (not the enum) so a future upstream alert_type
+    # doesn't 500 the serializer.
+    active_violation_type: Optional[str] = None
+    # Severity of the same active violation alert — null when none. One of
+    # `critical` / `warning` / `info` (AlertSeverity). FE picks colour
+    # intensity per severity. Untyped string for resilience.
+    active_violation_severity: Optional[str] = None
     polygon: Optional[list] = None
     reservation_type: Optional[str] = None
     reserved_for: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _sync_violation_fields(self):
+        # Contract: `has_active_violation == (active_violation_type is not None)`,
+        # and `active_violation_severity is null` whenever there's no active
+        # violation. Derived in Python so the trio can't disagree at the API
+        # boundary regardless of what SQL returned. Type is the source of truth.
+        has_violation = self.active_violation_type is not None
+        self.has_active_violation = has_violation
+        if not has_violation:
+            self.active_violation_severity = None
+        return self
 
 
 class CameraRef(BaseModel):
@@ -133,6 +162,9 @@ class AIStatusResponse(BaseModel):
 
 
 class DashboardKPIs(BaseModel):
+    # Inventory headline — every parking slot on the property regardless of
+    # camera coverage (monitored + unmonitored). Excludes violation-zone rows.
+    total_slots: int
     free_slots: int
     # Slots whose latest VA `slot_status` row reads non-vacant. Restricted to
     # `is_monitored = 1` rows — a slot VA can't observe can't be reported as
@@ -414,12 +446,6 @@ class VehicleCreate(BaseModel):
     def _norm_phone(cls, v: Optional[str]) -> Optional[str]:
         return _validate_phone(v)
 
-    @model_validator(mode="after")
-    def _check_employee(self):
-        if self.is_employee and not (self.employee_id and self.employee_id.strip()):
-            raise ValueError("employee_id is required when is_employee=true")
-        return self
-
 
 class VehicleUpdate(BaseModel):
     plate_number: Optional[str] = Field(None, min_length=2, max_length=20)
@@ -489,24 +515,30 @@ class VehicleDetail(VehicleListItem):
 
 # ── Occupancy — floor + slot ─────────────────────────────────────────────────
 class OccupancyKPIs(BaseModel):
-    total_spots: int
-    available_spots: int
-    # Primary occupied count — same data source as /occupancy/floors[].current_count
-    # (line-crossing counters in zone_occupancy / floor_occupancy). This is the
-    # number ops trusts; the UI should display this as "occupied".
-    occupied_spots: int
-    # Secondary occupied count from VA's slot-status table (computer-vision).
-    # When `slot_occupied_spots != occupied_spots` the two sources have drifted;
-    # the dashboard can surface this as a reconciliation warning.
-    slot_occupied_spots: int = 0
+    # Naming: was `*_spots` pre-QA-round-2. Renamed to `*_slots` so the
+    # vocabulary matches `DashboardKPIs` and `OccupancyTotals` (which already
+    # said "slots") and the underlying `parking_slots` table.
+    total_slots: int
+    # Slots VA can currently fill (= monitored_slots − occupied_slots).
+    # `coverage_note` explains the basis to the operator.
+    available_slots: int
+    # Slots whose latest VA `slot_status` row reads non-vacant, restricted to
+    # monitored rows. Same coverage caveat as `available_slots`.
+    occupied_slots: int
     overall_utilization: float
     total_vehicles: int
     # Blind-spot accounting (parking_slots.is_monitored): `monitored_slots` is
-    # the count VA can observe; `unmonitored_slots` is the rest. `total_spots`
-    # already counts both. Frontend can render "X slots not monitored" hints
-    # from these.
+    # the count VA can observe; `unmonitored_slots` is the rest. `total_slots`
+    # counts both. Frontend renders the "Uncovered Slots" card from
+    # `unmonitored_slots`.
     monitored_slots: int = 0
     unmonitored_slots: int = 0
+    # Operator-facing subtitle shared by the Available + Occupied cards.
+    # Explains why those numbers count over monitored slots only — the
+    # uncovered slots are excluded because VA can't observe them.
+    coverage_note: str = (
+        "Counts cover monitored slots only — uncovered slots are excluded."
+    )
 
 
 class OccupancyTotals(BaseModel):
@@ -553,6 +585,11 @@ class FloorOccupancy(BaseModel):
     # the gap to render "X blind spots on this floor" hints.
     monitored_capacity: int = 0
     unmonitored_count: int = 0
+    # Same subtitle as OccupancyKPIs.coverage_note — explains that `available`
+    # and `current_count` count over monitored slots only.
+    coverage_note: str = (
+        "Counts cover monitored slots only — uncovered slots are excluded."
+    )
 
 
 class SlotOccupancy(BaseModel):
@@ -612,6 +649,18 @@ class SlotListItem(BaseModel):
     # (no polygon, no slot_status events). Frontend should badge these.
     # Strict — accepts only `true` / `false`.
     is_monitored: StrictBool = True
+    # Runtime indicator: an unresolved violation alert targets this slot
+    # right now. FE recolors the slot. See `SlotRef.has_active_violation`.
+    # Derived from `active_violation_type` by the model validator below — the
+    # two fields are always in sync (`has_active_violation == True iff
+    # active_violation_type is not None`).
+    has_active_violation: StrictBool = False
+    # alert_type of the most-recent unresolved violation alert on this slot,
+    # null when none. See SlotRef.active_violation_type for the full doc.
+    active_violation_type: Optional[str] = None
+    # Severity of the same active violation (`critical` / `warning` / `info`),
+    # null when none. See SlotRef.active_violation_severity for the full doc.
+    active_violation_severity: Optional[str] = None
     reservation_type: Optional[str] = None
     reserved_for: Optional[str] = None
     current_plate: Optional[str] = None
@@ -619,6 +668,16 @@ class SlotListItem(BaseModel):
     status_updated_at: Optional[datetime] = None
 
     model_config = {"populate_by_name": True}
+
+    @model_validator(mode="after")
+    def _sync_violation_fields(self):
+        # Same contract as SlotRef: bool + severity follow the type. Type is
+        # the source of truth.
+        has_violation = self.active_violation_type is not None
+        self.has_active_violation = has_violation
+        if not has_violation:
+            self.active_violation_severity = None
+        return self
 
 
 class FloorSlotGroup(BaseModel):

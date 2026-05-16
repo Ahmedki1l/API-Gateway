@@ -58,6 +58,7 @@ _BOOL_COLUMNS = frozenset({
     "is_violation_slot",
     "is_available",
     "is_monitored",
+    "has_active_violation",
     "is_test",
     "is_currently_parked",
     "is_online",

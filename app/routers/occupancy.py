@@ -73,6 +73,64 @@ def _monitored_col(alias: str = "") -> str:
     p = f"{alias}." if alias else ""
     return f"{p}is_monitored"
 
+
+# Alert types that represent a "violation against this specific slot". An
+# unresolved alert of any of these types makes the slot's
+# `has_active_violation` flip to true. Includes the slot-targeted violations
+# from the AlertType enum; `intrusion` (general, area-level) is excluded.
+_VIOLATION_ALERT_TYPES = (
+    "'vehicle_violation', 'named_slot_violation', "
+    "'special_needs_violation', 'vehicle_intrusion'"
+)
+
+
+def _active_violation_cols(alias: str = "pk") -> str:
+    """SELECT expression producing three correlated columns:
+      `active_violation_type` — alert_type of the most-recent unresolved,
+         non-test violation alert on this slot (NULL when none).
+      `active_violation_severity` — severity of the same alert (NULL when
+         none). Reads `alerts.severity` when the column exists; falls back
+         to the literal `'critical'` (the gateway's default for the four
+         violation alert types — see `alerts.py:_alert_query_bits`).
+      `has_active_violation` — 0/1 BIT mirroring the same EXISTS check.
+         Kept as an FE convenience flag; the model_validator on SlotRef /
+         SlotListItem re-derives it from `active_violation_type` so the
+         two fields can never disagree at the API boundary.
+
+    Used by every slot list/detail SELECT so the frontend can recolor slots
+    with live violations, surface the type as a tooltip, and pick a colour
+    intensity per severity."""
+    # Late import to dodge a startup-time circular: occupancy is imported by
+    # dashboard, which already imports alerts; the alerts module pulls in
+    # SQLAlchemy types that would cycle if loaded eagerly here.
+    from app.routers.alerts import _alerts_extra_cols
+    p = f"{alias}." if alias else ""
+    cols = _alerts_extra_cols()
+    sev_expr = "a.severity" if cols["severity"] else "'critical'"
+    return f"""(SELECT TOP 1 a.alert_type
+        FROM alerts a
+        WHERE a.slot_id = {p}slot_id
+          AND a.is_resolved = 0
+          AND a.is_test = 0
+          AND a.alert_type IN ({_VIOLATION_ALERT_TYPES})
+        ORDER BY a.triggered_at DESC
+    ) AS active_violation_type,
+    (SELECT TOP 1 {sev_expr}
+        FROM alerts a
+        WHERE a.slot_id = {p}slot_id
+          AND a.is_resolved = 0
+          AND a.is_test = 0
+          AND a.alert_type IN ({_VIOLATION_ALERT_TYPES})
+        ORDER BY a.triggered_at DESC
+    ) AS active_violation_severity,
+    CASE WHEN EXISTS (
+        SELECT 1 FROM alerts a
+        WHERE a.slot_id = {p}slot_id
+          AND a.is_resolved = 0
+          AND a.is_test = 0
+          AND a.alert_type IN ({_VIOLATION_ALERT_TYPES})
+    ) THEN 1 ELSE 0 END AS has_active_violation"""
+
 router = APIRouter(prefix="/occupancy", tags=["Occupancy"])
 
 # zone_occupancy real columns:
@@ -90,20 +148,20 @@ router = APIRouter(prefix="/occupancy", tags=["Occupancy"])
 
 @router.get("/kpis", response_model=OccupancyKPIs)
 async def occupancy_kpis(db: Session = Depends(get_db)):
-    """Garage-wide occupancy summary — slot-status driven (GA-3).
+    """Garage-wide occupancy summary — slot-status driven.
 
-    The headline `occupied_spots` triplet uses the same SQL as /occupancy/totals
-    so the two endpoints can never disagree. The previous line-crossing
-    aggregation produced ~3-spot drift vs /occupancy/totals because line
-    counters accumulate errors over time, while a slot is or isn't occupied.
+    Counts cover **monitored slots only** — unmonitored (blind) slots are
+    excluded from `available_slots` and `occupied_slots` because VA can't
+    observe them. `total_slots` still counts both for inventory purposes;
+    `unmonitored_slots` is exposed separately so the FE can render the
+    "Uncovered Slots" hint card.
 
-    `slot_occupied_spots` is kept in the contract as the explicit
-    "this number came from slot-status" signal — it equals `occupied_spots`
-    after this change. Frontend can read `/occupancy/floors[*].current_count`
-    (line-crossing) vs `/occupancy/floors[*].slot_occupancy_count` (slot-status)
-    per floor to surface drift; the kpi headline no longer reflects that
-    disagreement."""
-    total_spots = scalar(
+    `available_slots = monitored_slots − occupied_slots` (not
+    `total_slots − occupied_slots`), so "available" reflects what VA can
+    actually fill, not the inventory gap. The shared `coverage_note`
+    string explains this distinction to operators.
+    """
+    total_slots = scalar(
         db,
         f"SELECT COUNT(*) FROM parking_slots WHERE is_violation_zone = 0 {_slot_type_excl()}",
     ) or 0
@@ -112,12 +170,11 @@ async def occupancy_kpis(db: Session = Depends(get_db)):
         db,
         f"SELECT COUNT(*) FROM parking_slots WHERE is_violation_zone = 0 {_slot_type_excl()} {_monitored_only()}",
     ) or 0
-    unmonitored_slots = max(total_spots - monitored_slots, 0)
+    unmonitored_slots = max(total_slots - monitored_slots, 0)
 
-    # Same SQL as /occupancy/totals (slot-status, latest row per slot).
-    # Restricted to monitored slots — VA can't observe an unmonitored row, so
-    # they can never show as occupied here.
-    occupied_spots = scalar(db, f"""
+    # Slot-status latest row per slot, restricted to monitored rows. VA can't
+    # observe an unmonitored slot, so it can't show as occupied here.
+    occupied_slots = scalar(db, f"""
         SELECT COUNT(*) FROM parking_slots pk
         {_LATEST_STATUS_JOIN}
         WHERE pk.is_violation_zone = 0
@@ -127,18 +184,18 @@ async def occupancy_kpis(db: Session = Depends(get_db)):
           AND ss.status NOT IN ('empty', 'available', 'free', 'VACANT')
     """) or 0
 
-    available_spots = max(total_spots - occupied_spots, 0)
-    overall_utilization = round(occupied_spots / total_spots * 100, 1) if total_spots else 0.0
+    # Coverage-aware: "available" is monitored − occupied, not total − occupied.
+    available_slots = max(monitored_slots - occupied_slots, 0)
+    overall_utilization = round(occupied_slots / total_slots * 100, 1) if total_slots else 0.0
 
     active_vehicles = scalar(
         db, "SELECT COUNT(*) FROM parking_sessions WHERE status = 'open'"
     )
 
     return OccupancyKPIs(
-        total_spots=total_spots,
-        available_spots=available_spots,
-        occupied_spots=occupied_spots,
-        slot_occupied_spots=occupied_spots,
+        total_slots=total_slots,
+        available_slots=available_slots,
+        occupied_slots=occupied_slots,
         overall_utilization=overall_utilization,
         total_vehicles=active_vehicles or 0,
         monitored_slots=monitored_slots,
@@ -395,6 +452,7 @@ async def get_slots(
             ps.is_available,
             ps.is_violation_zone,
             {ps_monitored_col},
+            {_active_violation_cols('ps')},
             {ps_category_col},
             {ps_reserved_col},
             ss.plate_number     AS current_plate,
@@ -560,6 +618,7 @@ async def export_occupancy_csv(
             ps.floor,
             ps.is_available,
             {exp_monitored_col},
+            {_active_violation_cols('ps')},
             {exp_category_col},
             {exp_reserved_col},
             ss.plate_number AS current_plate,
@@ -591,6 +650,9 @@ async def export_occupancy_csv(
         "floor",
         "is_available",
         "is_monitored",
+        "has_active_violation",
+        "active_violation_type",
+        "active_violation_severity",
         "reservation_type",
         "reserved_for",
         "current_plate",
@@ -605,6 +667,9 @@ async def export_occupancy_csv(
             s["floor"],
             s["is_available"],
             s.get("is_monitored"),
+            s.get("has_active_violation"),
+            s.get("active_violation_type"),
+            s.get("active_violation_severity"),
             s["reservation_type"],
             s["reserved_for"],
             s["current_plate"],
@@ -723,7 +788,11 @@ def _build_floor_occupancy(
     # always the more honest headline. The raw line-crossing reading lives
     # on `cars_in_floor` for transparency; `reconciled=False` flags drift.
     headline_occupied = slot_occupancy_count
-    available = max(max_capacity - headline_occupied, 0)
+    # Coverage-aware: "available" counts over monitored capacity only — the
+    # operator can't fill a slot VA can't see. Utilization stays scaled to
+    # the true floor size so it remains comparable across floors with
+    # different blind-spot counts.
+    available = max(monitored_capacity - headline_occupied, 0)
     utilization = round(headline_occupied / max_capacity * 100, 1) if max_capacity else 0.0
 
     return FloorOccupancy(
@@ -796,10 +865,21 @@ async def get_floors(
 
 @router.get("/totals", response_model=OccupancyTotals)
 async def get_occupancy_totals(db: Session = Depends(get_db)):
-    """Garage-wide rollup — replaces the synthetic GARAGE-TOTAL zone_occupancy row."""
+    """Garage-wide rollup — replaces the synthetic GARAGE-TOTAL zone_occupancy row.
+
+    Counts cover monitored slots only (same convention as /occupancy/kpis):
+    `available_slots = monitored_slots - occupied_slots`, not `total_slots -
+    occupied_slots`, so "available" reflects what VA can actually fill.
+    """
     total_slots = scalar(
         db,
         f"SELECT COUNT(*) FROM parking_slots WHERE is_violation_zone = 0 {_slot_type_excl()}",
+    ) or 0
+
+    # Monitored-only inventory for the available-slots denominator.
+    monitored_total = scalar(
+        db,
+        f"SELECT COUNT(*) FROM parking_slots WHERE is_violation_zone = 0 {_slot_type_excl()} {_monitored_only()}",
     ) or 0
 
     # occupied_slots = distinct monitored slots with a non-vacant latest status.
@@ -818,7 +898,8 @@ async def get_occupancy_totals(db: Session = Depends(get_db)):
         db, "SELECT COUNT(*) FROM parking_sessions WHERE status = 'open'"
     ) or 0
 
-    available_slots = max(total_slots - occupied_slots, 0)
+    # Coverage-aware: monitored − occupied (not total − occupied).
+    available_slots = max(monitored_total - occupied_slots, 0)
     overall = round(occupied_slots / total_slots * 100, 1) if total_slots else 0.0
 
     return OccupancyTotals(
@@ -905,6 +986,7 @@ async def get_slots_by_floor(
             pk.is_available,
             pk.is_violation_zone,
             {pk_monitored_col},
+            {_active_violation_cols('pk')},
             {pk_category_col},
             {pk_reserved_col},
             ss.plate_number     AS current_plate,
@@ -963,6 +1045,7 @@ async def get_slot_detail(slot_id: str, db: Session = Depends(get_db)):
             pk.is_available,
             pk.is_violation_zone AS is_violation_slot,
             {pk_monitored_col},
+            {_active_violation_cols('pk')},
             {pk_category_col},
             {pk_reserved_col},
             pk.polygon,
@@ -1068,6 +1151,9 @@ async def get_slot_detail(slot_id: str, db: Session = Depends(get_db)):
         is_available=bool(s.get("is_available")) if s.get("is_available") is not None else True,
         is_violation_slot=bool(s.get("is_violation_slot")) if s.get("is_violation_slot") is not None else False,
         is_monitored=bool(s.get("is_monitored")) if s.get("is_monitored") is not None else True,
+        has_active_violation=bool(s.get("has_active_violation")) if s.get("has_active_violation") is not None else False,
+        active_violation_type=s.get("active_violation_type"),
+        active_violation_severity=s.get("active_violation_severity"),
         reservation_type=s.get("reservation_type"),
         reserved_for=s.get("reserved_for"),
         polygon=parsed_polygon,
