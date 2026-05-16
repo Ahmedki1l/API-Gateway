@@ -141,6 +141,7 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
     critical_alerts = scalar(db, critical_sql)
 
     return DashboardKPIs(
+        total_slots=total_slots or 0,
         free_slots=free_slots,
         occupied_slots=occupied_slots,
         parked_vehicles=parked_vehicles,
