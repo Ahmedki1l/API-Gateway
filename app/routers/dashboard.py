@@ -125,7 +125,7 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
     free_slots = (total_slots or 0) - occupied_slots
 
     parked_vehicles = scalar(
-        db, "SELECT COUNT(*) FROM parking_sessions WHERE status = 'open'"
+        db, "SELECT COUNT(DISTINCT plate_number) FROM parking_sessions WHERE status = 'open'"
     ) or 0
 
     cols = _alerts_extra_cols()

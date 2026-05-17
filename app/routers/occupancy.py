@@ -189,7 +189,7 @@ async def occupancy_kpis(db: Session = Depends(get_db)):
     overall_utilization = round(occupied_slots / total_slots * 100, 1) if total_slots else 0.0
 
     active_vehicles = scalar(
-        db, "SELECT COUNT(*) FROM parking_sessions WHERE status = 'open'"
+        db, "SELECT COUNT(DISTINCT plate_number) FROM parking_sessions WHERE status = 'open'"
     )
 
     return OccupancyKPIs(
@@ -895,7 +895,7 @@ async def get_occupancy_totals(db: Session = Depends(get_db)):
     """) or 0
 
     total_vehicles = scalar(
-        db, "SELECT COUNT(*) FROM parking_sessions WHERE status = 'open'"
+        db, "SELECT COUNT(DISTINCT plate_number) FROM parking_sessions WHERE status = 'open'"
     ) or 0
 
     # Coverage-aware: monitored − occupied (not total − occupied).
