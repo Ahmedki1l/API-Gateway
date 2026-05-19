@@ -322,9 +322,10 @@ async def vehicle_kpis(db: Session = Depends(get_db)):
 async def get_vehicles(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    search: Optional[str] = Query(None, description="plate or owner name"),
+    search: Optional[str] = Query(None, description="plate, owner name, or title"),
     is_employee: Optional[bool] = Query(None),
     vehicle_type: Optional[str] = Query(None),
+    title: Optional[str] = Query(None, description="exact-match filter on vehicle title"),
     is_registered: Optional[bool] = Query(
         None,
         description=(
@@ -356,11 +357,14 @@ async def get_vehicles(
     params: dict = {}
 
     if search:
-        clauses.append("(ap.plate_number LIKE :search OR v.owner_name LIKE :search)")
+        clauses.append("(ap.plate_number LIKE :search OR v.owner_name LIKE :search OR v.title LIKE :search)")
         params["search"] = f"%{search}%"
     if vehicle_type:
         clauses.append("COALESCE(v.vehicle_type, ps.vehicle_type) = :vehicle_type")
         params["vehicle_type"] = vehicle_type
+    if title:
+        clauses.append("v.title = :title")
+        params["title"] = title
     if is_registered is True:
         clauses.append("v.is_registered = 1")
     elif is_registered is False:
@@ -662,6 +666,7 @@ async def delete_vehicle(
 async def export_vehicles_csv(
     search: Optional[str] = Query(None),
     vehicle_type: Optional[str] = Query(None),
+    title: Optional[str] = Query(None),
     is_registered: Optional[bool] = Query(None),
     is_employee: Optional[bool] = Query(None),
     is_currently_parked: Optional[bool] = Query(None),
@@ -673,11 +678,14 @@ async def export_vehicles_csv(
     clauses = ["1=1"]
     params: dict = {}
     if search:
-        clauses.append("(v.plate_number LIKE :search OR v.owner_name LIKE :search)")
+        clauses.append("(v.plate_number LIKE :search OR v.owner_name LIKE :search OR v.title LIKE :search)")
         params["search"] = f"%{search}%"
     if vehicle_type:
         clauses.append("v.vehicle_type = :vehicle_type")
         params["vehicle_type"] = vehicle_type
+    if title:
+        clauses.append("v.title = :title")
+        params["title"] = title
     if is_registered is not None:
         clauses.append("v.is_registered = :is_registered")
         params["is_registered"] = 1 if is_registered else 0
