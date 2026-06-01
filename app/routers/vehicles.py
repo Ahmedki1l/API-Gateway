@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Path, Query, HTTPException, Response, st
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.config import facility_today_utc
 from app.database import get_db, scalar, rows
 from app.routers._helpers import _floor_schema
 from app.routers.entry_exit import _live_duration_seconds
@@ -145,6 +146,15 @@ def _event_from_row(
     exit is populated when exit_time is not null. Vehicle-level fields are
     passed in by the caller (denormalized so /vehicles/{id} events match the
     shape served by /entry-exit/)."""
+    # Mirror entry_exit.py:_event_from_row — a session still open (or flagged
+    # overstay) whose entry predates facility-local midnight today is overstaying.
+    _today_naive = facility_today_utc().replace(tzinfo=None)
+    entry_time_raw = r.get("entry_time")
+    is_overstay = (
+        r.get("status") in ("open", "overstay")
+        and entry_time_raw is not None
+        and entry_time_raw < _today_naive
+    )
     entry = EntryExitEvent(
         plate_number=plate_number,
         vehicle_id=vehicle_id,
@@ -173,6 +183,7 @@ def _event_from_row(
         vehicle_type=vehicle_type,
         is_employee=is_employee,
         status=r.get("status"),
+        is_overstay=is_overstay,
         entry=entry,
         exit=exit_event,
         duration_seconds=_live_duration_seconds(
