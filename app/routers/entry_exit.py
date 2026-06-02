@@ -21,7 +21,7 @@ from app.schemas import (
     VehicleRef,
 )
 from app.schemas_enums import EntryExitDirection, ParkingSessionStatus
-from app.shared import build_paged, stream_csv
+from app.shared import build_paged, normalize_plate_term, plate_search_sql, stream_csv
 
 router = APIRouter(prefix="/entry-exit", tags=["Entry/Exit"])
 
@@ -133,6 +133,11 @@ VEHICLE_JOIN = """
 """
 OWNER_NAME_EXPR = "COALESCE(v_id.owner_name, v_plate.owner_name)"
 VEHICLE_TYPE_EXPR = "COALESCE(v_id.vehicle_type, v_plate.vehicle_type, ps.vehicle_type)"
+# Prefer the registry's CURRENT is_employee over the parking_sessions snapshot
+# (which is frozen at session creation). Keeps the list filter + list display +
+# detail page consistent — fixes the bug where a vehicle showed under the
+# "Employee = No" filter but its detail read "Employee = Yes".
+IS_EMPLOYEE_EXPR = "COALESCE(v_id.is_employee, v_plate.is_employee, ps.is_employee)"
  
 # entry_exit_log real columns:
 #   id, plate_number, vehicle_id, vehicle_type, gate, camera_id,
@@ -417,8 +422,12 @@ async def get_entry_exit(
     params: dict = {}
 
     if search:
-        clauses.append(f"(ps.plate_number LIKE :search OR {OWNER_NAME_EXPR} LIKE :search)")
+        clauses.append(
+            f"({plate_search_sql('ps.plate_number', 'search_plate')} "
+            f"OR {OWNER_NAME_EXPR} LIKE :search)"
+        )
         params["search"] = f"%{search}%"
+        params["search_plate"] = f"%{normalize_plate_term(search)}%"
     # WS-8.E: integer-id filter wins; fall back to legacy string filter for back-compat.
     # Schema-compat: when the floor_id column doesn't exist yet, fall through to the string filter.
     resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=None)
@@ -429,7 +438,9 @@ async def get_entry_exit(
         clauses.append("ps.floor = :floor")
         params["floor"] = floor
     if is_employee is not None:
-        clauses.append("ps.is_employee = :is_employee")
+        # Match the vehicle's CURRENT employee status (same source the detail
+        # page shows), not the frozen parking_sessions snapshot.
+        clauses.append(f"{IS_EMPLOYEE_EXPR} = :is_employee")
         params["is_employee"] = 1 if is_employee else 0
     if status:
         if status == "overstay":
@@ -487,7 +498,7 @@ async def get_entry_exit(
             ps.slot_snapshot_path,
             {OWNER_NAME_EXPR}   AS owner_name,
             {VEHICLE_TYPE_EXPR} AS vehicle_type,
-            ps.is_employee
+            {IS_EMPLOYEE_EXPR}  AS is_employee
         FROM parking_sessions ps
         {VEHICLE_JOIN}
         LEFT JOIN parking_slots pk ON pk.slot_id = ps.slot_id
@@ -519,8 +530,12 @@ async def export_entry_exit_csv(
     clauses = ["1=1"]
     params: dict = {}
     if search:
-        clauses.append(f"(ps.plate_number LIKE :search OR {OWNER_NAME_EXPR} LIKE :search)")
+        clauses.append(
+            f"({plate_search_sql('ps.plate_number', 'search_plate')} "
+            f"OR {OWNER_NAME_EXPR} LIKE :search)"
+        )
         params["search"] = f"%{search}%"
+        params["search_plate"] = f"%{normalize_plate_term(search)}%"
     # WS-8.E: same dual-key floor filter pattern as the list endpoint.
     # Schema-compat: when ps.floor_id column missing, fall through to legacy string filter.
     resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=None)
@@ -531,7 +546,7 @@ async def export_entry_exit_csv(
         clauses.append("ps.floor = :floor")
         params["floor"] = floor
     if is_employee is not None:
-        clauses.append("ps.is_employee = :is_employee")
+        clauses.append(f"{IS_EMPLOYEE_EXPR} = :is_employee")
         params["is_employee"] = 1 if is_employee else 0
     if status:
         if status == "overstay":
@@ -559,7 +574,7 @@ async def export_entry_exit_csv(
             ps.plate_number                                  AS [Plate Number],
             {OWNER_NAME_EXPR}                                AS [Owner],
             {VEHICLE_TYPE_EXPR}                              AS [Vehicle Type],
-            ps.is_employee                                   AS [Employee],
+            {IS_EMPLOYEE_EXPR}                               AS [Employee],
             ps.status                                        AS [Status],
             ps.entry_time                                    AS [Entry Time],
             ps.exit_time                                     AS [Exit Time],
@@ -689,7 +704,7 @@ async def get_events_by_vehicle(
             ps.slot_snapshot_path,
             {OWNER_NAME_EXPR}   AS owner_name,
             {VEHICLE_TYPE_EXPR} AS vehicle_type,
-            ps.is_employee
+            {IS_EMPLOYEE_EXPR}  AS is_employee
         FROM parking_sessions ps
         {VEHICLE_JOIN}
         LEFT JOIN parking_slots pk ON pk.slot_id = ps.slot_id
