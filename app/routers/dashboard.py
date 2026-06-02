@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.config import localize_naive
+from app.config import facility_today_utc, localize_naive
 from app.database import get_db, scalar, rows
 from app.routers._helpers import _floor_schema
 from app.routers.alerts import _alerts_extra_cols
@@ -129,16 +129,26 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
     ) or 0
 
     cols = _alerts_extra_cols()
+    # Dashboard critical-alerts card counts TODAY's unresolved criticals only
+    # (facility-local midnight onward), matching how the Entry/Exit KPIs scope
+    # "today" via facility_today_utc(). triggered_at follows the same UTC-naive
+    # column convention the other today-windowed queries compare against.
+    today_start = facility_today_utc()
     if cols["severity"]:
-        critical_sql = "SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0 AND severity='critical'"
+        critical_sql = """
+            SELECT COUNT(*) FROM alerts
+            WHERE is_resolved=0 AND is_test=0 AND severity='critical'
+              AND triggered_at >= :today
+        """
     else:
         critical_sql = """
             SELECT COUNT(*) FROM alerts
             WHERE is_resolved=0 AND is_test=0
               AND alert_type IN ('violence','intrusion','vehicle_intrusion',
                                  'vehicle_violation','named_slot_violation','special_needs_violation')
+              AND triggered_at >= :today
         """
-    critical_alerts = scalar(db, critical_sql)
+    critical_alerts = scalar(db, critical_sql, {"today": today_start})
 
     return DashboardKPIs(
         total_slots=total_slots or 0,
