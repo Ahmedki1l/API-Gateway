@@ -21,7 +21,7 @@ from app.schemas import (
     VehicleRef,
 )
 from app.schemas_enums import EntryExitDirection, ParkingSessionStatus
-from app.shared import build_paged, normalize_plate_term, plate_search_sql, stream_csv
+from app.shared import build_paged, plate_search_clause, stream_csv
 
 router = APIRouter(prefix="/entry-exit", tags=["Entry/Exit"])
 
@@ -422,12 +422,9 @@ async def get_entry_exit(
     params: dict = {}
 
     if search:
-        clauses.append(
-            f"({plate_search_sql('ps.plate_number', 'search_plate')} "
-            f"OR {OWNER_NAME_EXPR} LIKE :search)"
-        )
+        plate_clause = plate_search_clause("ps.plate_number", search, params)
+        clauses.append(f"({plate_clause} OR {OWNER_NAME_EXPR} LIKE :search)")
         params["search"] = f"%{search}%"
-        params["search_plate"] = f"%{normalize_plate_term(search)}%"
     # WS-8.E: integer-id filter wins; fall back to legacy string filter for back-compat.
     # Schema-compat: when the floor_id column doesn't exist yet, fall through to the string filter.
     resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=None)
@@ -530,12 +527,9 @@ async def export_entry_exit_csv(
     clauses = ["1=1"]
     params: dict = {}
     if search:
-        clauses.append(
-            f"({plate_search_sql('ps.plate_number', 'search_plate')} "
-            f"OR {OWNER_NAME_EXPR} LIKE :search)"
-        )
+        plate_clause = plate_search_clause("ps.plate_number", search, params)
+        clauses.append(f"({plate_clause} OR {OWNER_NAME_EXPR} LIKE :search)")
         params["search"] = f"%{search}%"
-        params["search_plate"] = f"%{normalize_plate_term(search)}%"
     # WS-8.E: same dual-key floor filter pattern as the list endpoint.
     # Schema-compat: when ps.floor_id column missing, fall through to legacy string filter.
     resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=None)

@@ -21,7 +21,7 @@ from app.schemas import (
     VehicleListItem,
     VehicleUpdate,
 )
-from app.shared import build_paged, normalize_plate_term, plate_search_sql, stream_csv
+from app.shared import build_paged, plate_search_clause, stream_csv
 
 router = APIRouter(prefix="/vehicles", tags=["Vehicles"])
 
@@ -377,14 +377,11 @@ async def get_vehicles(
     params: dict = {}
 
     if search:
-        # Plate matches dash/space-insensitively (so the full "4918-AVD" finds a
-        # row stored without the dash); owner/title match on the raw term.
-        clauses.append(
-            f"({plate_search_sql('ap.plate_number', 'search_plate')} "
-            "OR v.owner_name LIKE :search OR v.title LIKE :search)"
-        )
+        # Plate matches dash/space- AND order-insensitively (the full "4918-AVD"
+        # as displayed finds the stored "AVD-4918"); owner/title match raw term.
+        plate_clause = plate_search_clause("ap.plate_number", search, params)
+        clauses.append(f"({plate_clause} OR v.owner_name LIKE :search OR v.title LIKE :search)")
         params["search"] = f"%{search}%"
-        params["search_plate"] = f"%{normalize_plate_term(search)}%"
     if vehicle_type:
         clauses.append("COALESCE(v.vehicle_type, ps.vehicle_type) = :vehicle_type")
         params["vehicle_type"] = vehicle_type
@@ -731,12 +728,9 @@ async def export_vehicles_csv(
     clauses = ["1=1"]
     params: dict = {}
     if search:
-        clauses.append(
-            f"({plate_search_sql('v.plate_number', 'search_plate')} "
-            "OR v.owner_name LIKE :search OR v.title LIKE :search)"
-        )
+        plate_clause = plate_search_clause("v.plate_number", search, params)
+        clauses.append(f"({plate_clause} OR v.owner_name LIKE :search OR v.title LIKE :search)")
         params["search"] = f"%{search}%"
-        params["search_plate"] = f"%{normalize_plate_term(search)}%"
     if vehicle_type:
         clauses.append("v.vehicle_type = :vehicle_type")
         params["vehicle_type"] = vehicle_type
