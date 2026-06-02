@@ -753,7 +753,7 @@ async def get_entry_exit_detail(event_id: int, db: Session = Depends(get_db)):
             v_id.title          AS emp_title,
             v_id.phone,
             v_id.email,
-            v_id.is_employee,
+            {IS_EMPLOYEE_EXPR}  AS is_employee,
             v_id.is_registered,
             v_id.registered_at,
             v_id.notes,
