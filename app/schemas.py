@@ -488,6 +488,11 @@ class VehicleListItem(VehicleRef):
     floor: Optional[str] = None
     # Phase-1 of WS-8 floor refactor; populated alongside `floor` while both keys live.
     floor_id: Optional[int] = None
+    # Top-level overstay flag so the Vehicles tab can render the red overstay
+    # indicator per row exactly like Entry/Exit does (which exposes is_overstay
+    # at the VehicleEvent root). Mirrors current_event.is_overstay; false when
+    # the vehicle has no open/overstay session. See routers/vehicles.py.
+    is_overstay: bool = False
     current_event: Optional[VehicleEvent] = None
 
 

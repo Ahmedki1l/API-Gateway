@@ -21,11 +21,22 @@ from app.schemas import (
     VehicleListItem,
     VehicleUpdate,
 )
-from app.shared import build_paged, stream_csv
+from app.shared import build_paged, plate_search_clause, stream_csv
 
 router = APIRouter(prefix="/vehicles", tags=["Vehicles"])
 
 _UNREGISTERED_NOTE_MARKER = "Not registered"
+
+
+def _is_overstay(status: Optional[str], entry_time) -> bool:
+    """A still-open (or already-flagged-overstay) session whose entry predates
+    facility-local midnight today is overstaying. Single source of truth shared
+    by the list builder, the write-response builder, the detail builder, and
+    `_event_from_row` so the Vehicles tab and Entry/Exit tab agree on the flag.
+    Mirrors entry_exit.py:_event_from_row."""
+    if status not in ("open", "overstay") or entry_time is None:
+        return False
+    return entry_time < facility_today_utc().replace(tzinfo=None)
 
 
 def _split_vehicle_note_parts(note: Optional[str]) -> list[str]:
@@ -89,6 +100,7 @@ def _fetch_vehicle_list_item(db: Session, vehicle_id: int) -> Optional[dict]:
             {extra},
             ps.parked_at,
             ps.status      AS parking_status,
+            ps.entry_time,
             {floor_expr}    AS floor,
             {floor_id_expr} AS floor_id
         FROM vehicles v
@@ -97,6 +109,7 @@ def _fetch_vehicle_list_item(db: Session, vehicle_id: int) -> Optional[dict]:
                 plate_number,
                 parked_at,
                 status,
+                entry_time,
                 floor,
                 {ps_floor_id_col},
                 ROW_NUMBER() OVER (PARTITION BY plate_number ORDER BY entry_time DESC) AS rn
@@ -105,7 +118,11 @@ def _fetch_vehicle_list_item(db: Session, vehicle_id: int) -> Optional[dict]:
         ) ps ON ps.plate_number = v.plate_number AND ps.rn = 1
         WHERE v.id = :id
     """, {"id": vehicle_id})
-    return result[0] if result else None
+    if not result:
+        return None
+    row = result[0]
+    row["is_overstay"] = _is_overstay(row.get("parking_status"), row.get("entry_time"))
+    return row
 
 
 def _vehicle_extra_cols(db: Session) -> dict:
@@ -146,15 +163,7 @@ def _event_from_row(
     exit is populated when exit_time is not null. Vehicle-level fields are
     passed in by the caller (denormalized so /vehicles/{id} events match the
     shape served by /entry-exit/)."""
-    # Mirror entry_exit.py:_event_from_row — a session still open (or flagged
-    # overstay) whose entry predates facility-local midnight today is overstaying.
-    _today_naive = facility_today_utc().replace(tzinfo=None)
-    entry_time_raw = r.get("entry_time")
-    is_overstay = (
-        r.get("status") in ("open", "overstay")
-        and entry_time_raw is not None
-        and entry_time_raw < _today_naive
-    )
+    is_overstay = _is_overstay(r.get("status"), r.get("entry_time"))
     entry = EntryExitEvent(
         plate_number=plate_number,
         vehicle_id=vehicle_id,
@@ -368,7 +377,10 @@ async def get_vehicles(
     params: dict = {}
 
     if search:
-        clauses.append("(ap.plate_number LIKE :search OR v.owner_name LIKE :search OR v.title LIKE :search)")
+        # Plate matches dash/space- AND order-insensitively (the full "4918-AVD"
+        # as displayed finds the stored "AVD-4918"); owner/title match raw term.
+        plate_clause = plate_search_clause("ap.plate_number", search, params)
+        clauses.append(f"({plate_clause} OR v.owner_name LIKE :search OR v.title LIKE :search)")
         params["search"] = f"%{search}%"
     if vehicle_type:
         clauses.append("COALESCE(v.vehicle_type, ps.vehicle_type) = :vehicle_type")
@@ -565,6 +577,9 @@ async def get_vehicles(
             )
         else:
             r["current_event"] = None
+        # Surface the overstay flag at the row level (mirrors current_event) so
+        # the Vehicles tab can render the red overstay indicator like Entry/Exit.
+        r["is_overstay"] = r["current_event"].is_overstay if r["current_event"] else False
 
     return build_paged(items, total or 0, page, page_size)
 
@@ -645,6 +660,38 @@ async def delete_vehicle(
     vehicle_id: int,
     db: Session = Depends(get_db),
 ):
+    """Delete a vehicle from the registry.
+
+    A vehicle that has Entry/Exit history (rows in `parking_sessions` or
+    `entry_exit_log`) is NOT deletable — hard-deleting it would orphan or
+    destroy that history (the previous behaviour cascade-deleted the history
+    too). Such vehicles return 409; unregister them instead (PUT
+    is_registered=false) to drop them from the registry while keeping history.
+    Only vehicles with zero history are removed.
+    """
+    # Resolve the plate first so we also catch legacy history rows whose
+    # vehicle_id was never populated (matched by plate_number).
+    plate = scalar(db, "SELECT plate_number FROM vehicles WHERE id = :vid", {"vid": vehicle_id})
+    if plate is None:
+        raise HTTPException(404, "Vehicle not found")
+
+    history_count = scalar(db, """
+        SELECT
+            (SELECT COUNT(*) FROM parking_sessions
+                WHERE vehicle_id = :vid OR plate_number = :plate)
+          + (SELECT COUNT(*) FROM entry_exit_log
+                WHERE vehicle_id = :vid OR plate_number = :plate)
+    """, {"vid": vehicle_id, "plate": plate}) or 0
+    if history_count > 0:
+        raise HTTPException(
+            409,
+            "Vehicle has Entry/Exit history and cannot be deleted. "
+            "Unregister it (set is_registered=false) to remove it from the "
+            "registry while preserving its parking history.",
+        )
+
+    # No history — safe to remove. Unlink any alerts that referenced it so the
+    # alert rows survive (they aren't entry/exit history).
     has_alerts_vehicle_id = (scalar(db, """
         SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_NAME = 'alerts' AND COLUMN_NAME = 'vehicle_id'
@@ -654,14 +701,6 @@ async def delete_vehicle(
             text("UPDATE alerts SET vehicle_id = NULL WHERE vehicle_id = :vid"),
             {"vid": vehicle_id},
         )
-    db.execute(
-        text("DELETE FROM entry_exit_log WHERE vehicle_id = :vid"),
-        {"vid": vehicle_id},
-    )
-    db.execute(
-        text("DELETE FROM parking_sessions WHERE vehicle_id = :vid"),
-        {"vid": vehicle_id},
-    )
     result = db.execute(
         text("DELETE FROM vehicles WHERE id = :vid"),
         {"vid": vehicle_id},
@@ -689,7 +728,8 @@ async def export_vehicles_csv(
     clauses = ["1=1"]
     params: dict = {}
     if search:
-        clauses.append("(v.plate_number LIKE :search OR v.owner_name LIKE :search OR v.title LIKE :search)")
+        plate_clause = plate_search_clause("v.plate_number", search, params)
+        clauses.append(f"({plate_clause} OR v.owner_name LIKE :search OR v.title LIKE :search)")
         params["search"] = f"%{search}%"
     if vehicle_type:
         clauses.append("v.vehicle_type = :vehicle_type")
@@ -897,6 +937,7 @@ def _fetch_vehicle_detail(
         current_slot_id=v.get("current_slot_id"),
         current_slot_name=v.get("current_slot_name"),
         is_currently_parked=current_event is not None,
+        is_overstay=current_event.is_overstay if current_event else False,
         current_event=current_event,
         parked_at=current_event.parked_at if current_event else None,
         parking_status=current_event.status if current_event else None,
