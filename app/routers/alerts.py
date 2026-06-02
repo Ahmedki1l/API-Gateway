@@ -263,20 +263,26 @@ async def _pump(source_system: str, iterator, queue: asyncio.Queue):
 @router.get("/stats", response_model=AlertStats)
 async def alert_stats(db: Session = Depends(get_db)):
     cols = _alerts_extra_cols()
+    # All counters are scoped to TODAY (facility-local midnight onward), matching
+    # the Entry/Exit KPIs and the dashboard critical-alerts card. triggered_at
+    # follows the same UTC-naive convention the other today-windowed queries use.
+    params = {"today": facility_today_utc()}
+    today = "AND triggered_at >= :today"
     if cols["severity"]:
-        critical_sql = "SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0 AND severity='critical'"
+        critical_sql = f"SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0 AND severity='critical' {today}"
     else:
-        critical_sql = """
+        critical_sql = f"""
             SELECT COUNT(*) FROM alerts
             WHERE is_resolved=0 AND is_test=0
               AND alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation')
+              {today}
         """
 
     return AlertStats(
-        active_alerts=scalar(db, "SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0") or 0,
-        critical_violations=scalar(db, critical_sql) or 0,
+        active_alerts=scalar(db, f"SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0 {today}", params) or 0,
+        critical_violations=scalar(db, critical_sql, params) or 0,
         resolved_total=scalar(db,
-            "SELECT COUNT(*) FROM alerts WHERE is_resolved=1 AND is_test=0") or 0,
+            f"SELECT COUNT(*) FROM alerts WHERE is_resolved=1 AND is_test=0 {today}", params) or 0,
     )
  
  
