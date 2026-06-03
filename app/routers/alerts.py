@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
  
-from app.config import facility_today_utc, localize_naive
+from app.config import localize_naive
 from app.database import get_db, rows, scalar
 from app.routers._helpers import _floor_schema, resolve_floor_id
 from app.services.snapshots import resolve_snapshot_url
@@ -263,26 +263,23 @@ async def _pump(source_system: str, iterator, queue: asyncio.Queue):
 @router.get("/stats", response_model=AlertStats)
 async def alert_stats(db: Session = Depends(get_db)):
     cols = _alerts_extra_cols()
-    # All counters are scoped to TODAY (facility-local midnight onward), matching
-    # the Entry/Exit KPIs and the dashboard critical-alerts card. triggered_at
-    # follows the same UTC-naive convention the other today-windowed queries use.
-    params = {"today": facility_today_utc()}
-    today = "AND triggered_at >= :today"
+    # All counters are ALL-TIME (no date window) — the Alerts Center card is
+    # labelled "Showing All-time Data". Unresolved/critical counts are
+    # naturally bounded since they exclude resolved rows.
     if cols["severity"]:
-        critical_sql = f"SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0 AND severity='critical' {today}"
+        critical_sql = "SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0 AND severity='critical'"
     else:
-        critical_sql = f"""
+        critical_sql = """
             SELECT COUNT(*) FROM alerts
             WHERE is_resolved=0 AND is_test=0
               AND alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation')
-              {today}
         """
 
     return AlertStats(
-        active_alerts=scalar(db, f"SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0 {today}", params) or 0,
-        critical_violations=scalar(db, critical_sql, params) or 0,
+        active_alerts=scalar(db, "SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0") or 0,
+        critical_violations=scalar(db, critical_sql) or 0,
         resolved_total=scalar(db,
-            f"SELECT COUNT(*) FROM alerts WHERE is_resolved=1 AND is_test=0 {today}", params) or 0,
+            "SELECT COUNT(*) FROM alerts WHERE is_resolved=1 AND is_test=0") or 0,
     )
  
  
