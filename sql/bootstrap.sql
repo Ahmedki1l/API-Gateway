@@ -289,6 +289,7 @@ BEGIN
         id                  INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
         camera_id           VARCHAR(50)   NOT NULL,
         name                VARCHAR(100)  NULL,
+        area                VARCHAR(50)   NULL,
         floor               VARCHAR(50)   NULL,
         role                VARCHAR(30)   NOT NULL CONSTRAINT DF_cameras_role DEFAULT ('other'),
         watches_floor       VARCHAR(50)   NULL,
@@ -566,6 +567,11 @@ GO
 -- 6b. cameras.floor_id (mirrors cameras.floor)
 IF COL_LENGTH(N'dbo.cameras', N'floor_id') IS NULL
     ALTER TABLE dbo.cameras ADD floor_id INT NULL;
+GO
+
+-- 6b-i. cameras.area (physical sub-zone: B1-A/B/C/RAMP, B2-A/B/C/RAMP)
+IF COL_LENGTH(N'dbo.cameras', N'area') IS NULL
+    ALTER TABLE dbo.cameras ADD area VARCHAR(50) NULL;
 GO
 UPDATE t SET floor_id = f.id FROM dbo.cameras t INNER JOIN dbo.floors f ON f.name = t.floor WHERE t.floor_id IS NULL;
 GO

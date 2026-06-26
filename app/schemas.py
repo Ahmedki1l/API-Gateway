@@ -19,6 +19,11 @@ from pydantic import BaseModel, Field, StrictBool, field_validator, model_valida
 T = TypeVar("T")
 
 CameraRoleLiteral = Literal["entry", "exit", "floor_counting", "slot_detection", "other"]
+# Fixed camera-area vocabulary — keep in sync with schemas_enums.CameraArea.
+CameraAreaLiteral = Literal[
+    "B1-A", "B1-B", "B1-C", "B1-RAMP",
+    "B2-A", "B2-B", "B2-C", "B2-RAMP",
+]
 
 
 # ── Shared envelope ───────────────────────────────────────────────────────────
@@ -719,6 +724,7 @@ _DEFAULT_RTSP_PATH = "/Streaming/Channels/101"
 
 class CameraItem(CameraRef):
     """Full camera detail — extends CameraRef with hardware + operational fields."""
+    area: Optional[CameraAreaLiteral] = None
     ip_address: str
     rtsp_port: int
     rtsp_path: str
@@ -746,6 +752,7 @@ class CameraDetail(CameraItem):
 class CameraCreate(BaseModel):
     camera_id: str = Field(..., min_length=1, max_length=50)
     name: Optional[str] = None
+    area: Optional[CameraAreaLiteral] = None
     floor: Optional[str] = None
     # Phase-1 of WS-8 floor refactor; create requests can use either `floor` or `floor_id`.
     floor_id: Optional[int] = None
@@ -773,6 +780,7 @@ class CameraCreate(BaseModel):
 class CameraUpdate(BaseModel):
     # camera_id intentionally absent — renaming the business key would orphan event rows
     name: Optional[str] = None
+    area: Optional[CameraAreaLiteral] = None
     floor: Optional[str] = None
     # Phase-1 of WS-8 floor refactor; update requests can use either `floor` or `floor_id`.
     floor_id: Optional[int] = None

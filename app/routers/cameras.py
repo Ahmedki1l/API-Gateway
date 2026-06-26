@@ -30,7 +30,7 @@ from app.schemas import (
     EntityActionResponse,
     PagedResponse,
 )
-from app.schemas_enums import CameraRole
+from app.schemas_enums import CameraArea, CameraRole
 from app.config import settings
 from app.routers._helpers import _floor_schema, resolve_floor_id
 from app.services.camera_monitor import check_one, derive_is_online
@@ -141,6 +141,7 @@ def _row_to_item(row: dict) -> dict:
         "id": row["id"],
         "camera_id": row["camera_id"],
         "name": row.get("name"),
+        "area": row.get("area"),
         "floor": row.get("floor"),
         "floor_id": row.get("floor_id"),
         "role": role,
@@ -178,6 +179,7 @@ def _select_cols() -> str:
         return name if present else f"NULL AS {name}"
     cols = [
         "id", "camera_id", "name",
+        col("area",             schema["cameras_area"]),
         col("floor",            schema["cameras_floor"]),
         col("floor_id",         schema["cameras_floor_id"]),
         col("watches_floor",    schema["cameras_watches_floor"]),
@@ -250,6 +252,7 @@ async def list_cameras(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = Query(None, description="matches camera_id, name, ip_address, notes"),
+    area: Optional[CameraArea] = Query(None),
     floor: Optional[str] = Query(None),
     # WS-8.E: integer-id sibling filter; wins over `?floor=` when both are sent.
     floor_id: Optional[int] = Query(None),
@@ -273,6 +276,9 @@ async def list_cameras(
             "OR ip_address LIKE :search OR notes LIKE :search)"
         )
         params["search"] = f"%{search}%"
+    if area is not None and schema["cameras_area"]:
+        clauses.append("area = :area")
+        params["area"] = area.value
     # WS-8.E: prefer `floor_id` (resolved from either side) for the new column;
     # the legacy string `floor =` filter is preserved when only `?floor=` is sent
     # so callers running against pre-WS-8 rows (where `floor_id` is NULL) still
@@ -400,6 +406,10 @@ async def create_camera(body: CameraCreate, db: Session = Depends(get_db)):
     # WS-8 schema-compat: only INSERT into columns that actually exist in this
     # DB. Older deployments are missing some of: floor, floor_id,
     # watches_floor, watches_floor_id, notes.
+    if schema["cameras_area"]:
+        cols.append("area")
+        vals.append(":area")
+        params["area"] = body.area
     if schema["cameras_floor"]:
         cols.append("floor")
         vals.append(":floor")
@@ -437,7 +447,7 @@ async def create_camera(body: CameraCreate, db: Session = Depends(get_db)):
 # WS-8.E: floor_id / watches_floor / watches_floor_id added to dual-write the
 # new schema fields when the caller updates the legacy or new floor keys.
 _UPDATABLE_COLUMNS = {
-    "name", "floor", "floor_id", "watches_floor", "watches_floor_id",
+    "name", "area", "floor", "floor_id", "watches_floor", "watches_floor_id",
     "ip_address", "rtsp_port", "rtsp_path",
     "username", "enabled", "notes",
 }
@@ -476,6 +486,8 @@ async def update_camera(camera_id: str, body: CameraUpdate, db: Session = Depend
 
     # Schema-compat: silently drop columns from the UPDATE that don't exist
     # in the DB yet. Older deployments may be missing any of these.
+    if not schema["cameras_area"]:
+        updates.pop("area", None)
     if not schema["cameras_floor"]:
         updates.pop("floor", None)
     if not schema["cameras_floor_id"]:
@@ -911,6 +923,7 @@ async def list_all_with_credentials(
 @router.get("/export/csv")
 async def export_cameras_csv(
     search: Optional[str] = Query(None),
+    area: Optional[CameraArea] = Query(None),
     floor: Optional[str] = Query(None),
     # WS-8.E: integer-id sibling filter; wins over `?floor=` when both are sent.
     floor_id: Optional[int] = Query(None),
@@ -934,6 +947,9 @@ async def export_cameras_csv(
             "OR ip_address LIKE :search OR notes LIKE :search)"
         )
         params["search"] = f"%{search}%"
+    if area is not None and schema["cameras_area"]:
+        clauses.append("area = :area")
+        params["area"] = area.value
     # WS-8.E: prefer floor_id (already-resolved id) when provided. Schema-compat:
     # fall back to the legacy string filter when the column is missing.
     resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=None)
@@ -973,6 +989,7 @@ async def export_cameras_csv(
         return name if present else f"NULL AS {name}"
     cols_csv = ", ".join([
         "id", "camera_id", "name",
+        col_or_null("area",             schema["cameras_area"]),
         col_or_null("floor",            schema["cameras_floor"]),
         col_or_null("floor_id",         schema["cameras_floor_id"]),
         col_or_null("watches_floor",    schema["cameras_watches_floor"]),
@@ -1000,6 +1017,7 @@ async def export_cameras_csv(
             "id": r["id"],
             "camera_id": r["camera_id"],
             "name": r.get("name"),
+            "area": r.get("area"),
             "floor": r.get("floor"),
             "floor_id": r.get("floor_id"),
             "role": role,
@@ -1018,7 +1036,7 @@ async def export_cameras_csv(
         })
 
     headers = [
-        "id", "camera_id", "name", "floor", "floor_id", "role",
+        "id", "camera_id", "name", "area", "floor", "floor_id", "role",
         "watches_floor", "watches_floor_id",
         "ip_address", "rtsp_port",
         "rtsp_path", "username", "enabled", "is_online", "last_seen_at", "last_status",

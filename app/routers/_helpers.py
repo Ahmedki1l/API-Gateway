@@ -69,6 +69,7 @@ def _floor_schema() -> dict:
             "cameras_watches_floor":              has_col("cameras", "watches_floor"),
             "cameras_floor_id":                   has_col("cameras", "floor_id"),
             "cameras_watches_floor_id":           has_col("cameras", "watches_floor_id"),
+            "cameras_area":                       has_col("cameras", "area"),
             "cameras_role":                       has_col("cameras", "role"),
             "cameras_watches_slots_json":         has_col("cameras", "watches_slots_json"),
             "cameras_notes":                      has_col("cameras", "notes"),
