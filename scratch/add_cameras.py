@@ -102,15 +102,15 @@ CAMERAS = [
 
     # ── New cameras (9) on 10.1.13.x — user kloudspot. Set `area`/`floor`/`name`
     #    per camera when you know the mount location.
-    {"camera_id": "CAM-15", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.84", "username": "kloudspot"},
-    {"camera_id": "CAM-16", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.85", "username": "kloudspot"},
-    {"camera_id": "CAM-17", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.86", "username": "kloudspot"},
-    {"camera_id": "CAM-18", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.87", "username": "kloudspot"},
-    {"camera_id": "CAM-19", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.88", "username": "kloudspot"},
-    {"camera_id": "CAM-20", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.89", "username": "kloudspot"},
-    {"camera_id": "CAM-21", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.90", "username": "kloudspot"},
-    {"camera_id": "CAM-22", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.91", "username": "kloudspot"},
-    {"camera_id": "CAM-23", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.94", "username": "kloudspot"},
+    {"camera_id": "CAM-15", "name": "B2-PARKING", "area": "B2-C", "floor": "B2", "ip_address": "10.1.13.84", "username": "kloudspot"},
+    {"camera_id": "CAM-16", "name": "B2-PARKING", "area": "B2-B", "floor": "B2", "ip_address": "10.1.13.85", "username": "kloudspot"},
+    {"camera_id": "CAM-17", "name": "B2-PARKING", "area":"B2-B", "floor": "B2", "ip_address": "10.1.13.86", "username": "kloudspot"},
+    {"camera_id": "CAM-18", "name": "B2-PARKING", "area": "B2-B", "floor": "B2", "ip_address": "10.1.13.87", "username": "kloudspot"},
+    {"camera_id": "CAM-19", "name": "B2-PARKING", "area": "B2-A", "floor": "B2", "ip_address": "10.1.13.88", "username": "kloudspot"},
+    {"camera_id": "CAM-20", "name": "B1-Entrance Gate", "area": "B1-B", "floor": "B1", "ip_address": "10.1.13.89", "username": "kloudspot"},
+    {"camera_id": "CAM-21", "name": "B1-Parking", "area": "B1-A", "floor": "B1", "ip_address": "10.1.13.90", "username": "kloudspot"},
+    {"camera_id": "CAM-22", "name": "B1-Parking", "area": "B1-B", "floor": "B1", "ip_address": "10.1.13.91", "username": "kloudspot"},
+    {"camera_id": "CAM-23", "name": "B1-Entry Ramp", "area": None, "floor": "B1", "ip_address": "10.1.13.94", "username": "kloudspot"},
 ]
 
 # ──────────────────────────────────────────────────────────────────────────────
