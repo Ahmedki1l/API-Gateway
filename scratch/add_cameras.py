@@ -60,7 +60,7 @@ def env_password(camera_id: str) -> str | None:
 # the defaults in DEFAULTS below.
 #
 # Allowed `area` values: B1-A, B1-B, B1-C, B1-RAMP, B2-A, B2-B, B2-C, B2-RAMP, or None
-# Allowed `role`  values: entry, exit, floor_counting, slot_detection, other
+# (There is no `role` field — the gateway derives role from the camera_id pattern.)
 #
 # Template (copy this block for each camera; then add CAMERA_PW_<ID> to .env):
 #     {
@@ -68,7 +68,6 @@ def env_password(camera_id: str) -> str | None:
 #         "name": "B2 Parking — Camera 15",
 #         "area": "B2-A",
 #         "floor": "B2",
-#         "role": "slot_detection",
 #         "ip_address": "10.1.13.74",
 #         "username": "kloudspot",
 #         # optional overrides:
@@ -84,34 +83,34 @@ CAMERAS = [
     #    username and password are preserved exactly so the upsert matches the
     #    current rows (no duplicates) and credentials round-trip. `area` is the
     #    physical sub-zone — left None until you assign each camera's section.
-    {"camera_id": "ANPR-Entry", "name": "ENTRY-GATE", "area": None, "floor": "Ground", "role": "entry",          "ip_address": "10.1.13.100", "username": "kloudspot", "notes": "string"},
-    {"camera_id": "ANPR-Exit",  "name": "EXIT-GATE",  "area": None, "floor": "Ground", "role": "exit",           "ip_address": "10.1.13.101", "username": "kloudspot1", "notes": "string"},
-    {"camera_id": "Cam_01", "name": "GF-FRONT",    "area": None, "floor": "Ground", "role": "slot_detection", "ip_address": "10.1.13.60", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "Cam_02", "name": "GF-FRONT",    "area": None, "floor": "Ground", "role": "slot_detection", "ip_address": "10.1.13.61", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "Cam_03", "name": "B1-PARKING",  "area": None, "floor": "B1",     "role": "slot_detection", "ip_address": "10.1.13.62", "username": "kloudspot", "notes": "string"},
-    {"camera_id": "Cam_04", "name": "B1-PARKING",  "area": None, "floor": "B1",     "role": "slot_detection", "ip_address": "10.1.13.63", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "Cam_05", "name": "B1-PARKING",  "area": None, "floor": "B1",     "role": "slot_detection", "ip_address": "10.1.13.64", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "Cam_06", "name": "B1-PARKING",  "area": None, "floor": "B1",     "role": "slot_detection", "ip_address": "10.1.13.65", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "Cam_07", "name": "B1-PARKING",  "area": None, "floor": "B1",     "role": "slot_detection", "ip_address": "10.1.13.66", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "Cam_08", "name": "B1-PARKING",  "area": None, "floor": "B1",     "role": "slot_detection", "ip_address": "10.1.13.67", "username": "kloudspot", "notes": "string"},
-    {"camera_id": "Cam_09", "name": "B2-PARKING",  "area": None, "floor": "B2",     "role": "slot_detection", "ip_address": "10.1.13.68", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "Cam_10", "name": "B2-PARKING",  "area": None, "floor": "B2",     "role": "slot_detection", "ip_address": "10.1.13.69", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "Cam_11", "name": "B2-PARKING",  "area": None, "floor": "B2",     "role": "slot_detection", "ip_address": "10.1.13.70", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "Cam_12", "name": "B2-PARKING",  "area": None, "floor": "B2",     "role": "slot_detection", "ip_address": "10.1.13.71", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "Cam_13", "name": "B2-PARKING",  "area": None, "floor": "B2",     "role": "slot_detection", "ip_address": "10.1.13.72", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "Cam_14", "name": "B2-PARKING",  "area": None, "floor": "B2",     "role": "slot_detection", "ip_address": "10.1.13.73", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "ANPR-Entry", "name": "ENTRY-GATE", "area": None, "floor": "Ground",          "ip_address": "10.1.13.100", "username": "kloudspot", "notes": "string"},
+    {"camera_id": "ANPR-Exit",  "name": "EXIT-GATE",  "area": None, "floor": "Ground",           "ip_address": "10.1.13.101", "username": "kloudspot1", "notes": "string"},
+    {"camera_id": "Cam_01", "name": "GF-FRONT",    "area": None, "floor": "Ground", "ip_address": "10.1.13.60", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "Cam_02", "name": "GF-FRONT",    "area": None, "floor": "Ground", "ip_address": "10.1.13.61", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "Cam_03", "name": "B1-PARKING",  "area": None, "floor": "B1", "ip_address": "10.1.13.62", "username": "kloudspot", "notes": "string"},
+    {"camera_id": "Cam_04", "name": "B1-PARKING",  "area": None, "floor": "B1", "ip_address": "10.1.13.63", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "Cam_05", "name": "B1-PARKING",  "area": None, "floor": "B1", "ip_address": "10.1.13.64", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "Cam_06", "name": "B1-PARKING",  "area": None, "floor": "B1", "ip_address": "10.1.13.65", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "Cam_07", "name": "B1-PARKING",  "area": None, "floor": "B1", "ip_address": "10.1.13.66", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "Cam_08", "name": "B1-PARKING",  "area": None, "floor": "B1", "ip_address": "10.1.13.67", "username": "kloudspot", "notes": "string"},
+    {"camera_id": "Cam_09", "name": "B2-PARKING",  "area": None, "floor": "B2", "ip_address": "10.1.13.68", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "Cam_10", "name": "B2-PARKING",  "area": None, "floor": "B2", "ip_address": "10.1.13.69", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "Cam_11", "name": "B2-PARKING",  "area": None, "floor": "B2", "ip_address": "10.1.13.70", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "Cam_12", "name": "B2-PARKING",  "area": None, "floor": "B2", "ip_address": "10.1.13.71", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "Cam_13", "name": "B2-PARKING",  "area": None, "floor": "B2", "ip_address": "10.1.13.72", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "Cam_14", "name": "B2-PARKING",  "area": None, "floor": "B2", "ip_address": "10.1.13.73", "username": "kloudspot",     "notes": "string"},
 
     # ── New cameras (9) on 10.1.13.x — user kloudspot. Set `area`/`floor`/`name`
     #    per camera when you know the mount location.
-    {"camera_id": "CAM-15", "name": None, "area": None, "floor": None, "role": "slot_detection", "ip_address": "10.1.13.84", "username": "kloudspot"},
-    {"camera_id": "CAM-16", "name": None, "area": None, "floor": None, "role": "slot_detection", "ip_address": "10.1.13.85", "username": "kloudspot"},
-    {"camera_id": "CAM-17", "name": None, "area": None, "floor": None, "role": "slot_detection", "ip_address": "10.1.13.86", "username": "kloudspot"},
-    {"camera_id": "CAM-18", "name": None, "area": None, "floor": None, "role": "slot_detection", "ip_address": "10.1.13.87", "username": "kloudspot"},
-    {"camera_id": "CAM-19", "name": None, "area": None, "floor": None, "role": "slot_detection", "ip_address": "10.1.13.88", "username": "kloudspot"},
-    {"camera_id": "CAM-20", "name": None, "area": None, "floor": None, "role": "slot_detection", "ip_address": "10.1.13.89", "username": "kloudspot"},
-    {"camera_id": "CAM-21", "name": None, "area": None, "floor": None, "role": "slot_detection", "ip_address": "10.1.13.90", "username": "kloudspot"},
-    {"camera_id": "CAM-22", "name": None, "area": None, "floor": None, "role": "slot_detection", "ip_address": "10.1.13.91", "username": "kloudspot"},
-    {"camera_id": "CAM-23", "name": None, "area": None, "floor": None, "role": "slot_detection", "ip_address": "10.1.13.94", "username": "kloudspot"},
+    {"camera_id": "CAM-15", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.84", "username": "kloudspot"},
+    {"camera_id": "CAM-16", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.85", "username": "kloudspot"},
+    {"camera_id": "CAM-17", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.86", "username": "kloudspot"},
+    {"camera_id": "CAM-18", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.87", "username": "kloudspot"},
+    {"camera_id": "CAM-19", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.88", "username": "kloudspot"},
+    {"camera_id": "CAM-20", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.89", "username": "kloudspot"},
+    {"camera_id": "CAM-21", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.90", "username": "kloudspot"},
+    {"camera_id": "CAM-22", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.91", "username": "kloudspot"},
+    {"camera_id": "CAM-23", "name": None, "area": None, "floor": None, "ip_address": "10.1.13.94", "username": "kloudspot"},
 ]
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -121,7 +120,6 @@ DEFAULTS = {
     "name": None,
     "area": None,
     "floor": None,
-    "role": "other",
     "watches_floor": None,
     "ip_address": None,
     "rtsp_port": 554,
@@ -133,10 +131,11 @@ DEFAULTS = {
 
 # Columns we may write, in preferred order. The script keeps only the ones that
 # actually exist in dbo.cameras (probed at runtime) — this DB may pre-date some
-# bootstrap.sql ALTERs (e.g. `role`, `watches_floor`), so we never reference a
-# missing column. `password_encrypted` is set from the encrypted plaintext.
+# bootstrap.sql ALTERs (e.g. `watches_floor`), so we never reference a missing
+# column. `role` is intentionally absent: the gateway derives it, never stores it.
+# `password_encrypted` is set from the encrypted plaintext.
 WRITABLE_COLUMNS = [
-    "name", "area", "floor", "role", "watches_floor", "ip_address",
+    "name", "area", "floor", "watches_floor", "ip_address",
     "rtsp_port", "rtsp_path", "username", "password_encrypted", "enabled", "notes",
 ]
 
@@ -161,7 +160,8 @@ ENSURE_COLUMNS = {
     "floor":              "VARCHAR(50)   NULL",
     "floor_id":           "INT           NULL",
     "zone_id":            "VARCHAR(100)  NULL",
-    "role":               "VARCHAR(30)   NOT NULL DEFAULT ('other')",
+    # NOTE: no `role` column. The gateway DERIVES role from the camera_id naming
+    # pattern (see routers/cameras.py:_derive_role) and never stores it.
     "watches_floor":      "VARCHAR(50)   NULL",
     "watches_floor_id":   "INT           NULL",
     "watches_slots_json": "NVARCHAR(MAX) NULL",
