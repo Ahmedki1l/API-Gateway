@@ -4,8 +4,9 @@ Reconcile the dbo.cameras table from a single source of truth in this file.
 What it does on each run (idempotent):
 - Ensures every canonical cameras column exists (ALTER-ing in any missing one) —
   see ENSURE_COLUMNS. Brings an older table up to the full bootstrap.sql shape.
-- Upserts every camera in CAMERAS (MERGE on camera_id): existing rows updated,
-  new ones inserted. No duplicates.
+- Upserts every camera in CAMERAS (MERGE on ip_address — the stable physical
+  identity): existing rows updated whatever their camera_id, new IPs inserted.
+  No duplicates even across deployments that name cameras differently.
 - Encrypts each password with app.services.crypto.cipher (the same
   CAMERAS_ENCRYPTION_KEY the gateway boots with). The plaintext never hits the DB.
 
@@ -239,13 +240,23 @@ def resolve_floor_ids(db, params: list[dict], *, dry_run: bool) -> None:
 
 
 def build_upsert(present: list[str]) -> "text":
-    set_clause = ",\n        ".join(f"{c} = :{c}" for c in present)
+    # Match on ip_address — the stable PHYSICAL identity of a camera. Different
+    # deployments name the same camera differently (CAM-ENTRY vs ANPR-Entry vs
+    # Cam_01), so matching on camera_id created duplicate rows. Matching on IP
+    # updates the existing row whatever its camera_id is — no duplicates — and
+    # the existing camera_id is PRESERVED (camera_id is never in the UPDATE SET).
+    #
+    # On UPDATE, COALESCE(:col, Target.col) keeps the existing DB value when the
+    # script passes NULL — so re-running never wipes a column that's already set.
+    # INSERT (a genuinely new IP) takes the values as-is, NULL included.
+    set_cols = [c for c in present if c != "ip_address"]  # ip is the match key
+    set_clause = ",\n        ".join(f"{c} = COALESCE(:{c}, Target.{c})" for c in set_cols)
     insert_cols = ", ".join(["camera_id", *present])
     insert_vals = ", ".join(f":{c}" for c in ["camera_id", *present])
     return text(f"""
     MERGE INTO dbo.cameras AS Target
-    USING (SELECT :camera_id AS camera_id) AS Source
-        ON Target.camera_id = Source.camera_id
+    USING (SELECT :ip_address AS ip_address) AS Source
+        ON Target.ip_address = Source.ip_address
     WHEN MATCHED THEN UPDATE SET
         {set_clause},
         updated_at = GETUTCDATE()
