@@ -30,7 +30,12 @@ import os
 import re
 import sys
 
-sys.path.append("c:\\Users\\moham\\AI\\API Gateway")
+# Repo root = the parent of this scratch/ dir. Put it on sys.path so `import app`
+# works no matter where the repo is checked out or what the current working
+# directory is (the old hardcoded absolute path broke on other machines).
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from dotenv import dotenv_values
 from app.database import SessionLocal
@@ -38,7 +43,6 @@ from app.services.crypto import cipher
 from sqlalchemy import text
 
 # ── Secret source: .env at the repo root (gitignored). os.environ overrides it. ──
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _ENV = {**dotenv_values(os.path.join(_REPO_ROOT, ".env")), **os.environ}
 
 
