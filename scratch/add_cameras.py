@@ -92,28 +92,32 @@ CAMERAS = [
     {"camera_id": "ANPR-Exit",  "name": "EXIT-GATE",  "area": None, "floor": "Ground",           "ip_address": "10.1.13.101", "username": "kloudspot1", "notes": "string"},
     {"camera_id": "CAM-01", "name": "GF-FRONT",    "area": None, "floor": "Ground", "ip_address": "10.1.13.60", "username": "kloudspot",     "notes": "string"},
     {"camera_id": "CAM-02", "name": "GF-FRONT",    "area": None, "floor": "Ground", "ip_address": "10.1.13.61", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "CAM-03", "name": "B1-PARKING",  "area": None, "floor": "B1", "ip_address": "10.1.13.62", "username": "kloudspot", "notes": "string"},
-    {"camera_id": "CAM-04", "name": "B1-PARKING",  "area": None, "floor": "B1", "ip_address": "10.1.13.63", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "CAM-05", "name": "B1-PARKING",  "area": None, "floor": "B1", "ip_address": "10.1.13.64", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "CAM-06", "name": "B1-PARKING",  "area": None, "floor": "B1", "ip_address": "10.1.13.65", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "CAM-07", "name": "B1-PARKING",  "area": None, "floor": "B1", "ip_address": "10.1.13.66", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "CAM-08", "name": "B1-PARKING",  "area": None, "floor": "B1", "ip_address": "10.1.13.67", "username": "kloudspot", "notes": "string"},
-    {"camera_id": "CAM-09", "name": "B2-PARKING",  "area": None, "floor": "B2", "ip_address": "10.1.13.68", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "CAM-10", "name": "B2-PARKING",  "area": None, "floor": "B2", "ip_address": "10.1.13.69", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "CAM-11", "name": "B2-PARKING",  "area": None, "floor": "B2", "ip_address": "10.1.13.70", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "CAM-12", "name": "B2-PARKING",  "area": None, "floor": "B2", "ip_address": "10.1.13.71", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "CAM-13", "name": "B2-PARKING",  "area": None, "floor": "B2", "ip_address": "10.1.13.72", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "CAM-14", "name": "B2-PARKING",  "area": None, "floor": "B2", "ip_address": "10.1.13.73", "username": "kloudspot",     "notes": "string"},
+    #--------------------------B1----------------------
+    {"camera_id": "CAM-03", "name": "B1-PARKING",  "area": "B1-A", "floor": "B1", "ip_address": "10.1.13.62", "username": "kloudspot", "notes": "string"},
+    {"camera_id": "CAM-04", "name": "B1-PARKING",  "area": "B1-C", "floor": "B1", "ip_address": "10.1.13.63", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "CAM-05", "name": "B1-PARKING",  "area": "B2-RAMP", "floor": "B1", "ip_address": "10.1.13.64", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "CAM-06", "name": "B1-PARKING",  "area": "B1-C", "floor": "B1", "ip_address": "10.1.13.65", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "CAM-07", "name": "B1-PARKING",  "area": "B1-A", "floor": "B1", "ip_address": "10.1.13.66", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "CAM-08", "name": "B1-PARKING",  "area": "B1-C", "floor": "B1", "ip_address": "10.1.13.67", "username": "kloudspot", "notes": "string"},
+    #--------------------------B2----------------------
+    {"camera_id": "CAM-09", "name": "B2-PARKING",  "area": "B2-A", "floor": "B2", "ip_address": "10.1.13.68", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "CAM-10", "name": "B2-PARKING",  "area": "B2-C", "floor": "B2", "ip_address": "10.1.13.69", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "CAM-11", "name": "B2-PARKING",  "area": "B2-C", "floor": "B2", "ip_address": "10.1.13.70", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "CAM-12", "name": "B2-PARKING",  "area": "B2-A", "floor": "B2", "ip_address": "10.1.13.71", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "CAM-13", "name": "B2-PARKING",  "area": "B2-A", "floor": "B2", "ip_address": "10.1.13.72", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "CAM-14", "name": "B2-PARKING",  "area": "B2-C", "floor": "B2", "ip_address": "10.1.13.73", "username": "kloudspot",     "notes": "string"},
 
     # ── New cameras (9) on 10.1.13.x — user kloudspot. Set `area`/`floor`/`name`
     #    per camera when you know the mount location.
+    #--------------------------B2----------------------
     {"camera_id": "CAM-15", "name": "B2-PARKING", "area": "B2-C", "floor": "B2", "ip_address": "10.1.13.84", "username": "kloudspot"},
-    {"camera_id": "CAM-16", "name": "B2-PARKING", "area": "B2-B", "floor": "B2", "ip_address": "10.1.13.85", "username": "kloudspot"},
+    {"camera_id": "CAM-16", "name": "B2-PARKING", "area": "B2-A", "floor": "B2", "ip_address": "10.1.13.85", "username": "kloudspot"},
     {"camera_id": "CAM-17", "name": "B2-PARKING", "area":"B2-B", "floor": "B2", "ip_address": "10.1.13.86", "username": "kloudspot"},
     {"camera_id": "CAM-18", "name": "B2-PARKING", "area": "B2-B", "floor": "B2", "ip_address": "10.1.13.87", "username": "kloudspot"},
     {"camera_id": "CAM-19", "name": "B2-PARKING", "area": "B2-A", "floor": "B2", "ip_address": "10.1.13.88", "username": "kloudspot"},
-    {"camera_id": "CAM-20", "name": "B1-Entrance Gate", "area": "B1-B", "floor": "B1", "ip_address": "10.1.13.89", "username": "kloudspot"},
-    {"camera_id": "CAM-21", "name": "B1-Parking", "area": "B1-A", "floor": "B1", "ip_address": "10.1.13.90", "username": "kloudspot"},
+    #----------------------B1----------------------
+    {"camera_id": "CAM-20", "name": "B1-Entrance Gate", "area": "B1-A", "floor": "B1", "ip_address": "10.1.13.89", "username": "kloudspot"},
+    {"camera_id": "CAM-21", "name": "B1-Parking", "area": "B1-B", "floor": "B1", "ip_address": "10.1.13.90", "username": "kloudspot"},
     {"camera_id": "CAM-22", "name": "B1-Parking", "area": "B1-B", "floor": "B1", "ip_address": "10.1.13.91", "username": "kloudspot"},
     {"camera_id": "CAM-23", "name": "B1-Entry Ramp", "area": None, "floor": "B1", "ip_address": "10.1.13.94", "username": "kloudspot"},
 ]
