@@ -804,6 +804,7 @@ async def get_entry_exit_detail(event_id: int, db: Session = Depends(get_db)):
         "watches_floor_id" if schema["cameras_watches_floor_id"]
         else "NULL AS watches_floor_id"
     )
+    cam_area = "area" if schema["cameras_area"] else "NULL AS area"
 
     def _camera_ref(camera_id: Optional[str]) -> Optional[CameraRef]:
         if not camera_id:
@@ -811,7 +812,7 @@ async def get_entry_exit_detail(event_id: int, db: Session = Depends(get_db)):
         # WS-8.E: pull floor_id / watches_floor[_id] so CameraRef populates the new fields.
         cam = rows(
             db,
-            f"SELECT id, camera_id, name, floor, {cam_floor_id}, watches_floor, "
+            f"SELECT id, camera_id, name, {cam_area}, floor, {cam_floor_id}, watches_floor, "
             f"{cam_watches_floor_id} "
             "FROM cameras WHERE camera_id = :cid",
             {"cid": camera_id},
@@ -823,6 +824,7 @@ async def get_entry_exit_detail(event_id: int, db: Session = Depends(get_db)):
             id=c["id"],
             camera_id=c["camera_id"],
             name=c.get("name"),
+            area=c.get("area"),
             floor=c.get("floor"),
             floor_id=c.get("floor_id"),
             watches_floor=c.get("watches_floor"),

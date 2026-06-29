@@ -97,6 +97,19 @@ class SlotType(str, Enum):
     roi = "roi"
 
 
+class CameraArea(str, Enum):
+    """`cameras.area` — physical sub-zone a camera is mounted in. Fixed
+    vocabulary: each floor (B1/B2) is split into sections A/B/C plus its RAMP."""
+    B1_A = "B1-A"
+    B1_B = "B1-B"
+    B1_C = "B1-C"
+    B1_RAMP = "B1-RAMP"
+    B2_A = "B2-A"
+    B2_B = "B2-B"
+    B2_C = "B2-C"
+    B2_RAMP = "B2-RAMP"
+
+
 class CameraRole(str, Enum):
     """`cameras.role` — what a camera is wired to do in the deployment.
     Mirrors `schemas.CameraRoleLiteral`; keep both in sync."""

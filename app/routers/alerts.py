@@ -560,6 +560,7 @@ async def get_alert(alert_id: int, db: Session = Depends(get_db)):
     # WS-8: every `c.<col>` referenced from cameras is conditional on the
     # column actually existing. Older deployments are missing role,
     # watches_floor, watches_slots_json (Phase 4A additions).
+    cam_area_col        = "c.area"               if schema["cameras_area"]               else "NULL"
     cam_floor_col       = "c.floor"              if schema["cameras_floor"]              else "NULL"
     cam_role_col        = "c.role"               if schema["cameras_role"]               else "NULL"
     cam_watches_floor_col = "c.watches_floor"    if schema["cameras_watches_floor"]      else "NULL"
@@ -600,6 +601,7 @@ async def get_alert(alert_id: int, db: Session = Depends(get_db)):
             v.notes,
             c.id                     AS camera_pk,
             c.name                   AS camera_name,
+            {cam_area_col}           AS camera_area,
             {cam_floor_col}          AS camera_floor,
             {cam_role_col}           AS camera_role,
             {cam_watches_floor_col}  AS camera_watches_floor,
@@ -688,6 +690,7 @@ async def get_alert(alert_id: int, db: Session = Depends(get_db)):
             id=a["camera_pk"],
             camera_id=a["camera_id"],
             name=a.get("camera_name"),
+            area=a.get("camera_area"),
             floor=a.get("camera_floor"),
             role=a.get("camera_role") or "other",
             watches_floor=a.get("camera_watches_floor"),
