@@ -120,7 +120,12 @@ DEFAULTS = {
     "name": None,
     "area": None,
     "floor": None,
+    # floor_id / watches_floor_id are NOT set by hand — they're resolved from the
+    # `floors` lookup table by name in resolve_floor_ids() (mirrors how the
+    # gateway dual-writes them). Left None here so every param carries the key.
+    "floor_id": None,
     "watches_floor": None,
+    "watches_floor_id": None,
     "ip_address": None,
     "rtsp_port": 554,
     "rtsp_path": "/Streaming/Channels/101",
@@ -133,10 +138,12 @@ DEFAULTS = {
 # actually exist in dbo.cameras (probed at runtime) — this DB may pre-date some
 # bootstrap.sql ALTERs (e.g. `watches_floor`), so we never reference a missing
 # column. `role` is intentionally absent: the gateway derives it, never stores it.
-# `password_encrypted` is set from the encrypted plaintext.
+# `password_encrypted` is set from the encrypted plaintext; `floor_id` /
+# `watches_floor_id` are resolved from `floors` by name (see resolve_floor_ids).
 WRITABLE_COLUMNS = [
-    "name", "area", "floor", "watches_floor", "ip_address",
-    "rtsp_port", "rtsp_path", "username", "password_encrypted", "enabled", "notes",
+    "name", "area", "floor", "floor_id", "watches_floor", "watches_floor_id",
+    "ip_address", "rtsp_port", "rtsp_path", "username", "password_encrypted",
+    "enabled", "notes",
 ]
 
 
@@ -195,6 +202,38 @@ def ensure_columns(db, *, dry_run: bool) -> None:
             db.commit()
 
 
+def resolve_floor_ids(db, params: list[dict], *, dry_run: bool) -> None:
+    """Fill each param's floor_id / watches_floor_id from the `floors` lookup,
+    keyed by the floor NAME — same mapping the gateway uses. Missing floor names
+    are inserted (name-only; floors' other columns have defaults), mirroring
+    sql/bootstrap.sql. No-op when there's no floors table (floor_id stays None
+    and COALESCE leaves any existing value untouched)."""
+    have_floors = bool(db.execute(text(
+        "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'floors'"
+    )).fetchone())
+    if not have_floors:
+        print("  (no floors table — leaving floor_id / watches_floor_id unset)")
+        return
+
+    needed = {p[k] for p in params for k in ("floor", "watches_floor") if p.get(k)}
+    for name in sorted(needed):
+        exists = db.execute(text("SELECT id FROM floors WHERE name = :n"), {"n": name}).fetchone()
+        if exists:
+            continue
+        print(f"  {'[dry-run] ' if dry_run else ''}adding floor '{name}' to floors lookup")
+        if not dry_run:
+            db.execute(text("INSERT INTO floors (name) VALUES (:n)"), {"n": name})
+    if not dry_run:
+        db.commit()
+
+    fmap = {r[1]: r[0] for r in db.execute(text("SELECT id, name FROM floors")).fetchall()}
+    for p in params:
+        if p.get("floor"):
+            p["floor_id"] = fmap.get(p["floor"])
+        if p.get("watches_floor"):
+            p["watches_floor_id"] = fmap.get(p["watches_floor"])
+
+
 def build_upsert(present: list[str]) -> "text":
     set_clause = ",\n        ".join(f"{c} = :{c}" for c in present)
     insert_cols = ", ".join(["camera_id", *present])
@@ -249,6 +288,7 @@ def main() -> None:
     db = SessionLocal()
     try:
         ensure_columns(db, dry_run=dry_run)  # self-provision `area` etc. if missing
+        resolve_floor_ids(db, params, dry_run=dry_run)  # floor name -> floor_id
         present = [c for c in WRITABLE_COLUMNS if c in existing_columns(db)]
         skipped = [c for c in WRITABLE_COLUMNS if c not in present]
         if skipped:
@@ -257,7 +297,7 @@ def main() -> None:
         for p in params:
             row = {"camera_id": p["camera_id"], **{c: p.get(c) for c in present}}
             print(f"  {'[dry-run] ' if dry_run else ''}upsert {p['camera_id']:<10} "
-                  f"area={p.get('area') or '-':<8} ip={p['ip_address']}")
+                  f"area={p.get('area') or '-':<8} floor_id={p.get('floor_id') or '-':<4} ip={p['ip_address']}")
             if not dry_run:
                 db.execute(upsert, row)
         if dry_run:
