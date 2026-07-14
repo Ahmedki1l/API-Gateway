@@ -20,7 +20,7 @@ A camera with no matching env var (and no CAMERA_PW_DEFAULT) is reported and
 skipped — nothing is half-written.
 
 `area` is the constrained sub-zone. Allowed values:
-      B1-A  B1-B  B1-C  B1-RAMP   B2-A  B2-B  B2-C  B2-RAMP   (or None)
+      B1-A  B1-B  B1-C  RAMP-DOWN   B2-A  B2-B  B2-C  RAMP-UP   (or None)
   (see app/schemas_enums.py:CameraArea).
 
 Run from the repo root with the gateway's venv active:
@@ -64,7 +64,7 @@ def env_password(camera_id: str) -> str | None:
 # CAMERA_PW_<NORMALIZED_ID> (see module docstring). Optional keys fall back to
 # the defaults in DEFAULTS below.
 #
-# Allowed `area` values: B1-A, B1-B, B1-C, B1-RAMP, B2-A, B2-B, B2-C, B2-RAMP, or None
+# Allowed `area` values: B1-A, B1-B, B1-C, RAMP-DOWN, B2-A, B2-B, B2-C, RAMP-UP, or None
 # (There is no `role` field — the gateway derives role from the camera_id pattern.)
 #
 # Template (copy this block for each camera; then add CAMERA_PW_<ID> to .env):
@@ -95,7 +95,7 @@ CAMERAS = [
     #--------------------------B1----------------------
     {"camera_id": "CAM-03", "name": "B1-PARKING",  "area": "B1-A", "floor": "B1", "ip_address": "10.1.13.62", "username": "kloudspot", "notes": "string"},
     {"camera_id": "CAM-04", "name": "B1-PARKING",  "area": "B1-C", "floor": "B1", "ip_address": "10.1.13.63", "username": "kloudspot",     "notes": "string"},
-    {"camera_id": "CAM-05", "name": "B1-PARKING",  "area": "B2-RAMP", "floor": "B1", "ip_address": "10.1.13.64", "username": "kloudspot",     "notes": "string"},
+    {"camera_id": "CAM-05", "name": "B1-PARKING",  "area": "RAMP-UP", "floor": "B1", "ip_address": "10.1.13.64", "username": "kloudspot",     "notes": "string"},
     {"camera_id": "CAM-06", "name": "B1-PARKING",  "area": "B1-C", "floor": "B1", "ip_address": "10.1.13.65", "username": "kloudspot",     "notes": "string"},
     {"camera_id": "CAM-07", "name": "B1-PARKING",  "area": "B1-A", "floor": "B1", "ip_address": "10.1.13.66", "username": "kloudspot",     "notes": "string"},
     {"camera_id": "CAM-08", "name": "B1-PARKING",  "area": "B1-C", "floor": "B1", "ip_address": "10.1.13.67", "username": "kloudspot", "notes": "string"},
@@ -271,7 +271,7 @@ def build_upsert(present: list[str]) -> "text":
 """)
 
 
-ALLOWED_AREAS = {"B1-A", "B1-B", "B1-C", "B1-RAMP", "B2-A", "B2-B", "B2-C", "B2-RAMP", None}
+ALLOWED_AREAS = {"B1-A", "B1-B", "B1-C", "RAMP-UP", "B2-A", "B2-B", "B2-C", "RAMP-DOWN", None}
 
 
 def build_params(cam: dict) -> dict:

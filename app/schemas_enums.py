@@ -103,11 +103,11 @@ class CameraArea(str, Enum):
     B1_A = "B1-A"
     B1_B = "B1-B"
     B1_C = "B1-C"
-    B1_RAMP = "B1-RAMP"
+    RAMP_UP = "RAMP-UP"
     B2_A = "B2-A"
     B2_B = "B2-B"
     B2_C = "B2-C"
-    B2_RAMP = "B2-RAMP"
+    RAMP_DOWN = "RAMP-DOWN"
 
 
 class CameraRole(str, Enum):

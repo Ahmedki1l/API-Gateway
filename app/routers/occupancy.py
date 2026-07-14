@@ -74,6 +74,26 @@ def _monitored_col(alias: str = "") -> str:
     return f"{p}is_monitored"
 
 
+def _current_plate_col(slots_alias: str = "pk", status_alias: str = "ss") -> str:
+    """SELECT expression for `current_plate`, the plate of the car parked in
+    this slot right now.
+
+    Source of truth is `parking_slots.current_plate`, written by the ALPR
+    pipeline. `slot_status.plate_number` is VideoAnalytics' own column and
+    carries `''` on every occupied slot — VA reports occupancy, not identity —
+    so it is only used as a fallback on databases that predate the
+    `parking_slots` ALPR columns.
+
+    `NULLIF` on both branches keeps "no plate" as a single value (NULL) at the
+    API boundary rather than leaking `''` to the frontend.
+    """
+    if _floor_schema().get("parking_slots_current_plate"):
+        p = f"{slots_alias}." if slots_alias else ""
+        return f"NULLIF({p}current_plate, '') AS current_plate"
+    p = f"{status_alias}." if status_alias else ""
+    return f"NULLIF({p}plate_number, '') AS current_plate"
+
+
 # Alert types that represent a "violation against this specific slot". An
 # unresolved alert of any of these types makes the slot's
 # `has_active_violation` flip to true. Includes the slot-targeted violations
@@ -455,7 +475,7 @@ async def get_slots(
             {_active_violation_cols('ps')},
             {ps_category_col},
             {ps_reserved_col},
-            ss.plate_number     AS current_plate,
+            {_current_plate_col('ps')},
             ss.status           AS current_status,
             ss.time             AS status_updated_at
         FROM parking_slots ps
@@ -621,7 +641,7 @@ async def export_occupancy_csv(
             {_active_violation_cols('ps')},
             {exp_category_col},
             {exp_reserved_col},
-            ss.plate_number AS current_plate,
+            {_current_plate_col('ps')},
             ss.status AS current_status,
             ss.time AS status_updated_at
         FROM parking_slots ps
@@ -989,7 +1009,7 @@ async def get_slots_by_floor(
             {_active_violation_cols('pk')},
             {pk_category_col},
             {pk_reserved_col},
-            ss.plate_number     AS current_plate,
+            {_current_plate_col('pk')},
             ss.status           AS current_status,
             ss.time             AS status_updated_at
         FROM parking_slots pk
@@ -1049,7 +1069,7 @@ async def get_slot_detail(slot_id: str, db: Session = Depends(get_db)):
             {pk_category_col},
             {pk_reserved_col},
             pk.polygon,
-            ss.plate_number     AS current_plate,
+            {_current_plate_col('pk')},
             ss.status           AS current_status,
             ss.time             AS status_updated_at
         FROM parking_slots pk

@@ -21,8 +21,8 @@ T = TypeVar("T")
 CameraRoleLiteral = Literal["entry", "exit", "floor_counting", "slot_detection", "other"]
 # Fixed camera-area vocabulary — keep in sync with schemas_enums.CameraArea.
 CameraAreaLiteral = Literal[
-    "B1-A", "B1-B", "B1-C", "B1-RAMP",
-    "B2-A", "B2-B", "B2-C", "B2-RAMP",
+    "B1-A", "B1-B", "B1-C", "RAMP-DOWN",
+    "B2-A", "B2-B", "B2-C", "RAMP-UP",
 ]
 
 
