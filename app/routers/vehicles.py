@@ -8,6 +8,7 @@ from app.config import facility_today_utc
 from app.database import get_db, scalar, rows
 from app.routers._helpers import _floor_schema
 from app.routers.entry_exit import _live_duration_seconds
+from app.services.alert_auto_resolve import auto_resolve_alerts_for_vehicle
 from app.services.snapshots import resolve_snapshot_url
 from app.schemas import (
     EntityActionResponse,
@@ -299,6 +300,9 @@ async def create_vehicle(
     item = _fetch_vehicle_list_item(db, vehicle_id)
     if item is None:
         raise HTTPException(500, "Vehicle saved but could not be re-read")
+    # A newly-registered / newly-titled plate can clear alerts raised before
+    # the registry knew about it — see services/alert_auto_resolve.py.
+    item["auto_resolved_alert_ids"] = auto_resolve_alerts_for_vehicle(db, body.plate_number)
     return item
 
 
@@ -651,6 +655,9 @@ async def update_vehicle(
     item = _fetch_vehicle_list_item(db, vehicle_id)
     if item is None:
         raise HTTPException(500, "Vehicle updated but could not be re-read")
+    # Re-evaluate this plate's open violations against the edited registry row:
+    # setting `title = 'CEO'` on the car parked in a CEO slot clears the alert.
+    item["auto_resolved_alert_ids"] = auto_resolve_alerts_for_vehicle(db, item["plate_number"])
     return item
 
 

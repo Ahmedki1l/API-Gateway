@@ -502,6 +502,10 @@ class VehicleListItem(VehicleRef):
     # the vehicle has no open/overstay session. See routers/vehicles.py.
     is_overstay: bool = False
     current_event: Optional[VehicleEvent] = None
+    # Populated only on the POST/PUT write responses: alert ids that the write
+    # auto-resolved because the registry now matches the slot reservation
+    # (see services/alert_auto_resolve.py). Always empty on list/detail reads.
+    auto_resolved_alert_ids: list[int] = []
 
 
 # Back-compat alias so existing Gateway router imports keep working.
