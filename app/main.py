@@ -1,7 +1,9 @@
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+
 import os
+import sys
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +14,10 @@ from app.routers import admin, dashboard, alerts, entry_exit, vehicles, occupanc
 from app.services import camera_monitor
 
 from dotenv import dotenv_values
+
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 _ENV = {**dotenv_values(os.path.join(_REPO_ROOT, ".env")), **os.environ}
 
