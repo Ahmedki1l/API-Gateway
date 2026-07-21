@@ -36,7 +36,7 @@ def _fix_ts(dt, alert_type: str = ""):
     """Attach facility-local tz to a naive DB timestamp for serialisation."""
     return localize_naive(dt)
 
-prefix = get_prefix + "/alerts"
+prefix = get_prefix() + "/alerts"
 
 router = APIRouter(prefix=prefix, tags=["Alerts"])
  

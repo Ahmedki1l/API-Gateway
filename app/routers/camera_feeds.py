@@ -10,7 +10,7 @@ from app.services.snapshots import resolve_snapshot_url
 from app.shared import build_paged
 
 from app.routers.prefix_injection import (get_prefix)
-prefix = get_prefix + "/camera-feeds"
+prefix = get_prefix() + "/camera-feeds"
 
 router = APIRouter(prefix=prefix, tags=["Camera Feeds"])
 

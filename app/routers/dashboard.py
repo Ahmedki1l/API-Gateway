@@ -26,7 +26,7 @@ from app.services.upstream import (
 
 
 from app.routers.prefix_injection import (get_prefix)
-prefix = get_prefix + "/dashboard"
+prefix = get_prefix() + "/dashboard"
 
 router = APIRouter(prefix=prefix, tags=["Dashboard"])
  

@@ -29,7 +29,7 @@ from app.shared import build_paged
 
 
 from app.routers.prefix_injection import (get_prefix)
-prefix = get_prefix + "/occupancy"
+prefix = get_prefix() + "/occupancy"
 
 
 # Latest slot_status per slot_id — reused by /floors, /slots/{id}, etc.

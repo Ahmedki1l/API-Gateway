@@ -24,7 +24,7 @@ from app.schemas_enums import EntryExitDirection, ParkingSessionStatus
 from app.shared import build_paged, plate_search_clause, stream_csv
 
 from app.routers.prefix_injection import (get_prefix)
-prefix = get_prefix + "/entry-exit"
+prefix = get_prefix() + "/entry-exit"
 
 router = APIRouter(prefix=prefix, tags=["Entry/Exit"])
 

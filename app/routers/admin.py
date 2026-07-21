@@ -18,7 +18,7 @@ from app.database import get_db
 from app.services.auth import require_internal_token
 
 from app.routers.prefix_injection import (get_prefix)
-prefix = get_prefix + "/admin"
+prefix = get_prefix() + "/admin"
 
 router = APIRouter(prefix=prefix, tags=["⚠️  Admin"])
 logger = logging.getLogger(__name__)

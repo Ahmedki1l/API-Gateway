@@ -25,7 +25,7 @@ from app.schemas import (
 from app.shared import build_paged, plate_search_clause, stream_csv
 
 from app.routers.prefix_injection import (get_prefix)
-prefix = get_prefix + "/vehicles"
+prefix = get_prefix() + "/vehicles"
 
 router = APIRouter(prefix=prefix, tags=["Vehicles"])
 
