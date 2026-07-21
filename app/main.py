@@ -10,7 +10,13 @@ from app.config import settings
 from app.routers import admin, dashboard, alerts, entry_exit, vehicles, occupancy, camera_feeds, cameras
 from app.services import camera_monitor
 
+from dotenv import dotenv_values
+
+_ENV = {**dotenv_values(os.path.join(_REPO_ROOT, ".env")), **os.environ}
+
 log = logging.getLogger(__name__)
+
+PREFIX = _ENV.get("PREFIX")
 
 
 @asynccontextmanager
@@ -60,14 +66,14 @@ else:
         "snapshots_local_dir not found at %s; /snapshots disabled", _snapshots_dir
     )
 
-app.include_router(dashboard.router)
-app.include_router(alerts.router)
-app.include_router(entry_exit.router)
-app.include_router(vehicles.router)
-app.include_router(occupancy.router)
-app.include_router(camera_feeds.router)
-app.include_router(cameras.router)
-app.include_router(admin.router)
+app.include_router(PREFIX + '/' dashboard.router)
+app.include_router(PREFIX + '/' alerts.router)
+app.include_router(PREFIX + '/' entry_exit.router)
+app.include_router(PREFIX + '/' vehicles.router)
+app.include_router(PREFIX + '/' occupancy.router)
+app.include_router(PREFIX + '/' camera_feeds.router)
+app.include_router(PREFIX + '/' cameras.router)
+app.include_router(PREFIX + '/' admin.router)
 
 
 @app.get("/health", tags=["Gateway"])
