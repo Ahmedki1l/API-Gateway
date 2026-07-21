@@ -72,6 +72,7 @@ app.include_router(cameras.router)
 app.include_router(admin.router)
 
 log.warning(get_prefix())
+log.warning(dashboard.router)
 
 
 @app.get(get_prefix() + "/health", tags=["Gateway"])
