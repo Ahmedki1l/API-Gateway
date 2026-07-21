@@ -66,14 +66,14 @@ else:
         "snapshots_local_dir not found at %s; /snapshots disabled", _snapshots_dir
     )
 
-app.include_router(PREFIX ? (PREFIX + '/') : '' dashboard.router)
-app.include_router(PREFIX ? (PREFIX + '/') : '' alerts.router)
-app.include_router(PREFIX ? (PREFIX + '/') : '' entry_exit.router)
-app.include_router(PREFIX ? (PREFIX + '/') : '' vehicles.router)
-app.include_router(PREFIX ? (PREFIX + '/') : '' occupancy.router)
-app.include_router(PREFIX ? (PREFIX + '/') : '' camera_feeds.router)
-app.include_router(PREFIX ? (PREFIX + '/') : '' cameras.router)
-app.include_router(PREFIX ? (PREFIX + '/') : '' admin.router)
+app.include_router(PREFIX ? (PREFIX + '/') : '' + dashboard.router)
+app.include_router(PREFIX ? (PREFIX + '/') : '' + alerts.router)
+app.include_router(PREFIX ? (PREFIX + '/') : '' + entry_exit.router)
+app.include_router(PREFIX ? (PREFIX + '/') : '' + vehicles.router)
+app.include_router(PREFIX ? (PREFIX + '/') : '' + occupancy.router)
+app.include_router(PREFIX ? (PREFIX + '/') : '' + camera_feeds.router)
+app.include_router(PREFIX ? (PREFIX + '/') : '' + cameras.router)
+app.include_router(PREFIX ? (PREFIX + '/') : '' + admin.router)
 
 
 @app.get("/health", tags=["Gateway"])
