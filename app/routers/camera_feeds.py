@@ -9,7 +9,10 @@ from app.schemas import CameraFeedItem, PagedResponse
 from app.services.snapshots import resolve_snapshot_url
 from app.shared import build_paged
 
-router = APIRouter(prefix="/camera-feeds", tags=["Camera Feeds"])
+from app.routers.prefix_injection import (get_prefix)
+prefix = get_prefix + "/camera-feeds"
+
+router = APIRouter(prefix=prefix, tags=["Camera Feeds"])
 
 
 @lru_cache(maxsize=1)

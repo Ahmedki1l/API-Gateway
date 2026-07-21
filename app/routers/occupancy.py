@@ -28,6 +28,10 @@ from app.services.upstream import get_live_slots
 from app.shared import build_paged
 
 
+from app.routers.prefix_injection import (get_prefix)
+prefix = get_prefix + "/occupancy"
+
+
 # Latest slot_status per slot_id — reused by /floors, /slots/{id}, etc.
 _LATEST_STATUS_JOIN = """
     LEFT JOIN slot_status ss ON ss.slot_id = pk.slot_id
@@ -151,7 +155,9 @@ def _active_violation_cols(alias: str = "pk") -> str:
           AND a.alert_type IN ({_VIOLATION_ALERT_TYPES})
     ) THEN 1 ELSE 0 END AS has_active_violation"""
 
-router = APIRouter(prefix="/occupancy", tags=["Occupancy"])
+
+
+router = APIRouter(prefix=prefix, tags=["Occupancy"])
 
 # zone_occupancy real columns:
 #   id, zone_id, camera_id, current_count, max_capacity,

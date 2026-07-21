@@ -24,7 +24,10 @@ from app.schemas import (
 )
 from app.shared import build_paged, plate_search_clause, stream_csv
 
-router = APIRouter(prefix="/vehicles", tags=["Vehicles"])
+from app.routers.prefix_injection import (get_prefix)
+prefix = get_prefix + "/vehicles"
+
+router = APIRouter(prefix=prefix, tags=["Vehicles"])
 
 _UNREGISTERED_NOTE_MARKER = "Not registered"
 

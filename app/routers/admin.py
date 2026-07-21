@@ -17,8 +17,12 @@ import logging
 from app.database import get_db
 from app.services.auth import require_internal_token
 
-router = APIRouter(prefix="/admin", tags=["⚠️  Admin"])
+from app.routers.prefix_injection import (get_prefix)
+prefix = get_prefix + "/admin"
+
+router = APIRouter(prefix=prefix, tags=["⚠️  Admin"])
 logger = logging.getLogger(__name__)
+
 
 
 # Order matters — wipe child rows before parents so FKs don't fire. Mirrors

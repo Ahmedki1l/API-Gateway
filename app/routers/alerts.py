@@ -29,13 +29,16 @@ from app.services.auth import require_internal_token
 from app.services.upstream import iter_system1_alert_events, iter_system2_alert_events
 from app.services.bus import alerts_bus
 from app.shared import build_paged, stream_csv
+
+from app.routers.prefix_injection import (get_prefix)
  
 def _fix_ts(dt, alert_type: str = ""):
     """Attach facility-local tz to a naive DB timestamp for serialisation."""
     return localize_naive(dt)
 
+prefix = get_prefix + "/alerts"
 
-router = APIRouter(prefix="/alerts", tags=["Alerts"])
+router = APIRouter(prefix=prefix, tags=["Alerts"])
  
  
 @lru_cache(maxsize=None)

@@ -40,7 +40,10 @@ from app.shared import build_paged, stream_csv
 
 from app.services.auth import require_internal_token
 
-router = APIRouter(prefix="/cameras", tags=["Cameras"])
+from app.routers.prefix_injection import (get_prefix)
+prefix = get_prefix + "/cameras"
+
+router = APIRouter(prefix=prefix, tags=["Cameras"])
 
 # Module-level pooled client for the camera-server. Same pattern as
 # services/upstream.py uses for System 1 / System 2.

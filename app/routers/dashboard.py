@@ -24,7 +24,11 @@ from app.services.upstream import (
     get_system2_last_connected_at,
 )
 
-router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
+
+from app.routers.prefix_injection import (get_prefix)
+prefix = get_prefix + "/dashboard"
+
+router = APIRouter(prefix=prefix, tags=["Dashboard"])
  
 VEHICLE_JOIN = """
     LEFT JOIN vehicles v_id ON v_id.id = ps.vehicle_id
