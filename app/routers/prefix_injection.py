@@ -12,4 +12,4 @@ _ENV = {**dotenv_values(os.path.join(_REPO_ROOT, ".env")), **os.environ}
 PREFIX = _ENV.get("PREFIX")
 
 def get_prefix():
-    return (PREFIX + '/') if PREFIX else ''
+    return ('/' + PREFIX + '/') if PREFIX else ''
