@@ -10,6 +10,8 @@ from app.config import settings
 from app.routers import admin, dashboard, alerts, entry_exit, vehicles, occupancy, camera_feeds, cameras
 from app.services import camera_monitor
 
+from app.routers.prefix_injection import (get_prefix)
+
 log = logging.getLogger(__name__)
 
 
@@ -70,6 +72,6 @@ app.include_router(cameras.router)
 app.include_router(admin.router)
 
 
-@app.get("/health", tags=["Gateway"])
+@app.get(get_prefix() + "/health", tags=["Gateway"])
 async def gateway_health():
     return {"status": "ok", "service": "API Gateway"}
