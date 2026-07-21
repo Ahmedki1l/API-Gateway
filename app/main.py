@@ -71,6 +71,8 @@ app.include_router(camera_feeds.router)
 app.include_router(cameras.router)
 app.include_router(admin.router)
 
+log.warning(get_prefix())
+
 
 @app.get(get_prefix() + "/health", tags=["Gateway"])
 async def gateway_health():
