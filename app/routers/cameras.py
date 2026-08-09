@@ -644,10 +644,31 @@ async def _open_feed(identifier: str, stream: str, db: Session, request: Request
     if not row.get("enabled"):
         raise HTTPException(status_code=409, detail=f"Camera '{camera_id}' is disabled")
 
+    # Decrypt the RTSP password so the camera-server can connect directly
+    # without needing its own camera registry (cameras.json).
+    password: Optional[str] = None
+    if row.get("password_encrypted"):
+        try:
+            password = cipher.decrypt(row["password_encrypted"])
+        except InvalidToken:
+            password = None
+
+    open_payload: dict = {"cameraId": camera_id, "stream": stream}
+    if row.get("ip_address"):
+        open_payload["ip"] = row["ip_address"]
+    if row.get("rtsp_port"):
+        open_payload["port"] = int(row["rtsp_port"])
+    if row.get("rtsp_path"):
+        open_payload["path"] = row["rtsp_path"]
+    if row.get("username"):
+        open_payload["username"] = row["username"]
+    if password:
+        open_payload["password"] = password
+
     try:
         r = await _camera_server.post(
             "/spe-camera/api/open",
-            json={"cameraId": camera_id, "stream": stream},
+            json=open_payload,
         )
     except httpx.RequestError as e:
         raise HTTPException(status_code=502, detail=f"Camera server unreachable: {e}")

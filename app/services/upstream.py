@@ -21,9 +21,38 @@ import httpx
 
 from app.config import settings
 
-_system1 = httpx.AsyncClient(base_url=settings.system1_base_url, timeout=30.0)
-_system2 = httpx.AsyncClient(base_url=settings.system2_base_url, timeout=30.0)
 SSE_TIMEOUT = httpx.Timeout(10.0, read=None)
+
+# Health probes must fail fast. `timeout=30.0` on the request clients also
+# caps how long a *single* `/dashboard/ai-status` call can block, and 30s of
+# waiting tells us nothing a few seconds wouldn't — meanwhile the dashboard
+# card spins for the full half-minute. It also used to race the upstream's own
+# 30s DB-pool timeout, so a pool-starved upstream never got to answer
+# "degraded" before we gave up and called it unreachable.
+HEALTH_TIMEOUT = 8.0
+
+_REQUEST_LIMITS = httpx.Limits(max_connections=50, max_keepalive_connections=10)
+# SSE streams are held open indefinitely (`SSE_TIMEOUT` has `read=None`), so
+# they get their OWN pools. Sharing one pool with the request clients means a
+# leaked or hung stream can consume every slot, after which each health probe
+# blocks on pool acquisition and raises `PoolTimeout` — indistinguishable at
+# the dashboard from the upstream being down, while it is in fact perfectly
+# healthy. `max_keepalive_connections=0` so a finished stream is closed, not
+# parked.
+_SSE_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=0)
+
+_system1 = httpx.AsyncClient(
+    base_url=settings.system1_base_url, timeout=30.0, limits=_REQUEST_LIMITS
+)
+_system2 = httpx.AsyncClient(
+    base_url=settings.system2_base_url, timeout=30.0, limits=_REQUEST_LIMITS
+)
+_system1_sse = httpx.AsyncClient(
+    base_url=settings.system1_base_url, timeout=SSE_TIMEOUT, limits=_SSE_LIMITS
+)
+_system2_sse = httpx.AsyncClient(
+    base_url=settings.system2_base_url, timeout=SSE_TIMEOUT, limits=_SSE_LIMITS
+)
 
 
 # ── SSE upstream circuit breaker (G-22) ─────────────────────────────────────
@@ -87,26 +116,57 @@ def get_system2_last_connected_at() -> Optional[datetime]:
     return _system2_last_connected_at
 
 
+def _describe_exc(exc: Exception) -> str:
+    """Never let a failure reduce to an empty string.
+
+    Every httpx timeout class (`ConnectTimeout`, `ReadTimeout`, `PoolTimeout`)
+    carries an empty message, so `str(exc)` is `""`. `/dashboard/ai-status`
+    reports `error or status`, so an empty message collapsed to a bare
+    `"unreachable"` that named neither the failure nor which of connect / read
+    / pool ran out — the three have completely different causes and fixes.
+    Keep the class name always."""
+    detail = str(exc).strip()
+    return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+
+def _health_payload(r: httpx.Response) -> dict:
+    """Normalise an upstream `/health` response into something the dashboard
+    can always render. Non-2xx bodies keep whatever `status` they declared
+    (an upstream is allowed to answer `degraded` with a non-200) but are
+    guaranteed to carry a status and an error naming the HTTP code, so a 500
+    or an HTML error page from a proxy never arrives as a blank reason."""
+    try:
+        payload = r.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {"status": payload}
+    if not r.is_success:
+        payload.setdefault("status", "unreachable")
+        payload.setdefault("error", f"HTTP {r.status_code}")
+    return payload
+
+
 async def get_system1_health() -> dict:
     global _system1_last_connected_at
     try:
-        r = await _system1.get("/api/v1/health")
+        r = await _system1.get("/api/v1/health", timeout=HEALTH_TIMEOUT)
         if r.is_success:
             _system1_last_connected_at = datetime.now(timezone.utc)
-        return r.json()
+        return _health_payload(r)
     except Exception as e:
-        return {"status": "unreachable", "error": str(e)}
+        return {"status": "unreachable", "error": _describe_exc(e)}
 
 
 async def get_system2_health() -> dict:
     global _system2_last_connected_at
     try:
-        r = await _system2.get("/api/health")
+        r = await _system2.get("/api/health", timeout=HEALTH_TIMEOUT)
         if r.is_success:
             _system2_last_connected_at = datetime.now(timezone.utc)
-        return r.json()
+        return _health_payload(r)
     except Exception as e:
-        return {"status": "unreachable", "error": str(e)}
+        return {"status": "unreachable", "error": _describe_exc(e)}
 
 
 async def get_live_vehicles() -> list[dict]:
@@ -208,11 +268,11 @@ async def _iter_sse_events(
     except Exception as e:
         if not connected:
             breaker.record_failure()
-            print(f"[upstream] SSE connect failed for {path}: {e} "
+            print(f"[upstream] SSE connect failed for {path}: {_describe_exc(e)} "
                   f"(breaker: {breaker.failures} failures, "
                   f"tripped={breaker.trip_ts > 0})")
         else:
-            print(f"[upstream] SSE stream ended for {path}: {e}")
+            print(f"[upstream] SSE stream ended for {path}: {_describe_exc(e)}")
         return
     finally:
         if response is not None:
@@ -223,7 +283,7 @@ async def _iter_sse_events(
 
 async def iter_system1_alert_events() -> AsyncIterator[dict]:
     iterator = _iter_sse_events(
-        _system1,
+        _system1_sse,
         "/api/v1/alerts/stream",
         _sse_breaker_system1,
         emit_connected_event=True,
@@ -236,7 +296,7 @@ async def iter_system1_alert_events() -> AsyncIterator[dict]:
 
 
 async def iter_system2_alert_events() -> AsyncIterator[dict]:
-    iterator = _iter_sse_events(_system2, "/api/alerts/stream", _sse_breaker_system2)
+    iterator = _iter_sse_events(_system2_sse, "/api/alerts/stream", _sse_breaker_system2)
     try:
         async for event in iterator:
             yield event
