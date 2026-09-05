@@ -566,6 +566,12 @@ async def export_entry_exit_csv(
         clauses.append("ps.duration_seconds <= :max_dur")
         params["max_dur"] = max_duration_seconds
 
+    # Open sessions have no duration_seconds yet. Report elapsed-so-far instead of a
+    # blank cell, matching the live-elapsed rule /entry-exit/kpis uses for
+    # avg_stay_minutes. facility_now_naive() (not GETUTCDATE()) because the DB stores
+    # facility-local naive timestamps — GETUTCDATE() goes negative when local is ahead.
+    params["now_naive"] = facility_now_naive()
+
     data = rows(db, f"""
         SELECT
             ps.plate_number                                  AS [Plate Number],
@@ -575,7 +581,11 @@ async def export_entry_exit_csv(
             ps.status                                        AS [Status],
             ps.entry_time                                    AS [Entry Time],
             ps.exit_time                                     AS [Exit Time],
-            ps.duration_seconds / 60                         AS [Duration (min)],
+            CASE
+                WHEN ps.duration_seconds IS NOT NULL THEN ps.duration_seconds
+                WHEN ps.entry_time IS NOT NULL THEN DATEDIFF(SECOND, ps.entry_time, :now_naive)
+                ELSE NULL
+            END / 60                                         AS [Duration (min)],
             ps.floor                                         AS [Floor],
             {ps_floor_id}                                    AS [Floor ID],
             ps.slot_id                                       AS [Slot ID],
