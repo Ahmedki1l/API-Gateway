@@ -670,38 +670,36 @@ async def delete_vehicle(
     vehicle_id: int,
     db: Session = Depends(get_db),
 ):
-    """Delete a vehicle from the registry.
+    """Delete a vehicle from the registry, keeping its Entry/Exit history.
 
-    A vehicle that has Entry/Exit history (rows in `parking_sessions` or
-    `entry_exit_log`) is NOT deletable — hard-deleting it would orphan or
-    destroy that history (the previous behaviour cascade-deleted the history
-    too). Such vehicles return 409; unregister them instead (PUT
-    is_registered=false) to drop them from the registry while keeping history.
-    Only vehicles with zero history are removed.
+    History is *detached*, never cascaded. Rows in `parking_sessions` and
+    `entry_exit_log` are keyed on `plate_number` (NOT NULL in both) and carry
+    `vehicle_id` only as a nullable convenience link, so setting that link to
+    NULL satisfies the ON DELETE NO ACTION foreign keys without dropping a
+    single event. An earlier implementation cascade-deleted the history along
+    with the car; that is what this must not do.
+
+    The detached rows stay readable: `dashboard.py` and `entry_exit.py` both
+    LEFT JOIN vehicles on `plate_number` whenever `vehicle_id IS NULL`. Past
+    events lose their owner name/title while no vehicle row exists for the
+    plate, and pick it back up automatically if the plate is ever re-registered.
     """
-    # Resolve the plate first so we also catch legacy history rows whose
-    # vehicle_id was never populated (matched by plate_number).
-    plate = scalar(db, "SELECT plate_number FROM vehicles WHERE id = :vid", {"vid": vehicle_id})
-    if plate is None:
+    # Existence check up front, so a bad id 404s before any UPDATE runs.
+    exists = scalar(db, "SELECT COUNT(*) FROM vehicles WHERE id = :vid", {"vid": vehicle_id})
+    if not exists:
         raise HTTPException(404, "Vehicle not found")
 
-    history_count = scalar(db, """
-        SELECT
-            (SELECT COUNT(*) FROM parking_sessions
-                WHERE vehicle_id = :vid OR plate_number = :plate)
-          + (SELECT COUNT(*) FROM entry_exit_log
-                WHERE vehicle_id = :vid OR plate_number = :plate)
-    """, {"vid": vehicle_id, "plate": plate}) or 0
-    if history_count > 0:
-        raise HTTPException(
-            409,
-            "Vehicle has Entry/Exit history and cannot be deleted. "
-            "Unregister it (set is_registered=false) to remove it from the "
-            "registry while preserving its parking history.",
-        )
+    # Detach history, don't delete it.
+    db.execute(
+        text("UPDATE parking_sessions SET vehicle_id = NULL WHERE vehicle_id = :vid"),
+        {"vid": vehicle_id},
+    )
+    db.execute(
+        text("UPDATE entry_exit_log SET vehicle_id = NULL WHERE vehicle_id = :vid"),
+        {"vid": vehicle_id},
+    )
 
-    # No history — safe to remove. Unlink any alerts that referenced it so the
-    # alert rows survive (they aren't entry/exit history).
+    # Unlink any alerts that referenced it so the alert rows survive too.
     has_alerts_vehicle_id = (scalar(db, """
         SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_NAME = 'alerts' AND COLUMN_NAME = 'vehicle_id'
@@ -711,6 +709,7 @@ async def delete_vehicle(
             text("UPDATE alerts SET vehicle_id = NULL WHERE vehicle_id = :vid"),
             {"vid": vehicle_id},
         )
+
     result = db.execute(
         text("DELETE FROM vehicles WHERE id = :vid"),
         {"vid": vehicle_id},
