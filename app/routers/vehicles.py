@@ -356,8 +356,8 @@ async def get_vehicles(
     is_registered: Optional[bool] = Query(
         None,
         description=(
-            "true  → only plates that exist as a row in the `vehicles` registry\n"
-            "false → only plates seen in parking_sessions but never registered\n"
+            "true  → only plates an operator registered\n"
+            "false → only plates PMS-AI auto-created on first sighting\n"
             "null  → all plates"
         ),
     ),
@@ -371,12 +371,24 @@ async def get_vehicles(
     ),
     db: Session = Depends(get_db),
 ):
-    """All-plates view: UNION of the `vehicles` registry and any plate that has
-    ever generated a parking_sessions row. Unregistered plates surface with
-    `id = null`, `is_registered = false`, and whatever data is available from
-    the most recent parking session. The `?is_currently_parked=true` filter
-    matches all 14-style "active now" plates regardless of registration —
-    fixing the previous mismatch where /vehicles count < active-vehicles count.
+    """Registry view: one row per plate in the `vehicles` table, enriched with
+    its current parking session when it has one.
+
+    Every row therefore carries a real `id` — which is what DELETE and PUT
+    need, and why this list never emits `id = null`. (`VehicleRef.id` stays
+    Optional: other endpoints build vehicle-shaped payloads for plates that
+    have no registry row.)
+
+    Registered and unregistered plates both appear. PMS-AI writes an
+    `is_registered = 0` placeholder for every unknown plate it sees, so an
+    unregistered car is an ordinary registry row, not a session-only ghost.
+    `?is_currently_parked=true` still matches every "active now" plate for the
+    same reason: a car cannot hold an open session without PMS-AI having put it
+    in `vehicles` first, so this count does not fall behind the
+    active-vehicles count the way the pre-UNION version did.
+
+    Deleting a vehicle removes it from this list for good while leaving its
+    Entry/Exit and parking-session history untouched — see delete_vehicle.
     """
     cols    = _vehicle_extra_cols(db)
     schema  = _floor_schema()
@@ -412,12 +424,26 @@ async def get_vehicles(
 
     where = " AND ".join(clauses)
 
-    # CTE: every plate the system has ever observed — registry ∪ parking_sessions.
+    # CTE: the registry, and only the registry.
+    #
+    # This used to be `dbo.vehicles UNION dbo.parking_sessions.plate_number`, so
+    # a plate with parking history but no registry row still appeared, with
+    # `id = null`. That made DELETE /vehicles/{id} unable to do its job: the
+    # endpoint drops the `vehicles` row and deliberately keeps the history, so a
+    # deleted plate came straight back through the parking_sessions half — on
+    # screen, with a null id, which the frontend then re-submitted as
+    # `DELETE /vehicles/null` (a 422). Deleting a car has to make it disappear.
+    #
+    # Dropping that half costs nothing on a current database. PMS-AI's
+    # `vehicle_service.ensure_unregistered_vehicle()` runs on every entry path
+    # and creates a registry row for any plate it does not recognise, so a car
+    # that parks is already in `vehicles` by the time it has a session. The only
+    # plates the UNION contributed on its own were therefore the deleted ones,
+    # plus any rows predating that logic — and those stay readable on the
+    # Entry/Exit tab, which reads parking_sessions directly.
     all_plates_cte = """
         WITH all_plates AS (
             SELECT plate_number FROM dbo.vehicles
-            UNION
-            SELECT DISTINCT plate_number FROM dbo.parking_sessions WHERE plate_number IS NOT NULL
         )
     """
 
