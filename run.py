@@ -6,6 +6,6 @@ if __name__ == "__main__":
         "app.main:app",
         host="0.0.0.0",
         port=settings.gateway_port,
-        reload=False,
+        reload=True,
         log_level="info",
     )

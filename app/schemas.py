@@ -10,11 +10,13 @@ Phase 2 target state:
   - Camera carries `role` + `watches_floor`/`watches_slots`.
   - SSE alert stream emits AlertStreamEvent.
 """
+from math import floor
 import re
 from datetime import datetime
 from typing import Generic, Literal, Optional, TypeVar
 
 from pydantic import BaseModel, Field, StrictBool, field_validator, model_validator
+from datetime import date
 
 T = TypeVar("T")
 
@@ -190,18 +192,23 @@ class DashboardKPIs(BaseModel):
     # Inventory headline — every parking slot on the property regardless of
     # camera coverage (monitored + unmonitored). Excludes violation-zone rows.
     total_slots: int
+    floors_count: int
     free_slots: int
+    
     # Slots whose latest VA `slot_status` row reads non-vacant. Restricted to
     # `is_monitored = 1` rows — a slot VA can't observe can't be reported as
     # occupied. Pair with `parked_vehicles` to surface the blind-spot gap.
     occupied_slots: int
+    occupancy_pct: float
     # Cars physically in the garage right now: count of open `parking_sessions`
     # rows (line-crossing source of truth). `parked_vehicles - occupied_slots`
     # is the count of cars VA can't place in a monitored slot — i.e. parked in
     # a blind spot, parked in an unmarked area, or still driving.
     parked_vehicles: int
     critical_alerts: int
-
+    entries_today: int
+    exits_today: int
+    overstays_today: int
 
 class ActiveVehicle(BaseModel):
     plate_number: str
@@ -292,6 +299,28 @@ class AlertStats(BaseModel):
     active_alerts: int
     critical_violations: int
     resolved_total: int
+
+
+class AlertTypeCount(BaseModel):
+    """One slice of the Alerts Summary donut."""
+    # Raw `alerts.alert_type` value — NOT a display label. It round-trips as
+    # the `alert_type` query param on GET /alerts/, so clicking a slice can
+    # drill into exactly the rows that were counted.
+    alert_type: str
+    count: int
+    # Severity the alert_type maps to, so the donut can colour slices without
+    # hardcoding the bucket list the backend already owns (_alert_query_bits).
+    severity: str
+
+
+class AlertSummary(BaseModel):
+    """Per-type breakdown for the Alerts Summary card.
+
+    `total` is the centre number and is queried independently of `by_type` —
+    it is NOT the sum of the slices. They agree today, but summing the slices
+    would silently drop any alert_type the enum doesn't know about."""
+    total: int
+    by_type: list[AlertTypeCount]
 
 
 class AlertItem(BaseModel):
@@ -740,6 +769,123 @@ class ZoneItem(BaseModel):
     occupied: int
     available: int
     utilization: float
+
+class History(BaseModel):
+    slot_id: str
+    floor: Optional[str] = None
+    total_occupied_seconds: int
+    date: date
+
+
+# ── Reports · Occupancy & Utilization tab (Report 1) ──────────────────────────
+
+class OccupancyTrendPoint(BaseModel):
+    """One point of the "Occupancy Trend" chart, at whatever grain the caller
+    asked for. The shape is the same for all five grains so the chart component
+    does not branch on `grain` to read its own data."""
+    label: str                   # x-axis text, already formatted: 'Mon', '2026-08-01', '2026-W31', '2026-08', '2026-08-01 14:00'
+    index: int                   # 0-based position, for stable FE ordering
+    # Absent for the `weekday` grain — a Mon..Sun average is not an instant.
+    # Present and chronological for hour / day / week / month.
+    bucket_start: Optional[datetime] = None
+    bucket_end: Optional[datetime] = None
+    # NULL when `days_sampled` is 0 — the range (or the business-hours window)
+    # never covered this bucket. Distinct from 0.0, which means the garage
+    # really was empty. The chart must render a gap for NULL, not a zero bar.
+    occupancy: Optional[float] = None     # percent, 1dp
+    days_sampled: int = 0        # calendar days that contributed to this point
+    # Populated only for grain=weekday, so a FE that special-cases the Mon..Sun
+    # chart does not have to parse `label` back into an index.
+    weekday: Optional[str] = None         # 'Mon' .. 'Sun'
+    weekday_index: Optional[int] = None   # 0 = Mon .. 6 = Sun
+
+
+class OccupancyLocationItem(BaseModel):
+    """One bar of the "Utilization by Location" chart. Averaged across the
+    selected range (Q6), with a per-floor denominator — not the live snapshot."""
+    floor: str                   # DB key: 'Ground' | 'B1' | 'B2'
+    label: str                   # display: 'Ground' | 'Basement 1' | 'Basement 2'
+    capacity: int
+    utilization: float           # percent, 1dp
+
+
+class OccupancyReportSummary(BaseModel):
+    """Everything the Occupancy & Utilization tab renders, in one call.
+
+    KPI row is three cards (Q3 removed "Utilization Rate", Q4 removed
+    "Occupied Slots") — screenshot 08 still shows five and is stale."""
+    start_time: datetime
+    end_time: datetime
+    overall_utilization: float           # KPI 1 — time-weighted mean, percent
+    peak_occupancy: float                # KPI 2 — busiest hour, percent
+    peak_occupancy_at: Optional[datetime] = None   # hour bucket that peaked
+    total_capacity: int                  # KPI 3 — monitored + unmonitored slots
+    trend: list[OccupancyTrendPoint]
+    by_location: list[OccupancyLocationItem]
+
+    # ── Which reporting window produced the figures above ─────────────────────
+    # Echoed back so the FE can render an honest subtitle ("07:00-18:00, all
+    # days") instead of hardcoding one that drifts from the deployment's .env.
+    business_hours_applied: bool = False
+    business_hour_from: Optional[int] = None       # inclusive, facility-local
+    business_hour_to: Optional[int] = None         # exclusive
+    business_days: list[str] = []                  # 'Mon'..'Sun', operating days
+    # Share of ALL parking in the date range that falls inside the window above.
+    # 100.0 when the full 24h is counted. Narrowing the window raises
+    # `overall_utilization` precisely by discarding activity — this says how
+    # much was discarded, so the two must be read together.
+    parking_captured_pct: float = 100.0
+
+
+# ── Reports · Tab 1 split into one endpoint per widget ──────────────────
+# `OccupancyReportSummary` above returns the whole tab in one call and is kept
+# for callers already on it. New work uses /history/kpis, /history/trend and
+# /history/by-location — one widget per request, so a slow chart cannot hold
+# up the KPI row and the trend chart can re-fetch at a new grain on its own.
+#
+# All three derive from the SAME (floor x hour) pass over `slot_status` with
+# the SAME window arithmetic, so figures still cannot disagree across widgets
+# provided the caller passes identical query params to all three.
+
+class OccupancyReportWindow(BaseModel):
+    """Fields every Tab 1 widget echoes back, so each response is
+    self-describing and the FE can caption a chart without re-deriving what it
+    asked for."""
+    start_time: datetime
+    end_time: datetime
+    total_capacity: int                  # KPI 3 — also the charts' denominator
+    business_hours_applied: bool = False
+    business_hour_from: Optional[int] = None       # inclusive, facility-local
+    business_hour_to: Optional[int] = None         # exclusive
+    business_days: list[str] = []                  # 'Mon'..'Sun', operating days
+
+
+class OccupancyReportKpis(OccupancyReportWindow):
+    """`GET /occupancy/history/kpis` — the three KPI cards, nothing else.
+
+    "Occupied Slots" (Q4) and "Utilization Rate" (Q3) stay removed."""
+    overall_utilization: float           # KPI 1 — time-weighted mean, percent
+    peak_occupancy: float                # KPI 2 — busiest hour, percent
+    peak_occupancy_at: Optional[datetime] = None   # hour bucket that peaked
+    # Share of ALL parking in the date range that falls inside the reporting
+    # window. 100.0 when the full 24h is counted. Narrowing the window raises
+    # `overall_utilization` precisely by discarding activity — this says how
+    # much was discarded, so the two must be read together.
+    parking_captured_pct: float = 100.0
+
+
+class OccupancyTrendResponse(OccupancyReportWindow):
+    """`GET /occupancy/history/trend` — the Occupancy Trend chart alone."""
+    grain: str                           # echoed back: the grain actually used
+    points: list[OccupancyTrendPoint]
+
+
+class OccupancyLocationResponse(OccupancyReportWindow):
+    """`GET /occupancy/history/by-location` — the Utilization by Location bars.
+
+    One item per floor, always, including floors with no occupancy in the
+    range: the bar count must not change with the date picker."""
+    items: list[OccupancyLocationItem]
 
 
 # ── Cameras ───────────────────────────────────────────────────────────────────

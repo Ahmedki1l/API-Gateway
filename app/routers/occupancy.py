@@ -1,11 +1,14 @@
-from typing import Optional
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Annotated, Optional
 from io import StringIO
 import csv
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db, scalar, rows
 from app.routers._helpers import (
     _floor_schema,
@@ -15,14 +18,27 @@ from app.routers._helpers import (
 from app.schemas import (
     FloorOccupancy,
     FloorSlotGroup,
+    History,
     OccupancyKPIs,
+    OccupancyLocationItem,
+    OccupancyLocationResponse,
+    OccupancyReportKpis,
+    OccupancyReportSummary,
+    OccupancyTrendPoint,
+    OccupancyTrendResponse,
     OccupancyTotals,
     PagedResponse,
     SlotDetail,
     SlotListItem,
     ZoneItem,
 )
-from app.schemas_enums import ReservationType, StrictQueryBool
+from app.schemas_enums import (
+    FacilityNaiveDatetime,
+    FloorSort,
+    OccupancyTrendGrain,
+    ReservationType,
+    StrictQueryBool,
+)
 from app.services.snapshots import resolve_snapshot_url
 from app.services.upstream import get_live_slots
 from app.shared import build_paged
@@ -856,6 +872,13 @@ def _build_floor_occupancy(
 async def get_floors(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    sort: FloorSort = Query(
+        FloorSort.default,
+        description=(
+            "`default` = floor layout order; `most_occupied` = highest "
+            "utilization first; `least_occupied` = lowest utilization first."
+        ),
+    ),
     db: Session = Depends(get_db),
 ):
     """Per-floor occupancy. Replaces the zones model — floor is the only
@@ -883,10 +906,21 @@ async def get_floors(
     total = len(floor_rows)
 
     start = (page - 1) * page_size
-    slice_ = floor_rows[start:start + page_size]
-    # WS-8: pass floor_id (integer) so _build_floor_occupancy uses the indexed FK directly.
-    items = [_build_floor_occupancy(db, floor=f["name"], floor_id=f.get("id")) for f in slice_]
-    return build_paged(items, total, page, page_size)
+    if sort is FloorSort.default:
+        slice_ = floor_rows[start:start + page_size]
+        # WS-8: pass floor_id (integer) so _build_floor_occupancy uses the indexed FK directly.
+        items = [_build_floor_occupancy(db, floor=f["name"], floor_id=f.get("id")) for f in slice_]
+        return build_paged(items, total, page, page_size)
+
+    # Utilization is computed per floor in Python, so every floor has to be
+    # built and ranked before slicing — otherwise each page sorts on its own.
+    # Ties break on occupied count, then keep layout order (sort is stable).
+    items = [_build_floor_occupancy(db, floor=f["name"], floor_id=f.get("id")) for f in floor_rows]
+    items.sort(
+        key=lambda fo: (fo.utilization, fo.current_count),
+        reverse=sort is FloorSort.most_occupied,
+    )
+    return build_paged(items[start:start + page_size], total, page, page_size)
 
 
 @router.get("/totals", response_model=OccupancyTotals)
@@ -1185,4 +1219,720 @@ async def get_slot_detail(slot_id: str, db: Session = Depends(get_db)):
         polygon=parsed_polygon,
         current=current,
         last_occupant=last_occupant,
+    )
+
+
+# ── Occupancy history (time-weighted) ─────────────────────────────────────────
+#
+# `slot_status` is a *transition log*, not a sample: one row per state change.
+# Occupied time is therefore the gap between a row whose status is occupied and
+# the next row for the same slot. Three things have to be added to that raw log
+# before it can be summed over an arbitrary window:
+#
+#   1. the state CARRIED IN — the last transition at or before the window start,
+#      so a car that was already parked when the window opened is counted;
+#   2. a CAP at the window end, so a slot still occupied when the window closes
+#      has a finite interval instead of a NULL LEAD;
+#   3. a BUCKET SPLIT — an interval crossing midnight belongs to two days, so
+#      the seconds have to be attributed per calendar day, not to the day the
+#      interval started on.
+#
+# Steps 1-2 are the CTE chain; step 3 is the join against `buckets`, which
+# clamps each interval to each bucket it overlaps. This is the anchor query for
+# Report 1 (avg + peak occupancy, occupancy trend, utilization by floor) — every
+# other figure in Reports 1 and 2 is a different GROUP BY over the same rows.
+
+# Occupied-state predicate. Mirrors `_is_occupied()`: VA's state machine emits
+# VACANT/ENTERING/OCCUPIED/LEAVING and anything that is not a vacant synonym is
+# occupied — so ENTERING and LEAVING count. `status = 'occupied'` would silently
+# drop those two states.
+_VACANT_STATUSES = "'empty', 'available', 'free', 'VACANT'"
+
+# Whitelisted bucket grains → (T-SQL datepart, floor-to-grain anchor expression).
+# Never interpolate a raw query param into the datepart slot.
+_HISTORY_GRAINS = {
+    "day": ("DAY", "CAST(CAST(:start_time AS DATE) AS DATETIME)"),
+    "hour": ("HOUR", "DATEADD(HOUR, DATEDIFF(HOUR, 0, :start_time), 0)"),
+}
+
+
+
+def _occupied_seconds_sql(grain: str, floor_clause: str, by_slot: bool = True) -> str:
+    """Build the time-weighted occupancy query for one bucket grain.
+
+    `by_slot=True` returns one row per (slot, bucket); `by_slot=False` rolls the
+    slots up and returns one row per (floor, bucket), which is what the report
+    summary wants — 3 floors x 720 hours instead of 35 slots x 720 hours.
+
+    Buckets with no occupancy are absent — the consumer sums, so a missing row
+    and a zero row are equivalent.
+
+    Do NOT name bind params inside the SQL comments below: SQLAlchemy's
+    `text()` binds `:name` occurrences in comments too, and pyodbc then sees
+    fewer `?` markers than parameters supplied.
+    """
+    datepart, anchor = _HISTORY_GRAINS[grain]
+    slot_col = "o.slot_id," if by_slot else ""
+    slot_group = "o.slot_id," if by_slot else ""
+    slot_order = "o.slot_id," if by_slot else ""
+    return f"""
+    WITH floor_slots AS (
+        SELECT pk.slot_id, pk.floor
+        FROM parking_slots pk
+        WHERE pk.is_violation_zone = 0
+          {_slot_type_excl('pk')}
+          {floor_clause}
+    ),
+    -- (1) state carried into the window: the last transition at or before the
+    --     window start, re-stamped to the window start so the interval begins
+    --     at the edge.
+    carried AS (
+        SELECT slot_id, status, CAST(:start_time AS DATETIME) AS time
+        FROM (
+            SELECT ss.slot_id, ss.status,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY ss.slot_id ORDER BY ss.time DESC, ss.id DESC
+                   ) AS rn
+            FROM slot_status ss
+            JOIN floor_slots fs ON fs.slot_id = ss.slot_id
+            WHERE ss.time <= CAST(:start_time AS DATETIME)
+        ) t
+        WHERE rn = 1
+    ),
+    -- Strictly greater than the window start — `>=` would collide with the
+    -- carried row and the LEAD tie-break would then be arbitrary.
+    in_window AS (
+        SELECT ss.slot_id, ss.status, ss.time
+        FROM slot_status ss
+        JOIN floor_slots fs ON fs.slot_id = ss.slot_id
+        WHERE ss.time > CAST(:start_time AS DATETIME)
+          AND ss.time < CAST(:end_time AS DATETIME)
+    ),
+    -- (2) cap so the final interval of each slot terminates at the window edge.
+    window_cap AS (
+        SELECT fs.slot_id, CAST(NULL AS VARCHAR(50)) AS status,
+               CAST(:end_time AS DATETIME) AS time
+        FROM floor_slots fs
+    ),
+    transitions AS (
+        SELECT * FROM carried
+        UNION ALL SELECT * FROM in_window
+        UNION ALL SELECT * FROM window_cap
+    ),
+    intervals AS (
+        SELECT slot_id, status, time AS seg_start,
+               LEAD(time) OVER (PARTITION BY slot_id ORDER BY time) AS seg_end
+        FROM transitions
+    ),
+    occupied AS (
+        SELECT slot_id, seg_start, seg_end
+        FROM intervals
+        WHERE seg_end IS NOT NULL
+          AND seg_end > seg_start
+          AND status IS NOT NULL
+          AND status NOT IN ({_VACANT_STATUSES})
+    ),
+    -- (3) bucket grid over the window, anchored to a calendar boundary.
+    tally AS (
+        SELECT TOP (:bucket_count)
+               ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) - 1 AS n
+        FROM sys.all_objects a CROSS JOIN sys.all_objects b
+    ),
+    buckets AS (
+        SELECT DATEADD({datepart}, n,     {anchor}) AS bucket_start,
+               DATEADD({datepart}, n + 1, {anchor}) AS bucket_end
+        FROM tally
+    )
+    SELECT
+        {slot_col}
+        fs.floor,
+        b.bucket_start,
+        SUM(DATEDIFF(
+            SECOND,
+            CASE WHEN o.seg_start > b.bucket_start THEN o.seg_start ELSE b.bucket_start END,
+            CASE WHEN o.seg_end   < b.bucket_end   THEN o.seg_end   ELSE b.bucket_end   END
+        )) AS total_occupied_seconds
+    FROM occupied o
+    JOIN buckets b
+        ON o.seg_start < b.bucket_end
+       AND o.seg_end   > b.bucket_start
+    JOIN floor_slots fs ON fs.slot_id = o.slot_id
+    GROUP BY {slot_group} fs.floor, b.bucket_start
+    ORDER BY {slot_order} b.bucket_start
+    """
+
+
+def _history_filter(
+    db: Session,
+    start_time: datetime,
+    end_time: datetime,
+    grain: str,
+    floor: Optional[str],
+    floor_id: Optional[int],
+) -> tuple[str, dict]:
+    """Shared plumbing for the history queries: the floor WHERE-fragment plus
+    the bind params (window edges + bucket count for the requested grain).
+
+    WS-8 schema-compat shim — same hybrid floor filter as /slots/by-floor:
+    match on the integer key when the row was backfilled, else fall back to the
+    legacy string `floor` column."""
+    if grain == "hour":
+        # Anchor is the floored hour, so count from there to cover a window that
+        # starts mid-hour; +1 for the partial bucket at the tail.
+        span = end_time - start_time.replace(minute=0, second=0, microsecond=0)
+        bucket_count = int(span.total_seconds() // 3600) + 1
+    else:
+        # Buckets are calendar days, so count from the *dates*, not the
+        # instants: a 06:00 → 06:00 window still touches two days.
+        bucket_count = (end_time.date() - start_time.date()).days + 1
+
+    params: dict = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "bucket_count": bucket_count,
+    }
+
+    schema = _floor_schema()
+    resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=floor)
+    floor_clause = ""
+    if resolved_floor_id is not None and schema["parking_slots_floor_id"]:
+        floor_name_for_filter = floor or resolve_floor_name(db, resolved_floor_id)
+        if floor_name_for_filter:
+            floor_clause = (
+                "AND (pk.floor_id = :floor_id "
+                "OR (pk.floor_id IS NULL AND pk.floor = :floor_name))"
+            )
+            params["floor_id"] = resolved_floor_id
+            params["floor_name"] = floor_name_for_filter
+        else:
+            floor_clause = "AND pk.floor_id = :floor_id"
+            params["floor_id"] = resolved_floor_id
+    elif floor:
+        floor_clause = "AND pk.floor = :floor"
+        params["floor"] = floor
+    return floor_clause, params
+
+
+@router.get("/history/", response_model=list[History])
+async def get_slot_history(
+    start_time: Annotated[FacilityNaiveDatetime, Query(
+        description="Window start, facility-local naive. A `Z` or `+HH:MM` offset "
+                    "is accepted and IGNORED — the wall-clock digits are the window.",
+    )],
+    end_time: Annotated[FacilityNaiveDatetime, Query(
+        description="Window end, exclusive. Same offset handling as start_time.",
+    )],
+    floor: Optional[str] = Query(None, description="Floor name, e.g. B1"),
+    floor_id: Optional[int] = Query(None, description="floors.id (WS-8)"),
+    db: Session = Depends(get_db),
+):
+    """Per-slot, per-day occupied seconds over an arbitrary window.
+
+    Time-weighted (Q2): the seconds come from the `slot_status` transition log,
+    not from hourly sampling, so a car that arrives and leaves between two hour
+    boundaries is still counted. Intervals crossing midnight are split across
+    both days.
+
+    Roll-ups the caller derives from this:
+      avg occupancy  = SUM(seconds) / (slot_count x window_seconds)
+      per-floor      = same, grouped by `floor`, with per-floor denominators
+      day-of-week    = mean of the daily averages per weekday (Q5)
+    """
+    if start_time >= end_time:
+        raise HTTPException(status_code=400, detail="start_time must be before end_time")
+
+    floor_clause, params = _history_filter(db, start_time, end_time, "day", floor, floor_id)
+    result = rows(db, _occupied_seconds_sql("day", floor_clause), params)
+
+    return [
+        History(
+            slot_id=r["slot_id"],
+            floor=r.get("floor"),
+            total_occupied_seconds=int(r["total_occupied_seconds"] or 0),
+            date=r["bucket_start"].date(),
+        )
+        for r in result
+    ]
+
+
+# Display labels for the "Utilization by Location" bars. The DB floor keys are
+# terse; the design labels the basements in full. Unknown floors pass through
+# unchanged rather than being dropped.
+_FLOOR_LABELS = {"Ground": "Ground", "B1": "Basement 1", "B2": "Basement 2"}
+
+_WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+# ── Reports · Tab 1 ───────────────────────────────────────────────────────────
+# One endpoint per widget, all under /occupancy/history/ next to the per-slot
+# `GET /occupancy/history/` above -- same series, different roll-up, so they
+# share a base path:
+#   /history/kpis, /history/trend, /history/by-location
+# plus /history/summary, a composition of the three for callers that want the
+# whole tab in one request.
+#
+# Splitting them costs three (floor x hour) passes instead of one, and buys:
+#   * the KPI row paints without waiting on the charts;
+#   * the trend chart re-fetches at a new grain without re-computing the KPIs;
+#   * a chart that fails takes down one widget, not the whole tab.
+# Every widget still runs the SAME window arithmetic over the SAME query, so
+# the figures agree as long as the caller sends identical query params to all
+# three — which it must.
+
+
+@dataclass
+class _ReportBase:
+    """The shared (floor x hour) pass plus the reporting-window arithmetic that
+    every Tab 1 widget needs. Built once per request by `_report_base()`."""
+    start_time: datetime
+    end_time: datetime
+    capacity_by_floor: dict
+    total_capacity: int
+    buckets: list           # rows of (floor, bucket_start, total_occupied_seconds)
+    applied: bool           # business-hours window in force?
+    h_from: int
+    h_to: int
+    days: frozenset         # operating weekday indices
+    offered_seconds: float  # garage-wide countable seconds in the window
+    day_offered: dict       # date -> countable seconds of that calendar day
+
+    def counted_span(self, hour_start: datetime) -> float:
+        """Seconds of this hour bucket that count toward the denominators.
+
+        Zero when the bucket falls outside the operating window — an excluded
+        hour is NOT a 0% hour, it is a not-measured hour, so it must leave both
+        numerator and denominator rather than dragging the average down.
+        Business hours are whole hours, so a bucket is entirely in or entirely
+        out; only the request's own edges can clip one."""
+        if self.applied and (hour_start.weekday() not in self.days
+                             or not (self.h_from <= hour_start.hour < self.h_to)):
+            return 0.0
+        span = (min(hour_start + timedelta(hours=1), self.end_time)
+                - max(hour_start, self.start_time)).total_seconds()
+        return max(span, 0.0)
+
+    def window_meta(self) -> dict:
+        """The `OccupancyReportWindow` fields, echoed by all three widgets so a
+        chart can caption itself instead of hardcoding a window that drifts
+        from the deployment's .env."""
+        return dict(
+            start_time=self.start_time,
+            end_time=self.end_time,
+            total_capacity=self.total_capacity,
+            business_hours_applied=self.applied,
+            business_hour_from=self.h_from if self.applied else None,
+            business_hour_to=self.h_to if self.applied else None,
+            business_days=[_WEEKDAY_NAMES[i] for i in sorted(self.days)],
+        )
+
+
+def _report_base(
+    db: Session,
+    start_time: datetime,
+    end_time: datetime,
+    business_hours: Optional[bool],
+    hour_from: Optional[int],
+    hour_to: Optional[int],
+) -> _ReportBase:
+    """Validate the range, resolve the reporting window, and run the one
+    (floor x hour) occupancy pass the widgets share."""
+    if start_time >= end_time:
+        raise HTTPException(status_code=400, detail="start_time must be before end_time")
+
+    # ── Reporting window ──────────────────────────────────────────────────────
+    # Per-request params win over .env; omitting them uses the configured
+    # defaults. Passing hour_from/hour_to alone implies business_hours=true, so
+    # a caller can A/B two windows without touching the deployment.
+    applied = settings.report_business_hours_enabled if business_hours is None else business_hours
+    if hour_from is not None or hour_to is not None:
+        applied = True if business_hours is None else business_hours
+    h_from = hour_from if hour_from is not None else settings.report_business_hour_from
+    h_to = hour_to if hour_to is not None else settings.report_business_hour_to
+    if applied and h_from >= h_to:
+        raise HTTPException(status_code=400, detail="hour_from must be less than hour_to")
+    days = settings.business_weekdays if applied else frozenset(range(7))
+
+    # Denominators: slot counts per floor, and their total. Violation zones and
+    # non-parking slot types are excluded, exactly as everywhere else.
+    capacity_rows = rows(db, f"""
+        SELECT pk.floor, COUNT(*) AS capacity
+        FROM parking_slots pk
+        WHERE pk.is_violation_zone = 0
+          {_slot_type_excl('pk')}
+        GROUP BY pk.floor
+    """)
+    capacity_by_floor = {r["floor"]: int(r["capacity"]) for r in capacity_rows}
+    total_capacity = sum(capacity_by_floor.values())
+
+    # No inventory — every ratio would divide by zero. Skip the scan entirely
+    # and let each widget return a well-formed empty payload rather than 500ing.
+    buckets: list = []
+    if total_capacity:
+        floor_clause, params = _history_filter(db, start_time, end_time, "hour", None, None)
+        buckets = rows(db, _occupied_seconds_sql("hour", floor_clause, by_slot=False), params)
+
+    base = _ReportBase(
+        start_time=start_time, end_time=end_time,
+        capacity_by_floor=capacity_by_floor, total_capacity=total_capacity,
+        buckets=buckets, applied=applied, h_from=h_from, h_to=h_to, days=days,
+        offered_seconds=0.0, day_offered={},
+    )
+
+    # Every hour bucket in the range, occupied or not — the denominators must
+    # include hours where nothing was parked. Walked once here so no widget
+    # re-derives it (and gets it subtly different).
+    cursor = start_time.replace(minute=0, second=0, microsecond=0)
+    while cursor < end_time:
+        span = base.counted_span(cursor)
+        if span:
+            base.offered_seconds += span
+            d = cursor.date()
+            base.day_offered[d] = base.day_offered.get(d, 0.0) + span
+        cursor += timedelta(hours=1)
+
+    return base
+
+
+def _report_base_dep(
+    start_time: Annotated[FacilityNaiveDatetime, Query(
+        description="Window start, facility-local naive. A `Z` or `+HH:MM` offset "
+                    "is accepted and IGNORED — the wall-clock digits are the window.",
+    )],
+    end_time: Annotated[FacilityNaiveDatetime, Query(
+        description="Window end, exclusive. Same offset handling as start_time.",
+    )],
+    business_hours: Optional[bool] = Query(
+        None,
+        description="Restrict percentages to operating hours. Omit to use "
+                    "REPORT_BUSINESS_HOURS_ENABLED from .env.",
+    ),
+    hour_from: Optional[int] = Query(
+        None, ge=0, le=23,
+        description="Override REPORT_BUSINESS_HOUR_FROM for this request only.",
+    ),
+    hour_to: Optional[int] = Query(
+        None, ge=1, le=24,
+        description="Override REPORT_BUSINESS_HOUR_TO (exclusive) for this request only.",
+    ),
+    db: Session = Depends(get_db),
+) -> _ReportBase:
+    """Declares the query contract shared by all four Tab 1 endpoints in one
+    place, so the widgets cannot drift apart on parameter names, defaults or
+    validation — which would silently produce charts that disagree."""
+    return _report_base(db, start_time, end_time, business_hours, hour_from, hour_to)
+
+
+# ── KPI cards ─────────────────────────────────────────────────────────────────
+
+def _report_kpis(base: _ReportBase) -> OccupancyReportKpis:
+    if not base.total_capacity:
+        return OccupancyReportKpis(
+            overall_utilization=0.0, peak_occupancy=0.0, peak_occupancy_at=None,
+            parking_captured_pct=100.0, **base.window_meta(),
+        )
+
+    # KPI 1 — overall utilization: occupied slot-seconds / (slots x counted time).
+    total_seconds = sum(
+        int(b["total_occupied_seconds"] or 0)
+        for b in base.buckets if base.counted_span(b["bucket_start"])
+    )
+    overall_utilization = (
+        round(total_seconds / (base.total_capacity * base.offered_seconds) * 100, 1)
+        if base.offered_seconds else 0.0
+    )
+
+    # Honesty check on the number above: what share of all parking that actually
+    # happened in this date range falls inside the reporting window. A narrow
+    # window flatters utilization precisely by discarding real activity, so the
+    # two figures have to be read together.
+    all_seconds = sum(int(b["total_occupied_seconds"] or 0) for b in base.buckets)
+    parking_captured_pct = round(total_seconds / all_seconds * 100, 1) if all_seconds else 100.0
+
+    # KPI 2 — peak: the hour bucket with the most occupied slot-seconds
+    # garage-wide. Each bucket's denominator is its own clamped length, so a
+    # partial hour at either window edge is not penalised.
+    per_hour: dict = {}
+    for b in base.buckets:
+        per_hour[b["bucket_start"]] = (
+            per_hour.get(b["bucket_start"], 0) + int(b["total_occupied_seconds"] or 0)
+        )
+
+    peak_occupancy = 0.0
+    peak_occupancy_at: Optional[datetime] = None
+    for hour_start, secs in per_hour.items():
+        hour_end = hour_start + timedelta(hours=1)
+        span = (min(hour_end, base.end_time) - max(hour_start, base.start_time)).total_seconds()
+        if span <= 0:
+            continue
+        pct = secs / (base.total_capacity * span) * 100
+        if pct > peak_occupancy:
+            peak_occupancy = pct
+            peak_occupancy_at = hour_start
+    peak_occupancy = round(min(peak_occupancy, 100.0), 1)
+
+    return OccupancyReportKpis(
+        overall_utilization=overall_utilization,
+        peak_occupancy=peak_occupancy,
+        peak_occupancy_at=peak_occupancy_at,
+        parking_captured_pct=parking_captured_pct,
+        **base.window_meta(),
+    )
+
+
+@router.get("/history/kpis", response_model=OccupancyReportKpis)
+async def occupancy_report_kpis(base: _ReportBase = Depends(_report_base_dep)):
+    """Report 1 — the three KPI cards only: Overall Utilization, Peak
+    Occupancy, Total Capacity.
+
+    Definitions, per the settled decisions:
+      * window is the full 24 hours, overnight included (Q1) unless
+        `business_hours` narrows it — overnight hours sit near 0%, which pulls
+        the averages down; that is intended;
+      * occupancy is time-weighted, not hourly-sampled (Q2);
+      * `peak_occupancy` is the busiest *hour* of the range, garage-wide.
+
+    Cards NOT returned, deliberately: "Occupied Slots" (Q4) and "Utilization
+    Rate" (Q3) were both removed. Screenshot 08 still renders five cards.
+    """
+    return _report_kpis(base)
+
+
+# ── Occupancy Trend chart ─────────────────────────────────────────────────────
+
+# A chart with more points than pixels is not a chart. Refusing is better than
+# streaming 26k points the FE will silently downsample into a different figure.
+_MAX_TREND_POINTS = 2000
+
+
+def _trend_bucket(grain: OccupancyTrendGrain, hour_start: datetime):
+    """Map an hour bucket onto its trend bucket.
+
+    Returns `(sort_key, label, bucket_start, bucket_end)`. The key is always
+    orderable, so the caller sorts the dict keys and gets chronological points
+    for free."""
+    d = hour_start.date()
+    if grain is OccupancyTrendGrain.hour:
+        return (hour_start, hour_start.strftime("%Y-%m-%d %H:00"),
+                hour_start, hour_start + timedelta(hours=1))
+    if grain is OccupancyTrendGrain.day:
+        start = datetime(d.year, d.month, d.day)
+        return d, d.isoformat(), start, start + timedelta(days=1)
+    if grain is OccupancyTrendGrain.week:
+        # ISO weeks, Monday-anchored — matches the Mon..Sun weekday grain, so
+        # switching between the two never re-slices the days differently.
+        monday = d - timedelta(days=d.weekday())
+        iso_year, iso_week, _ = monday.isocalendar()
+        start = datetime(monday.year, monday.month, monday.day)
+        return monday, f"{iso_year}-W{iso_week:02d}", start, start + timedelta(days=7)
+    if grain is OccupancyTrendGrain.month:
+        first = d.replace(day=1)
+        # day=1 + 32 days always lands in the next month, whatever its length.
+        nxt = (first + timedelta(days=32)).replace(day=1)
+        start = datetime(first.year, first.month, 1)
+        return first, first.strftime("%Y-%m"), start, datetime(nxt.year, nxt.month, 1)
+    raise ValueError(f"unhandled grain {grain}")
+
+
+def _report_trend(base: _ReportBase, grain: OccupancyTrendGrain) -> list[OccupancyTrendPoint]:
+    if grain is OccupancyTrendGrain.weekday:
+        return _report_trend_weekday(base)
+
+    if not base.total_capacity:
+        return []
+
+    # Denominator grid first: a bucket exists because the range covers it, not
+    # because a car happened to park in it. Otherwise a quiet week would vanish
+    # from the x-axis instead of reporting 0%.
+    offered: dict = {}
+    labels: dict = {}
+    days_seen: dict = {}
+    cursor = base.start_time.replace(minute=0, second=0, microsecond=0)
+    while cursor < base.end_time:
+        span = base.counted_span(cursor)
+        if span:
+            key, label, b_start, b_end = _trend_bucket(grain, cursor)
+            offered[key] = offered.get(key, 0.0) + span
+            labels[key] = (label, b_start, b_end)
+            days_seen.setdefault(key, set()).add(cursor.date())
+        cursor += timedelta(hours=1)
+
+    if len(offered) > _MAX_TREND_POINTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"grain '{grain.value}' yields {len(offered)} points for this range "
+                   f"(max {_MAX_TREND_POINTS}); pick a coarser grain or a shorter range",
+        )
+
+    occupied: dict = {}
+    for b in base.buckets:
+        hour_start = b["bucket_start"]
+        if base.counted_span(hour_start):
+            key, _, _, _ = _trend_bucket(grain, hour_start)
+            occupied[key] = occupied.get(key, 0) + int(b["total_occupied_seconds"] or 0)
+
+    points = []
+    for i, key in enumerate(sorted(offered)):
+        label, b_start, b_end = labels[key]
+        denom = base.total_capacity * offered[key]
+        points.append(OccupancyTrendPoint(
+            label=label,
+            index=i,
+            bucket_start=b_start,
+            bucket_end=b_end,
+            occupancy=round(occupied.get(key, 0) / denom * 100, 1) if denom else None,
+            days_sampled=len(days_seen[key]),
+        ))
+    return points
+
+
+def _report_trend_weekday(base: _ReportBase) -> list[OccupancyTrendPoint]:
+    """The Mon..Sun grain: 7 bars, each the mean of the daily averages for
+    every occurrence of that weekday in the range (Q5).
+
+    Mean-of-daily-averages, not a pooled ratio, so a partial day at a window
+    edge still counts as one observation. At a 7-day range each weekday occurs
+    once and the two definitions coincide."""
+    if not base.total_capacity:
+        return [
+            OccupancyTrendPoint(label=n, index=i, weekday=n, weekday_index=i,
+                                occupancy=None, days_sampled=0)
+            for i, n in enumerate(_WEEKDAY_NAMES)
+        ]
+
+    # Hours roll up to days, days average per weekday. Each day's denominator
+    # is only the part of that day inside the window, so a range that starts at
+    # noon doesn't report a half-empty first day.
+    per_day: dict = {}
+    for b in base.buckets:
+        if base.counted_span(b["bucket_start"]):
+            d = b["bucket_start"].date()
+            per_day[d] = per_day.get(d, 0) + int(b["total_occupied_seconds"] or 0)
+
+    by_weekday: dict = {i: [] for i in range(7)}
+    cursor = base.start_time.date()
+    while cursor <= (base.end_time - timedelta(microseconds=1)).date():
+        # A day outside the operating week contributes no offered seconds, so it
+        # is skipped entirely — its weekday bar reports null, not 0%.
+        offered = base.day_offered.get(cursor, 0.0)
+        if offered > 0:
+            by_weekday[cursor.weekday()].append(
+                per_day.get(cursor, 0) / (base.total_capacity * offered) * 100
+            )
+        cursor += timedelta(days=1)
+
+    return [
+        OccupancyTrendPoint(
+            label=_WEEKDAY_NAMES[i],
+            index=i,
+            weekday=_WEEKDAY_NAMES[i],
+            weekday_index=i,
+            # None, not 0.0, when the range never covered this weekday — a
+            # zero bar would read as "empty garage" instead of "no data".
+            occupancy=round(sum(by_weekday[i]) / len(by_weekday[i]), 1) if by_weekday[i] else None,
+            days_sampled=len(by_weekday[i]),
+        )
+        for i in range(7)
+    ]
+
+
+@router.get("/history/trend", response_model=OccupancyTrendResponse)
+async def occupancy_report_trend(
+    grain: OccupancyTrendGrain = Query(
+        OccupancyTrendGrain.weekday,
+        description="X-axis bucketing, chosen by the frontend: hour | day | week "
+                    "| month | weekday. `weekday` returns 7 Mon..Sun averages "
+                    "and no bucket_start; the rest return a chronological "
+                    "series with one point per bucket the range touches.",
+    ),
+    base: _ReportBase = Depends(_report_base_dep),
+):
+    """Report 1 — the Occupancy Trend chart alone, at the grain the caller asks
+    for. The backend never infers a grain from the range length; the frontend
+    knows how much x-axis it has.
+
+    The chart subtitle follows `grain`: "Average occupancy by day of week" for
+    `weekday`, "Occupancy over time" for the chronological grains.
+
+    Buckets are emitted for the whole range, not just the ones with parking, so
+    a quiet day reports 0% instead of disappearing from the axis. `occupancy`
+    is null only when the bucket was never measured — the chart must draw a gap
+    there, not a zero-height bar. Time-weighted, not hourly-sampled (Q2).
+    """
+    return OccupancyTrendResponse(
+        grain=grain.value,
+        points=_report_trend(base, grain),
+        **base.window_meta(),
+    )
+
+
+# ── Utilization by Location chart ─────────────────────────────────────────────
+
+def _report_by_location(base: _ReportBase) -> list[OccupancyLocationItem]:
+    if not base.total_capacity:
+        return []
+
+    per_floor: dict = {}
+    for b in base.buckets:
+        if base.counted_span(b["bucket_start"]):
+            per_floor[b["floor"]] = per_floor.get(b["floor"], 0) + int(b["total_occupied_seconds"] or 0)
+
+    return [
+        OccupancyLocationItem(
+            floor=name,
+            label=_FLOOR_LABELS.get(name, name),
+            capacity=cap,
+            utilization=(
+                round(per_floor.get(name, 0) / (cap * base.offered_seconds) * 100, 1)
+                if cap and base.offered_seconds else 0.0
+            ),
+        )
+        # Floors with no occupancy still get a zero bar — the chart's bar count
+        # must not change with the date range.
+        for name, cap in sorted(base.capacity_by_floor.items(), key=lambda kv: kv[0] != "Ground")
+    ]
+
+
+@router.get("/history/by-location", response_model=OccupancyLocationResponse)
+async def occupancy_report_by_location(base: _ReportBase = Depends(_report_base_dep)):
+    """Report 1 — the Utilization by Location bars alone.
+
+    Averaged over the range with PER-FLOOR denominators (Q6) — Ground 8, B1 12,
+    B2 15, not 35. This is not the live snapshot that `/occupancy/floors`
+    returns, and the two differ whenever the range is not "right now".
+    """
+    return OccupancyLocationResponse(
+        items=_report_by_location(base),
+        **base.window_meta(),
+    )
+
+
+# ── Whole-tab composition (legacy) ────────────────────────────────────────────
+
+@router.get("/history/summary", response_model=OccupancyReportSummary, deprecated=True)
+async def occupancy_report_summary(base: _ReportBase = Depends(_report_base_dep)):
+    """Report 1 — the whole Occupancy & Utilization tab in one call.
+
+    DEPRECATED: superseded by `/history/kpis`, `/history/trend` and
+    `/history/by-location`. Kept so existing callers keep working; it is a
+    straight composition of the three over one shared `slot_status` pass, so it
+    cannot disagree with them.
+
+    Its `trend` is fixed at the `weekday` grain — the split endpoint is the
+    only way to ask for a different one.
+    """
+    kpis = _report_kpis(base)
+    return OccupancyReportSummary(
+        start_time=base.start_time,
+        end_time=base.end_time,
+        overall_utilization=kpis.overall_utilization,
+        peak_occupancy=kpis.peak_occupancy,
+        peak_occupancy_at=kpis.peak_occupancy_at,
+        total_capacity=base.total_capacity,
+        trend=_report_trend(base, OccupancyTrendGrain.weekday),
+        by_location=_report_by_location(base),
+        business_hours_applied=base.applied,
+        business_hour_from=base.h_from if base.applied else None,
+        business_hour_to=base.h_to if base.applied else None,
+        business_days=[_WEEKDAY_NAMES[i] for i in sorted(base.days)],
+        parking_captured_pct=kpis.parking_captured_pct,
     )

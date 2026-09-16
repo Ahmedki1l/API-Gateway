@@ -39,6 +39,33 @@ VEHICLE_JOIN = """
 _HEALTHY_STATUSES = {"ok", "healthy"}
 
 
+def _issue_reasons(payload: dict) -> list[str]:
+    """Why an upstream isn't healthy, in the upstream's own words.
+
+    Both upstreams already explain themselves in the `/health` body and the
+    dashboard was throwing that away: VideoAnalytics returns `health_reasons`
+    (the engine's computed verdict — frozen streams named by camera id, a
+    lagging processing loop with its age, an unreachable DB, entry_v2
+    conditions when linked), yet `issues` carried only the bare word from
+    `status`. "degraded" names no cause, so the banner sent whoever read it
+    to the pod logs to learn what the payload had already said.
+
+    `failures` is accepted alongside it for any upstream that words the same
+    list differently. `error` (set by `_health_payload` for a non-2xx, or by
+    the client for a transport failure) is the fallback when the upstream
+    could not describe itself at all.
+    """
+    detail: list[str] = []
+    for key in ("health_reasons", "failures"):
+        value = payload.get(key) or []
+        if isinstance(value, str):
+            value = [value]
+        detail.extend(str(v) for v in value if v)
+    if detail:
+        return detail
+    return [payload.get("error") or payload.get("status") or "unreachable"]
+
+
 def _derive_health(raw_status: Optional[str]) -> str:
     """Collapse an upstream's raw `/health` `status` string into the small
     vocabulary the dashboard UI styles: `healthy` when the upstream reports
@@ -71,12 +98,10 @@ async def ai_status():
     ]
 
     issues: list[dict] = []
-    if s1.get("status") not in _HEALTHY_STATUSES:
-        issues.append({"system": "PMS-AI", "reason": s1.get("error") or s1.get("status")})
-    for failure in s1.get("failures", []):
-        issues.append({"system": "PMS-AI", "reason": failure})
-    if s2.get("status") not in _HEALTHY_STATUSES:
-        issues.append({"system": "VideoAnalytics", "reason": s2.get("error") or s2.get("status")})
+    for name, payload in (("PMS-AI", s1), ("VideoAnalytics", s2)):
+        if payload.get("status") in _HEALTHY_STATUSES:
+            continue
+        issues.extend({"system": name, "reason": reason} for reason in _issue_reasons(payload))
 
     healthy_count = sum(1 for sys in systems if sys.health == "healthy")
     if healthy_count == len(systems):
@@ -112,7 +137,9 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
         SELECT COUNT(*) FROM parking_slots
         WHERE is_violation_zone = 0 {slot_excl}
     """)
-
+    floors_count = scalar(db, f"""
+        SELECT COUNT(DISTINCT id) FROM floors
+        """)
     occupied_slots = scalar(db, f"""
         SELECT COUNT(*) FROM parking_slots pk
         LEFT JOIN slot_status ss
@@ -124,6 +151,7 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
           AND ss.status IS NOT NULL
           AND UPPER(ss.status) NOT IN ('EMPTY', 'AVAILABLE', 'FREE', 'VACANT')
     """)
+    occupancy_pct = (occupied_slots or 0) / (total_slots or 1) * 100
 
     occupied_slots = occupied_slots or 0
     free_slots = (total_slots or 0) - occupied_slots
@@ -132,6 +160,30 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
         db, "SELECT COUNT(DISTINCT plate_number) FROM parking_sessions WHERE status = 'open'"
     ) or 0
 
+    entries_today = scalar(
+        db,
+        """
+        SELECT COUNT(*) FROM parking_sessions
+        WHERE status = 'open' AND entry_time >= :today
+        """,
+        {"today": facility_today_utc()},
+    ) or 0
+    exits_today = scalar(
+        db,
+        """
+        SELECT COUNT(*) FROM parking_sessions
+        WHERE status = 'closed' AND exit_time >= :today
+        """,
+        {"today": facility_today_utc()},
+    ) or 0
+    overstays_today = scalar(
+        db,
+        """
+        SELECT COUNT(*) FROM parking_sessions
+        WHERE status = 'open' AND entry_time < :cutoff
+        """,
+        {"cutoff": facility_today_utc() - timedelta(hours=24)},
+    ) or 0
     cols = _alerts_extra_cols()
     # Dashboard critical-alerts card counts TODAY's unresolved criticals only
     # (facility-local midnight onward), matching how the Entry/Exit KPIs scope
@@ -156,10 +208,15 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
 
     return DashboardKPIs(
         total_slots=total_slots or 0,
+        floors_count=floors_count or 0,
         free_slots=free_slots,
         occupied_slots=occupied_slots,
+        occupancy_pct=occupancy_pct,
         parked_vehicles=parked_vehicles,
         critical_alerts=critical_alerts or 0,
+        entries_today=entries_today,
+        exits_today=exits_today,
+        overstays_today=overstays_today,
     )
  
  

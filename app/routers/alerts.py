@@ -17,6 +17,8 @@ from app.schemas import (
     AlertDetail,
     AlertItem,
     AlertStats,
+    AlertSummary,
+    AlertTypeCount,
     CameraRef,
     EntityActionResponse,
     PagedResponse,
@@ -79,6 +81,25 @@ def _alerts_extra_cols() -> dict:
     finally:
         db.close()
  
+
+# Python mirror of the severity CASE in `_alert_query_bits` below, for the
+# pre-migration DB where `alerts.severity` doesn't exist AND the type has zero
+# rows — SQL can't report a severity for a bucket it returned no rows for, but
+# the summary card still needs one to colour the (empty) legend entry.
+_CRITICAL_TYPES = frozenset({
+    "violence", "intrusion", "vehicle_intrusion", "vehicle_violation",
+    "named_slot_violation", "special_needs_violation",
+})
+_WARNING_TYPES = frozenset({"unknown_vehicle", "overstay", "capacity_exceeded"})
+
+
+def _static_severity(alert_type: str) -> str:
+    if alert_type in _CRITICAL_TYPES:
+        return "critical"
+    if alert_type in _WARNING_TYPES:
+        return "warning"
+    return "info"
+
 
 def _alert_query_bits(cols: dict) -> dict[str, str]:
     """
@@ -286,6 +307,117 @@ async def alert_stats(db: Session = Depends(get_db)):
     )
  
  
+@router.get("/summary", response_model=AlertSummary)
+async def alert_summary(
+    resolved: Optional[bool] = Query(
+        False,
+        description=(
+            "Defaults to `false` — the Alerts Summary card is scoped to "
+            "*active* alerts, matching `/alerts/stats.active_alerts`. Pass "
+            "`null`/omit-with-explicit-null semantics via `resolved=` is not "
+            "supported; use `true` for the resolved breakdown."
+        ),
+    ),
+    severity: Optional[AlertSeverity] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    floor: Optional[str] = Query(None),
+    floor_id: Optional[int] = Query(None),
+    search: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Per-alert_type counts for the Alerts Summary donut.
+
+    Single GROUP BY rather than the N-round-trip alternative of calling
+    GET /alerts/?alert_type=X&page_size=1 once per AlertType and reading
+    `total_count`.
+
+    Filters are the same builder the list endpoint uses (`_where`), so every
+    slice is drill-down-exact: `?alert_type=<slice.alert_type>` plus the same
+    filters returns precisely the rows counted here.
+
+    Types with zero rows are included with `count: 0` so the legend keeps a
+    stable order and colour assignment across refreshes; the card filters to
+    `count > 0` before rendering. Note `named_slot_violation` is the legacy
+    name for `vehicle_intrusion` and is reported as its own slice — merging
+    them here would break the drill-down, since the list endpoint filters on
+    the raw column."""
+    cols = _alerts_extra_cols()
+    bits = _alert_query_bits(cols)
+    schema = _floor_schema()
+    resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=floor)
+    where, params = _where(
+        search, severity, None, resolved, date_from, date_to, cols,
+        floor_id=resolved_floor_id, floor=floor,
+    )
+
+    # Same JOINs as the list endpoint's COUNT query — `_where` may reference
+    # pk.floor / c.watches_floor, so they have to be in scope even when no
+    # floor filter is active.
+    floors_join = ""
+    if schema["floors_table"]:
+        floor_parts = ["pk.floor"]
+        if schema["cameras_watches_floor"]:
+            floor_parts.append("c.watches_floor")
+        floor_expr = (
+            f"COALESCE({', '.join(floor_parts)})"
+            if len(floor_parts) > 1
+            else floor_parts[0]
+        )
+        floors_join = f"LEFT JOIN floors f ON f.name = {floor_expr}"
+
+    grouped = rows(db, f"""
+        SELECT a.alert_type            AS alert_type,
+               MIN({bits["severity_expr"]}) AS severity,
+               COUNT(*)                AS count
+        FROM alerts a
+        {bits["slot_join"]}
+        LEFT JOIN cameras c ON c.camera_id = a.camera_id
+        {floors_join}
+        WHERE {where}
+        GROUP BY a.alert_type
+    """, params)
+
+    # MIN() over the severity expression collapses the per-row severity to one
+    # value per type. When `alerts.severity` is a real column a single type can
+    # in principle hold mixed severities; MIN is deterministic and alphabetical
+    # ('critical' < 'info' < 'warning'), which biases the slice colour toward
+    # the most urgent of the three. Without the column the expression is a pure
+    # function of alert_type, so the collapse is exact.
+    counts = {
+        (r.get("alert_type") or ""): (r.get("count") or 0, r.get("severity"))
+        for r in grouped
+    }
+
+    by_type: list[AlertTypeCount] = []
+    for known in AlertType:
+        count, sev = counts.pop(known.value, (0, None))
+        by_type.append(AlertTypeCount(
+            alert_type=known.value,
+            count=count,
+            severity=sev or _static_severity(known.value),
+        ))
+    # Anything upstream started emitting that AlertType doesn't cover yet —
+    # appended rather than dropped, so the card can't silently under-report.
+    for atype, (count, sev) in counts.items():
+        by_type.append(AlertTypeCount(
+            alert_type=atype,
+            count=count,
+            severity=sev or _static_severity(atype),
+        ))
+
+    # Queried independently of the slices — see AlertSummary docstring.
+    total = scalar(db, f"""
+        SELECT COUNT(*) FROM alerts a
+        {bits["slot_join"]}
+        LEFT JOIN cameras c ON c.camera_id = a.camera_id
+        {floors_join}
+        WHERE {where}
+    """, params) or 0
+
+    return AlertSummary(total=total, by_type=by_type)
+
+
 @router.get("/", response_model=PagedResponse[AlertItem])
 async def get_alerts(
     page: int = Query(1, ge=1),

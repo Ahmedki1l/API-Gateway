@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -47,6 +48,81 @@ class Settings(BaseSettings):
 
     # Facility-local clock offset from UTC, applied to "today" / "since-local-midnight" computations.
     facility_timezone_offset_hours: float = 3.0
+
+    # ── Reporting window (Report 1 / Occupancy & Utilization) ─────────────────
+    # The hours the facility actually operates, in facility-local time. When
+    # `report_business_hours_enabled` is on, occupancy percentages are computed
+    # against `capacity x these hours x days` instead of a full 24 hours, so
+    # empty overnight hours stop diluting the figure.
+    #
+    # Measured from this deployment's own data (Jul-Aug 2026): arrivals ramp at
+    # 07:00, plateau ~75% between 11:00 and 15:00, and the garage has drained by
+    # 18:00. That window holds 87.6% of all car-hours parked.
+    #
+    # `_to` is EXCLUSIVE — 7..18 means 07:00:00 through 17:59:59, i.e. 11 hours.
+    #
+    # NOTE: defaulting this to true DEPARTS from decision Q1 ("reporting window
+    # is the full 24 hours"). Set REPORT_BUSINESS_HOURS_ENABLED=false to restore
+    # the Q1 convention without a code change. All days of the week are counted;
+    # the weekend shows as two low bars in the Mon-Sun trend chart rather than
+    # being filtered out, so the KPI stays reconcilable with the chart below it.
+    report_business_hours_enabled: bool = True
+    report_business_hour_from: int = 7
+    report_business_hour_to: int = 18
+
+    # Days the facility operates, comma-separated (Mon Tue Wed Thu Fri Sat Sun,
+    # case-insensitive). Days outside this list are dropped from the occupancy
+    # denominators entirely — they are not "0% days", they are not-counted days.
+    #
+    # Default is ALL SEVEN, deliberately. This deployment's operating week is
+    # Sun-Thu (Fri/Sat average 1.7 and 3.0 sessions vs ~26), and excluding them
+    # lifts the KPI from 43.4% to 55.7% — but the Mon-Sun trend chart below the
+    # KPI always renders seven bars (Q5), so the headline would no longer be the
+    # average of the bars the operator can see. Counting all days keeps the two
+    # reconcilable; the weekend simply shows as two low bars.
+    #
+    # To switch to the operating week: REPORT_BUSINESS_DAYS=Sun,Mon,Tue,Wed,Thu
+    report_business_days: str = "Mon,Tue,Wed,Thu,Fri,Sat,Sun"
+
+    @field_validator("report_business_hour_from", "report_business_hour_to")
+    @classmethod
+    def _valid_hour(cls, v: int) -> int:
+        # 24 is legal for `_to` only (means "to end of day"); guard the range so
+        # a typo in .env fails at boot rather than silently zeroing a KPI.
+        if not 0 <= v <= 24:
+            raise ValueError("report business hours must be between 0 and 24")
+        return v
+
+    @model_validator(mode="after")
+    def _valid_business_window(self):
+        if self.report_business_hour_from >= self.report_business_hour_to:
+            raise ValueError(
+                "REPORT_BUSINESS_HOUR_FROM must be less than REPORT_BUSINESS_HOUR_TO"
+            )
+        # Parse eagerly so a typo ("Thur", "Sunday ") fails at boot with a clear
+        # message, rather than silently shrinking every occupancy denominator.
+        self.business_weekdays  # noqa: B018 — property raises on bad input
+        return self
+
+    @property
+    def business_weekdays(self) -> frozenset[int]:
+        """`report_business_days` as Python weekday ints (Mon=0 .. Sun=6),
+        matching `datetime.date.weekday()`."""
+        names = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+        parsed = set()
+        for token in self.report_business_days.split(","):
+            key = token.strip().lower()[:3]
+            if not key:
+                continue
+            if key not in names:
+                raise ValueError(
+                    f"REPORT_BUSINESS_DAYS: unrecognised day {token.strip()!r} "
+                    f"(expected any of Mon,Tue,Wed,Thu,Fri,Sat,Sun)"
+                )
+            parsed.add(names[key])
+        if not parsed:
+            raise ValueError("REPORT_BUSINESS_DAYS must list at least one day")
+        return frozenset(parsed)
 
     # Where the PMS-AI snapshot files appear inside the gateway container.
     # Mount the same volume PMS-AI writes to (read-only). When the directory
