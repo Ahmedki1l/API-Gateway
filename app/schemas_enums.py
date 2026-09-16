@@ -98,8 +98,13 @@ class SlotType(str, Enum):
 
 
 class CameraArea(str, Enum):
-    """`cameras.area` — physical sub-zone a camera is mounted in. Fixed
-    vocabulary: each floor (B1/B2) is split into sections A/B/C plus its RAMP."""
+    """`cameras.area` — physical sub-zone a camera is mounted in. Each floor
+    (B1/B2) is split into sections A/B/C plus its RAMP; the gate cameras sit
+    outside that grid and get their own two values.
+
+    This is the vocabulary for WRITES and for the `?area=` filter. Responses
+    do NOT enforce it — see `schemas.CameraRef.area`. Keep in sync with
+    `schemas.CameraAreaLiteral`."""
     B1_A = "B1-A"
     B1_B = "B1-B"
     B1_C = "B1-C"
@@ -108,6 +113,8 @@ class CameraArea(str, Enum):
     B2_B = "B2-B"
     B2_C = "B2-C"
     RAMP_DOWN = "RAMP-DOWN"
+    GATE_ENTRY = "GATE-ENTRY"
+    GATE_EXIT = "GATE-EXIT"
 
 
 class CameraRole(str, Enum):

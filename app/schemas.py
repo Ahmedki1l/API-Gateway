@@ -19,10 +19,15 @@ from pydantic import BaseModel, Field, StrictBool, field_validator, model_valida
 T = TypeVar("T")
 
 CameraRoleLiteral = Literal["entry", "exit", "floor_counting", "slot_detection", "other"]
-# Fixed camera-area vocabulary — keep in sync with schemas_enums.CameraArea.
+# Camera-area vocabulary accepted on WRITE — keep in sync with
+# schemas_enums.CameraArea. Deliberately NOT used on the read path: see
+# CameraRef.area for why a response must not enforce this list.
 CameraAreaLiteral = Literal[
     "B1-A", "B1-B", "B1-C", "RAMP-DOWN",
     "B2-A", "B2-B", "B2-C", "RAMP-UP",
+    # The gate cameras sit outside the floor/section grid. 'GATE-ENTRY' is
+    # already in the production registry and was rejected by this list.
+    "GATE-ENTRY", "GATE-EXIT",
 ]
 
 
@@ -127,9 +132,21 @@ class CameraRef(BaseModel):
     id: int
     camera_id: str
     name: Optional[str] = None
-    # Constrained physical sub-zone (B1-A/B/C/RAMP, B2-A/B/C/RAMP). On CameraRef
-    # so embedded camera refs (alerts, entry/exit) expose it too, not just /cameras.
-    area: Optional[CameraAreaLiteral] = None
+    # Physical sub-zone the camera is mounted in (B1-A/B/C, B2-A/B/C, RAMP-UP/
+    # RAMP-DOWN, GATE-ENTRY/GATE-EXIT). On CameraRef so embedded camera refs
+    # (alerts, entry/exit) expose it too, not just /cameras.
+    #
+    # `str`, NOT CameraAreaLiteral, and that asymmetry is deliberate. Writes are
+    # still constrained — CameraCreate/CameraUpdate keep the Literal, so the API
+    # refuses to store a value outside the vocabulary. But this is a READ of a
+    # column the gateway does not own: rows predate the vocabulary, arrive from
+    # PMS-AI, or get set by hand in SQL. Enforcing the list here turned one such
+    # row into a 500 for the WHOLE page — GET /cameras/?page=1 died on
+    # items[5].area == 'GATE-ENTRY' while /cameras/kpis (no CameraItem) stayed
+    # 200. A response model that rejects the database's own data takes the
+    # endpoint down instead of reporting the row, so unknown values pass through
+    # and the operator can see the bad value and fix it.
+    area: Optional[str] = None
     floor: Optional[str] = None
     # Phase-1 of WS-8 floor refactor; populated alongside `floor` while both keys live.
     floor_id: Optional[int] = None
