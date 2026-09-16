@@ -162,20 +162,21 @@ async def entry_exit_kpis(
     db: Session = Depends(get_db),
 ):
     if target_date:
-        # Specific date provided: filter for that 24h window in local time
-        local_tz = facility_tz()
-        dt_local = datetime.combine(target_date, datetime.min.time()).replace(tzinfo=local_tz)
-        start_utc = dt_local.astimezone(timezone.utc)
-        end_utc   = (dt_local + timedelta(days=1)).astimezone(timezone.utc)
+        # Specific date provided: filter for that 24h window in facility-local time.
+        # NAIVE local, not UTC-aware: parking_sessions timestamps are stored
+        # facility-local-naive (convention since 2026-05-07), so converting to UTC
+        # here shifted the whole window 3h earlier and made a target_date KPI cover
+        # 21:00 the previous evening → 21:00 that day.
+        dt_local = datetime.combine(target_date, datetime.min.time())
+        start_local = dt_local
+        end_local   = dt_local + timedelta(days=1)
         date_filter = "AND entry_time >= :start AND entry_time < :end"
-        exit_date_filter = "AND exit_time >= :start AND exit_time < :end"
-        params = {"start": start_utc, "end": end_utc}
+        params = {"start": start_local, "end": end_local}
     else:
-        # facility_today_utc() returns the UTC instant of facility-local midnight today.
-        start_utc = facility_today_utc()
+        # facility_today_utc() returns naive facility-local midnight today.
+        start_local = facility_today_utc()
         date_filter = "AND entry_time >= :start"
-        exit_date_filter = "AND exit_time >= :start"
-        params = {"start": start_utc}
+        params = {"start": start_local}
 
     total_enter = scalar(db, f"""
         SELECT COUNT(*)
@@ -183,10 +184,24 @@ async def entry_exit_kpis(
         WHERE 1=1 {date_filter}
     """, params)
 
+    # Counts on the SAME axis as the list endpoint (`?status=closed&date_from=…`),
+    # which filters `entry_time` — so this is "of the cars that entered in this
+    # window, how many have since left", NOT "how many cars left today".
+    #
+    # It used to filter `exit_time`, and the two surfaces then disagreed for every
+    # car that arrived before the window and left inside it: on 2026-09-16 the KPI
+    # card read 13 while the closed list underneath it showed 3, the 10 missing
+    # being overnight stays. `status = 'closed'` (not `exit_time IS NOT NULL`)
+    # mirrors the list's own predicate exactly; every writer of `exit_time` goes
+    # through `_close_session_record`, which sets both together.
+    #
+    # NOTE this makes the KPI blind to a car that entered yesterday and left
+    # today. If you ever want the exit-day meaning back, the list has to move to
+    # `exit_time` in the same commit or the cards drift apart again.
     total_exit = scalar(db, f"""
         SELECT COUNT(*)
         FROM parking_sessions
-        WHERE exit_time IS NOT NULL {exit_date_filter}
+        WHERE status = 'closed' {date_filter}
     """, params)
 
     # duration_seconds → minutes average (include open sessions using live elapsed time).
@@ -214,7 +229,7 @@ async def entry_exit_kpis(
         WHERE plate_number IS NOT NULL
           AND (status = 'open' OR status = 'overstay')
           AND entry_time < :start_of_today
-    """, {"start_of_today": start_utc})
+    """, {"start_of_today": start_local})
 
     return EntryExitKPIs(
         total_enter=total_enter or 0,
