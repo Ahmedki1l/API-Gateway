@@ -195,10 +195,14 @@ class DashboardKPIs(BaseModel):
     # `is_monitored = 1` rows — a slot VA can't observe can't be reported as
     # occupied. Pair with `parked_vehicles` to surface the blind-spot gap.
     occupied_slots: int
-    # Cars physically in the garage right now: count of open `parking_sessions`
-    # rows (line-crossing source of truth). `parked_vehicles - occupied_slots`
-    # is the count of cars VA can't place in a monitored slot — i.e. parked in
-    # a blind spot, parked in an unmarked area, or still driving.
+    # Cars physically on the property right now: count of open
+    # `parking_sessions` rows (line-crossing source of truth) PLUS occupied
+    # slots on gateless floors (`settings.ungated_floors`, default "Ground"),
+    # which have no entry/exit gate and therefore never open a session — those
+    # slots are de-duplicated against open sessions so a car is never counted
+    # twice. `parked_vehicles - occupied_slots` is the count of cars VA can't
+    # place in a monitored slot — i.e. parked in a blind spot, parked in an
+    # unmarked area, or still driving.
     parked_vehicles: int
     critical_alerts: int
 

@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.config import facility_today_utc, localize_naive
+from app.config import facility_today_utc, localize_naive, settings
 from app.database import get_db, scalar, rows
 from app.routers._helpers import _floor_schema
 from app.routers.alerts import _alerts_extra_cols
@@ -93,16 +93,62 @@ async def ai_status():
     )
 
 
+def _ungated_floor_parked(db: Session, slot_excl_pk: str, monitored_pk: str) -> int:
+    """Occupied slots on gateless floors that no open parking session covers.
+
+    See `settings.ungated_floors`. Returns 0 when the setting is empty.
+    Occupancy is read the same way `/dashboard/kpis` reads `occupied_slots`
+    (latest `slot_status` row per slot, non-vacant), so the two counters can't
+    disagree about what "occupied" means.
+    """
+    floors = settings.ungated_floors_list
+    if not floors:
+        return 0
+
+    params = {f"ungated{i}": name for i, name in enumerate(floors)}
+    floor_in = ", ".join(f":{k}" for k in params)
+
+    # Pre-ALPR-columns DBs have no `parking_slots.current_plate`; there the
+    # plate half of the de-dup check is simply skipped (slot_id still matches).
+    if _floor_schema().get("parking_slots_current_plate"):
+        plate_dedup = """
+             OR (pk.current_plate IS NOT NULL AND pk.current_plate <> ''
+                 AND ps.plate_number = pk.current_plate)"""
+    else:
+        plate_dedup = ""
+
+    return scalar(db, f"""
+        SELECT COUNT(*) FROM parking_slots pk
+        LEFT JOIN slot_status ss
+          ON ss.slot_id = pk.slot_id
+          AND ss.time = (SELECT MAX(time) FROM slot_status WHERE slot_id = pk.slot_id)
+        WHERE pk.is_violation_zone = 0
+          {slot_excl_pk}
+          {monitored_pk}
+          AND pk.floor IN ({floor_in})
+          AND ss.status IS NOT NULL
+          AND UPPER(ss.status) NOT IN ('EMPTY', 'AVAILABLE', 'FREE', 'VACANT')
+          AND NOT EXISTS (
+              SELECT 1 FROM parking_sessions ps
+              WHERE ps.status = 'open'
+                AND (ps.slot_id = pk.slot_id{plate_dedup})
+          )
+    """, params) or 0
+
+
 @router.get("/kpis", response_model=DashboardKPIs)
 async def dashboard_kpis(db: Session = Depends(get_db)):
     """Dashboard headline counters.
 
     `occupied_slots` is sourced from VA's `slot_status` table and restricted to
     monitored slots — it's the count of slot polygons VA currently sees a car in.
-    `parked_vehicles` is sourced from open `parking_sessions` (line-crossing at
-    entry/exit cameras) — the count of cars physically in the garage. The two
-    differ when cars park in blind spots or unmarked areas; the gap pairs with
-    `OccupancyKPIs.unmonitored_slots` to render blind-spot hints.
+    `parked_vehicles` is the count of cars physically on the property: open
+    `parking_sessions` (line-crossing at entry/exit cameras) PLUS occupied
+    slots on the gateless floors listed in `settings.ungated_floors` (Ground),
+    which produce no session at all because nothing there crosses a gate. The
+    two counters still differ when cars park in blind spots or unmarked areas;
+    the gap pairs with `OccupancyKPIs.unmonitored_slots` to render blind-spot
+    hints.
     """
     slot_excl = _slot_type_excl()
     slot_excl_pk = _slot_type_excl("pk")
@@ -131,6 +177,15 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
     parked_vehicles = scalar(
         db, "SELECT COUNT(DISTINCT plate_number) FROM parking_sessions WHERE status = 'open'"
     ) or 0
+
+    # Ungated floors (Ground, by default) have no entry/exit gate, so a car
+    # parked there never crosses a line/ANPR camera and never opens a
+    # `parking_sessions` row — the only evidence it exists is its occupied VA
+    # slot. Add those slots so `parked_vehicles` is the whole property, not
+    # just the gated basements. The NOT EXISTS de-duplicates the case where
+    # PMS-AI *did* manage to open a session for that slot (slot-recovery path,
+    # or an ALPR-identified plate), so a car is never counted twice.
+    parked_vehicles += _ungated_floor_parked(db, slot_excl_pk, monitored_pk)
 
     cols = _alerts_extra_cols()
     # Dashboard critical-alerts card counts TODAY's unresolved criticals only

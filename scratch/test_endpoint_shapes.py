@@ -164,6 +164,9 @@ print("=" * 72)
 use_db([
     # Order: specific → general. First match wins.
     (r"FROM parking_sessions WHERE status = 'open'",          7),    # open sessions
+    # Ungated-floor top-up — must precede the generic slot_status pattern,
+    # both queries contain `UPPER(ss.status) NOT IN`.
+    (r"pk\.floor IN \(",                                      2),    # occupied Ground slots
     (r"UPPER\(ss\.status\) NOT IN",                           5),    # dashboard occupied (slot_status)
     (r"severity='critical'",                                  3),    # critical alerts
     # Catch-all for the total_slots COUNT
@@ -178,7 +181,8 @@ if r.status_code == 200:
     check("total_slots == 30", body.get("total_slots") == 30,
           f"got {body.get('total_slots')}")
     check("has parked_vehicles", "parked_vehicles" in body)
-    check("parked_vehicles == 7 (open sessions only)", body.get("parked_vehicles") == 7,
+    check("parked_vehicles == 9 (7 open sessions + 2 ungated-floor slots)",
+          body.get("parked_vehicles") == 9,
           f"got {body.get('parked_vehicles')}")
     check("has occupied_slots", "occupied_slots" in body)
     check("has critical_alerts", "critical_alerts" in body)

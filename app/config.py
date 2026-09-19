@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     # Facility-local clock offset from UTC, applied to "today" / "since-local-midnight" computations.
     facility_timezone_offset_hours: float = 3.0
 
+    # Floors that have no entry/exit gate. Cars parked there never cross an
+    # ANPR/line-detection gate, so they never open a `parking_sessions` row —
+    # the only evidence they exist is an occupied VA slot. The dashboard's
+    # `parked_vehicles` KPI adds the occupied-slot count of these floors on
+    # top of the open-session count. Comma-separated `parking_slots.floor`
+    # names; empty string disables the top-up.
+    ungated_floors: str = "Ground"
+
     # Where the PMS-AI snapshot files appear inside the gateway container.
     # Mount the same volume PMS-AI writes to (read-only). When the directory
     # exists, /snapshots is exposed as a StaticFiles mount and DTO snapshot_url
@@ -88,6 +96,10 @@ class Settings(BaseSettings):
     @property
     def origins_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",")]
+
+    @property
+    def ungated_floors_list(self) -> list[str]:
+        return [f.strip() for f in self.ungated_floors.split(",") if f.strip()]
 
     class Config:
         env_file = ".env"
