@@ -19,6 +19,9 @@ from app.schemas import (
     FloorOccupancy,
     FloorSlotGroup,
     History,
+    OccupancyHeatmapCell,
+    OccupancyHeatmapResponse,
+    OccupancyHeatmapRow,
     OccupancyKPIs,
     OccupancyLocationItem,
     OccupancyLocationResponse,
@@ -207,6 +210,9 @@ async def occupancy_kpis(db: Session = Depends(get_db)):
         db,
         f"SELECT COUNT(*) FROM parking_slots WHERE is_violation_zone = 0 {_slot_type_excl()}",
     ) or 0
+    
+    # Active floors only — same set /occupancy/floors renders.
+    floors_count = scalar(db, "SELECT COUNT(*) FROM floors WHERE is_active = 1") or 0
 
     monitored_slots = scalar(
         db,
@@ -228,7 +234,13 @@ async def occupancy_kpis(db: Session = Depends(get_db)):
 
     # Coverage-aware: "available" is monitored − occupied, not total − occupied.
     available_slots = max(monitored_slots - occupied_slots, 0)
+    # All three percentages share the total_slots denominator, so occupied +
+    # available + uncovered always add up to ~100 (±0.1 from rounding).
+    # Computed from the counts, never as `100 - occupied%`: that would
+    # silently fold the uncovered slots into "available".
     overall_utilization = round(occupied_slots / total_slots * 100, 1) if total_slots else 0.0
+    available_pct = round(available_slots / total_slots * 100, 1) if total_slots else 0.0
+    unmonitored_pct = round(unmonitored_slots / total_slots * 100, 1) if total_slots else 0.0
 
     active_vehicles = scalar(
         db, "SELECT COUNT(DISTINCT plate_number) FROM parking_sessions WHERE status = 'open'"
@@ -237,11 +249,14 @@ async def occupancy_kpis(db: Session = Depends(get_db)):
     return OccupancyKPIs(
         total_slots=total_slots,
         available_slots=available_slots,
+        floors_count=floors_count,
         occupied_slots=occupied_slots,
         overall_utilization=overall_utilization,
+        available_pct=available_pct,
         total_vehicles=active_vehicles or 0,
         monitored_slots=monitored_slots,
         unmonitored_slots=unmonitored_slots,
+        unmonitored_pct=unmonitored_pct,
     )
 
 
@@ -1863,6 +1878,107 @@ async def occupancy_report_trend(
         points=_report_trend(base, grain),
         **base.window_meta(),
     )
+
+
+# ── Peak Hours heatmap ────────────────────────────────────────────────────────
+
+def _report_heatmap(base: _ReportBase, block_hours: int) -> OccupancyHeatmapResponse:
+    """Weekday x hour-band grid of typical occupancy.
+
+    Same statistic as the `weekday` trend grain, one level finer: for every
+    (date, band) the range covers, a time-weighted occupancy % over the band's
+    counted seconds; then each cell is the MEAN over the dates that fell on
+    that weekday. Mean-of-daily-values (not a pooled ratio) so a date clipped
+    by the range edge still counts as one observation, exactly like Q5."""
+    # Rows follow the reporting window: with business hours on, the rows are
+    # the operating hours only — bands the garage is closed in would be a
+    # permanent 0% stripe.
+    row_from, row_to = (base.h_from, base.h_to) if base.applied else (0, 24)
+    rows_ = []
+    h = row_from
+    while h < row_to:
+        end = min(h + block_hours, row_to)
+        rows_.append(OccupancyHeatmapRow(
+            index=len(rows_), hour_from=h, hour_to=end,
+            label=f"{h:02d}:00-{end:02d}:00",
+        ))
+        h = end
+
+    def _row_of(hour: int) -> Optional[int]:
+        if not (row_from <= hour < row_to):
+            return None
+        return (hour - row_from) // block_hours
+
+    # Denominator and numerator per (date, row). An hour counted_span() drops
+    # (outside business hours / days, outside the range) leaves both.
+    offered: dict = {}
+    cursor = base.start_time.replace(minute=0, second=0, microsecond=0)
+    while cursor < base.end_time:
+        span = base.counted_span(cursor)
+        r = _row_of(cursor.hour)
+        if span and r is not None:
+            key = (cursor.date(), r)
+            offered[key] = offered.get(key, 0.0) + span
+        cursor += timedelta(hours=1)
+
+    occupied: dict = {}
+    for b in base.buckets:
+        hour_start = b["bucket_start"]
+        r = _row_of(hour_start.hour)
+        if r is not None and base.counted_span(hour_start):
+            key = (hour_start.date(), r)
+            occupied[key] = occupied.get(key, 0) + int(b["total_occupied_seconds"] or 0)
+
+    samples: dict = {}
+    if base.total_capacity:
+        for (d, r), secs in offered.items():
+            samples.setdefault((d.weekday(), r), []).append(
+                occupied.get((d, r), 0) / (base.total_capacity * secs) * 100
+            )
+
+    cells = []
+    for wd in range(7):
+        for row in rows_:
+            vals = samples.get((wd, row.index), [])
+            cells.append(OccupancyHeatmapCell(
+                weekday=_WEEKDAY_NAMES[wd], weekday_index=wd, row_index=row.index,
+                # Clamp: slot_status overlap at a transition can nudge a
+                # single sample a hair past 100.
+                occupancy=round(min(sum(vals) / len(vals), 100.0), 1) if vals else None,
+                days_sampled=len(vals),
+            ))
+
+    measured = [c for c in cells if c.occupancy is not None]
+    peak = max(measured, key=lambda c: c.occupancy) if measured else None
+
+    return OccupancyHeatmapResponse(
+        block_hours=block_hours, rows=rows_, cells=cells, peak=peak,
+        **base.window_meta(),
+    )
+
+
+@router.get("/history/heatmap", response_model=OccupancyHeatmapResponse)
+async def occupancy_report_heatmap(
+    block_hours: int = Query(
+        3, ge=1, le=12,
+        description="Height of each Y-axis band in hours. Bands start at the "
+                    "reporting window's first hour; the last band is shorter "
+                    "when the window isn't a multiple of this.",
+    ),
+    base: _ReportBase = Depends(_report_base_dep),
+):
+    """Peak Hours heatmap — typical occupancy by weekday x time of day.
+
+    Same data and same time-weighted method as `/history/trend`, arranged as
+    a weekly pattern instead of a timeline: each cell averages every
+    occurrence of that weekday in the range, so the range should span several
+    weeks (4 recommended) — with one week every cell is a single day.
+
+    Rows follow the reporting window (`business_hours` / `hour_from` /
+    `hour_to`, else `.env`); with `business_hours=false` they cover 00-24.
+    Non-operating days come back as NULL cells, not 0%.
+    """
+    return _report_heatmap(base, block_hours)
 
 
 # ── Utilization by Location chart ─────────────────────────────────────────────

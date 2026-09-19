@@ -585,10 +585,15 @@ class OccupancyKPIs(BaseModel):
     # Slots VA can currently fill (= monitored_slots − occupied_slots).
     # `coverage_note` explains the basis to the operator.
     available_slots: int
+    # Active floors (floors.is_active = 1) — the "Across N Parkings" subtitle.
+    floors_count: int
     # Slots whose latest VA `slot_status` row reads non-vacant, restricted to
     # monitored rows. Same coverage caveat as `available_slots`.
     occupied_slots: int
+    # Percentages of `total_slots`, 1 decimal: occupied / available / uncovered.
+    # The three add up to ~100.
     overall_utilization: float
+    available_pct: float
     total_vehicles: int
     # Blind-spot accounting (parking_slots.is_monitored): `monitored_slots` is
     # the count VA can observe; `unmonitored_slots` is the rest. `total_slots`
@@ -596,6 +601,7 @@ class OccupancyKPIs(BaseModel):
     # `unmonitored_slots`.
     monitored_slots: int = 0
     unmonitored_slots: int = 0
+    unmonitored_pct: float = 0.0
     # Operator-facing subtitle shared by the Available + Occupied cards.
     # Explains why those numbers count over monitored slots only — the
     # uncovered slots are excluded because VA can't observe them.
@@ -878,6 +884,41 @@ class OccupancyTrendResponse(OccupancyReportWindow):
     """`GET /occupancy/history/trend` — the Occupancy Trend chart alone."""
     grain: str                           # echoed back: the grain actually used
     points: list[OccupancyTrendPoint]
+
+
+class OccupancyHeatmapRow(BaseModel):
+    """One Y-axis band of the Peak Hours heatmap: `[hour_from, hour_to)`,
+    facility-local. The last band is shorter when the window isn't a multiple
+    of `block_hours` (07-18 in 3h blocks ends with 16-18)."""
+    index: int
+    hour_from: int                       # inclusive
+    hour_to: int                         # exclusive; 24 = midnight
+    label: str                           # '07:00-10:00'
+
+
+class OccupancyHeatmapCell(BaseModel):
+    """One (weekday x hour band) cell."""
+    weekday: str                         # 'Mon'..'Sun'
+    weekday_index: int                   # 0 = Mon
+    row_index: int                       # -> OccupancyHeatmapRow.index
+    # Mean over every date in the range that fell on this weekday, of that
+    # date's time-weighted occupancy % inside this band. NULL when no such
+    # date was measured (range too short, or a non-operating day) — render as
+    # "no data", never as 0%.
+    occupancy: Optional[float] = None
+    days_sampled: int
+
+
+class OccupancyHeatmapResponse(OccupancyReportWindow):
+    """`GET /occupancy/history/heatmap` — the Peak Hours heatmap.
+
+    `cells` is flat and always complete: 7 x len(rows) entries, Mon-first,
+    then by row — so the FE can index `cells[weekday_index * len(rows) +
+    row_index]` or just group by the two indices."""
+    block_hours: int
+    rows: list[OccupancyHeatmapRow]
+    cells: list[OccupancyHeatmapCell]
+    peak: Optional[OccupancyHeatmapCell] = None   # busiest cell, None if all NULL
 
 
 class OccupancyLocationResponse(OccupancyReportWindow):

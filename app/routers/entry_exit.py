@@ -171,11 +171,13 @@ async def entry_exit_kpis(
         start_local = dt_local
         end_local   = dt_local + timedelta(days=1)
         date_filter = "AND entry_time >= :start AND entry_time < :end"
+        exit_filter = "AND exit_time >= :start AND exit_time < :end"
         params = {"start": start_local, "end": end_local}
     else:
         # facility_today_utc() returns naive facility-local midnight today.
         start_local = facility_today_utc()
         date_filter = "AND entry_time >= :start"
+        exit_filter = "AND exit_time >= :start"
         params = {"start": start_local}
 
     total_enter = scalar(db, f"""
@@ -184,24 +186,19 @@ async def entry_exit_kpis(
         WHERE 1=1 {date_filter}
     """, params)
 
-    # Counts on the SAME axis as the list endpoint (`?status=closed&date_from=…`),
-    # which filters `entry_time` — so this is "of the cars that entered in this
-    # window, how many have since left", NOT "how many cars left today".
+    # Every session CLOSED in the window, on the exit axis: a car that entered
+    # yesterday and left today counts as one of today's exits. Same definition
+    # as /dashboard/kpis.exits_today.
     #
-    # It used to filter `exit_time`, and the two surfaces then disagreed for every
-    # car that arrived before the window and left inside it: on 2026-09-16 the KPI
-    # card read 13 while the closed list underneath it showed 3, the 10 missing
-    # being overnight stays. `status = 'closed'` (not `exit_time IS NOT NULL`)
-    # mirrors the list's own predicate exactly; every writer of `exit_time` goes
-    # through `_close_session_record`, which sets both together.
-    #
-    # NOTE this makes the KPI blind to a car that entered yesterday and left
-    # today. If you ever want the exit-day meaning back, the list has to move to
-    # `exit_time` in the same commit or the cards drift apart again.
+    # Its drill-down is `?status=closed&exit_date_from=...` on the list/CSV, NOT
+    # `date_from` (entry axis). The 2026-09-16 "card 13 vs list 3" drift came
+    # from pairing this KPI with the entry-date filter; keep the two on the same
+    # axis. `status = 'closed'` <=> `exit_time IS NOT NULL`: every writer goes
+    # through `_close_session_record`, which sets both.
     total_exit = scalar(db, f"""
         SELECT COUNT(*)
         FROM parking_sessions
-        WHERE status = 'closed' {date_filter}
+        WHERE status = 'closed' {exit_filter}
     """, params)
 
     # duration_seconds → minutes average (include open sessions using live elapsed time).
@@ -426,6 +423,10 @@ async def get_entry_exit(
     status: Optional[ParkingSessionStatus] = Query(None),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
+    # Exit-axis sibling of date_from/date_to: filters on the day the car LEFT.
+    # Drill-down for the Exits KPI (/entry-exit/kpis.total_exit).
+    exit_date_from: Optional[date] = Query(None),
+    exit_date_to: Optional[date] = Query(None),
     min_duration_seconds: Optional[int] = Query(None, ge=0),
     max_duration_seconds: Optional[int] = Query(None, ge=0),
     db: Session = Depends(get_db),
@@ -471,6 +472,12 @@ async def get_entry_exit(
     if date_to:
         clauses.append("CAST(ps.entry_time AS DATE) <= :date_to")
         params["date_to"] = str(date_to)
+    if exit_date_from:
+        clauses.append("CAST(ps.exit_time AS DATE) >= :exit_date_from")
+        params["exit_date_from"] = str(exit_date_from)
+    if exit_date_to:
+        clauses.append("CAST(ps.exit_time AS DATE) <= :exit_date_to")
+        params["exit_date_to"] = str(exit_date_to)
     if min_duration_seconds is not None:
         clauses.append("ps.duration_seconds >= :min_dur")
         params["min_dur"] = min_duration_seconds
@@ -536,6 +543,10 @@ async def export_entry_exit_csv(
     status: Optional[ParkingSessionStatus] = Query(None),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
+    # Exit-axis sibling of date_from/date_to: filters on the day the car LEFT.
+    # Drill-down for the Exits KPI (/entry-exit/kpis.total_exit).
+    exit_date_from: Optional[date] = Query(None),
+    exit_date_to: Optional[date] = Query(None),
     min_duration_seconds: Optional[int] = Query(None, ge=0),
     max_duration_seconds: Optional[int] = Query(None, ge=0),
     db: Session = Depends(get_db),
@@ -574,6 +585,12 @@ async def export_entry_exit_csv(
     if date_to:
         clauses.append("CAST(ps.entry_time AS DATE) <= :date_to")
         params["date_to"] = str(date_to)
+    if exit_date_from:
+        clauses.append("CAST(ps.exit_time AS DATE) >= :exit_date_from")
+        params["exit_date_from"] = str(exit_date_from)
+    if exit_date_to:
+        clauses.append("CAST(ps.exit_time AS DATE) <= :exit_date_to")
+        params["exit_date_to"] = str(exit_date_to)
     if min_duration_seconds is not None:
         clauses.append("ps.duration_seconds >= :min_dur")
         params["min_dur"] = min_duration_seconds
@@ -640,6 +657,10 @@ async def get_events_by_vehicle(
     floor_id: Optional[int] = Query(None),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
+    # Exit-axis sibling of date_from/date_to: filters on the day the car LEFT.
+    # Drill-down for the Exits KPI (/entry-exit/kpis.total_exit).
+    exit_date_from: Optional[date] = Query(None),
+    exit_date_to: Optional[date] = Query(None),
     min_duration_seconds: Optional[int] = Query(None, ge=0),
     max_duration_seconds: Optional[int] = Query(None, ge=0),
     db: Session = Depends(get_db),
@@ -685,6 +706,12 @@ async def get_events_by_vehicle(
     if date_to:
         clauses.append("CAST(ps.entry_time AS DATE) <= :date_to")
         params["date_to"] = str(date_to)
+    if exit_date_from:
+        clauses.append("CAST(ps.exit_time AS DATE) >= :exit_date_from")
+        params["exit_date_from"] = str(exit_date_from)
+    if exit_date_to:
+        clauses.append("CAST(ps.exit_time AS DATE) <= :exit_date_to")
+        params["exit_date_to"] = str(exit_date_to)
     if min_duration_seconds is not None:
         clauses.append("ps.duration_seconds >= :min_dur")
         params["min_dur"] = min_duration_seconds

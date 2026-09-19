@@ -137,9 +137,9 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
         SELECT COUNT(*) FROM parking_slots
         WHERE is_violation_zone = 0 {slot_excl}
     """)
-    floors_count = scalar(db, f"""
-        SELECT COUNT(DISTINCT id) FROM floors
-        """)
+    # Active floors only — the same set /occupancy/floors renders as bars, so
+    # "Across N parkings" always matches the number of rows under it.
+    floors_count = scalar(db, "SELECT COUNT(*) FROM floors WHERE is_active = 1")
     occupied_slots = scalar(db, f"""
         SELECT COUNT(*) FROM parking_slots pk
         LEFT JOIN slot_status ss
@@ -151,38 +151,55 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
           AND ss.status IS NOT NULL
           AND UPPER(ss.status) NOT IN ('EMPTY', 'AVAILABLE', 'FREE', 'VACANT')
     """)
-    occupancy_pct = (occupied_slots or 0) / (total_slots or 1) * 100
+    occupancy_pct = round((occupied_slots or 0) / (total_slots or 1) * 100, 1)
 
     occupied_slots = occupied_slots or 0
-    free_slots = (total_slots or 0) - occupied_slots
+    # Coverage-aware, same as /occupancy/kpis and /occupancy/floors: a slot VA
+    # can't see can't be offered as free, so this is monitored − occupied.
+    monitored_slots = scalar(db, f"""
+        SELECT COUNT(*) FROM parking_slots
+        WHERE is_violation_zone = 0 {slot_excl} {_monitored_only()}
+    """) or 0
+    free_slots = max(monitored_slots - occupied_slots, 0)
 
     parked_vehicles = scalar(
         db, "SELECT COUNT(DISTINCT plate_number) FROM parking_sessions WHERE status = 'open'"
     ) or 0
 
+    # Entries / Exits / Overstays use exactly the definitions of
+    # /entry-exit/kpis (no target_date), so the dashboard cards and the
+    # Entry/Exit page can never show different numbers under the same label.
+    today = facility_today_utc()
+
+    # Every session that entered since local midnight, whatever its status —
+    # a car that came in and already left is still one of today's entries.
     entries_today = scalar(
         db,
-        """
-        SELECT COUNT(*) FROM parking_sessions
-        WHERE status = 'open' AND entry_time >= :today
-        """,
-        {"today": facility_today_utc()},
+        "SELECT COUNT(*) FROM parking_sessions WHERE entry_time >= :today",
+        {"today": today},
     ) or 0
+    # Every session closed since local midnight, on the EXIT axis — a car that
+    # entered yesterday and left today counts here (and drops out of
+    # overstays_today at the same moment). Drill-down: the Entry/Exit list with
+    # ?status=closed&exit_date_from=<today>.
     exits_today = scalar(
         db,
         """
         SELECT COUNT(*) FROM parking_sessions
         WHERE status = 'closed' AND exit_time >= :today
         """,
-        {"today": facility_today_utc()},
+        {"today": today},
     ) or 0
+    # Overstay = still inside after crossing local midnight.
     overstays_today = scalar(
         db,
         """
-        SELECT COUNT(*) FROM parking_sessions
-        WHERE status = 'open' AND entry_time < :cutoff
+        SELECT COUNT(DISTINCT plate_number) FROM parking_sessions
+        WHERE plate_number IS NOT NULL
+          AND status IN ('open', 'overstay')
+          AND entry_time < :today
         """,
-        {"cutoff": facility_today_utc() - timedelta(hours=24)},
+        {"today": today},
     ) or 0
     cols = _alerts_extra_cols()
     # Dashboard critical-alerts card counts TODAY's unresolved criticals only
@@ -220,68 +237,3 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
     )
  
  
-@router.get("/active-vehicles", response_model=list[ActiveVehicle], deprecated=True)
-async def active_vehicles(db: Session = Depends(get_db)):
-    """Open parking sessions merged with live System 2 slot data.
-
-    **Deprecated (G-20).** Prefer `GET /vehicles/?is_currently_parked=true`
-    which returns the same set of currently-parked vehicles wrapped in the
-    canonical `PagedResponse[VehicleListItem]` envelope (with filters,
-    pagination, and CSV export). This endpoint is retained only so existing
-    dashboards keep working while the frontend migrates; it will be removed
-    in Phase 4C.
-    """
-    # WS-8.E: ps.floor_id added so ActiveVehicle.floor_id can populate.
-    # Pre-WS-8 DB tolerance: when ps.floor_id doesn't exist yet, emit NULL.
-    schema = _floor_schema()
-    ps_floor_id_sel = "ps.floor_id" if schema["parking_sessions_floor_id"] else "NULL AS floor_id"
-    sql_rows = rows(db, f"""
-        SELECT
-            ps.id                                       AS vehicle_event_id,
-            ps.vehicle_id,
-            ps.plate_number,
-            ps.entry_time,
-            ps.floor,
-            {ps_floor_id_sel},
-            ps.slot_id,
-            COALESCE(pk.slot_name, ps.slot_number)      AS slot_name,
-            ps.slot_number,
-            ps.is_employee,
-            ps.entry_snapshot_path,
-            COALESCE(v_id.owner_name, v_plate.owner_name) AS owner_name,
-            COALESCE(v_id.vehicle_type, v_plate.vehicle_type, ps.vehicle_type) AS vehicle_type
-        FROM parking_sessions ps
-    """ + VEHICLE_JOIN + """
-        LEFT JOIN parking_slots pk ON pk.slot_id = ps.slot_id
-        WHERE ps.status = 'open'
-        ORDER BY ps.entry_time DESC
-    """)
-
-    sql_map = {r["plate_number"]: r for r in sql_rows}
-
-    # Merge with System 2 live data (may have fresher slot/floor info)
-    live = await get_live_vehicles()
-    live_map = {v.get("plate_number") or v.get("plate"): v for v in live}
-
-    result = []
-    for plate, meta in sql_map.items():
-        live_data = live_map.get(plate, {})
-        result.append(ActiveVehicle(
-            plate_number=plate,
-            vehicle_id=meta.get("vehicle_id"),
-            entry_time=localize_naive(meta["entry_time"]),
-            owner_name=meta["owner_name"],
-            vehicle_type=meta["vehicle_type"],
-            is_employee=meta["is_employee"],
-            floor=live_data.get("floor") or meta["floor"],
-            # WS-8.E: integer-id sibling field; live System 2 may not include it
-            # yet, so fall back to the session row's floor_id.
-            floor_id=live_data.get("floor_id") or meta.get("floor_id"),
-            # prefer live data for slot placement, fall back to session slot_id/name
-            slot_id=live_data.get("slot_id") or meta.get("slot_id"),
-            slot_name=live_data.get("slot_name") or meta.get("slot_name"),
-            vehicle_event_id=meta.get("vehicle_event_id"),
-            thumbnail_url=resolve_snapshot_url(live_data.get("thumbnail_url") or meta["entry_snapshot_path"]),
-        ))
-
-    return result
