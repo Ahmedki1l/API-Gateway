@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -36,47 +37,35 @@ VEHICLE_JOIN = """
 """
  
  
-_HEALTHY_STATUSES = {"ok", "healthy"}
-
-
-def _derive_health(raw_status: Optional[str]) -> str:
-    """Collapse an upstream's raw `/health` `status` string into the small
-    vocabulary the dashboard UI styles: `healthy` when the upstream reports
-    ok/healthy, `unreachable` when nothing came back at all, otherwise the
-    raw value (e.g. `degraded`) is passed through unchanged."""
-    if raw_status in _HEALTHY_STATUSES:
-        return "healthy"
-    if not raw_status:
-        return "unreachable"
-    return raw_status
+def _derive_health(http_status: Optional[int]) -> str:
+    """The dashboard measures exact HTTP-200 responses, not body status."""
+    return "healthy" if http_status == 200 else "unreachable"
 
 
 @router.get("/ai-status", response_model=AIStatusResponse)
 async def ai_status():
-    s1, s2 = await get_system1_health(), await get_system2_health()
+    s1, s2 = await asyncio.gather(get_system1_health(), get_system2_health())
 
     systems = [
         SystemStatus(
             name="PMS-AI",
-            health=_derive_health(s1.get("status")),
+            health=_derive_health(s1.get("http_status")),
             timestamp=s1.get("timestamp"),
             last_connected_at=get_system1_last_connected_at(),
         ),
         SystemStatus(
             name="VideoAnalytics",
-            health=_derive_health(s2.get("status")),
+            health=_derive_health(s2.get("http_status")),
             timestamp=s2.get("timestamp"),
             last_connected_at=get_system2_last_connected_at(),
         ),
     ]
 
     issues: list[dict] = []
-    if s1.get("status") not in _HEALTHY_STATUSES:
-        issues.append({"system": "PMS-AI", "reason": s1.get("error") or s1.get("status")})
-    for failure in s1.get("failures", []):
-        issues.append({"system": "PMS-AI", "reason": failure})
-    if s2.get("status") not in _HEALTHY_STATUSES:
-        issues.append({"system": "VideoAnalytics", "reason": s2.get("error") or s2.get("status")})
+    if s1.get("http_status") != 200:
+        issues.append({"system": "PMS-AI", "reason": s1["error"]})
+    if s2.get("http_status") != 200:
+        issues.append({"system": "VideoAnalytics", "reason": s2["error"]})
 
     healthy_count = sum(1 for sys in systems if sys.health == "healthy")
     if healthy_count == len(systems):
