@@ -164,16 +164,16 @@ class SystemStatus(BaseModel):
     `name` is the human-readable label ("PMS-AI", "VideoAnalytics") so the
     frontend can render the row directly without mapping a key like
     `system1` → "PMS-AI" itself. `health` collapses the upstream's raw
-    status string into a small vocabulary the UI styles consistently
-    (`healthy` / `degraded` / `unreachable`).
+    HTTP response into `healthy` (exactly 200) or `unreachable` (other
+    status codes or transport failure), independently of its body status.
     """
     name: str
     health: str
     # `timestamp`: whatever the upstream's /health endpoint reports (might be
     # null when the upstream is unreachable).
     timestamp: Optional[str] = None
-    # `last_connected_at`: the most recent successful connection from the
-    # Gateway side. Survives upstream outages — useful for "last seen at …" UI.
+    # Most recent HTTP-200 health check observed by this Gateway process.
+    # Null after process startup until a health check succeeds.
     last_connected_at: Optional[datetime] = None
 
 

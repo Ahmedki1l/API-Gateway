@@ -23,12 +23,8 @@ from app.config import settings
 
 SSE_TIMEOUT = httpx.Timeout(10.0, read=None)
 
-# Health probes must fail fast. `timeout=30.0` on the request clients also
-# caps how long a *single* `/dashboard/ai-status` call can block, and 30s of
-# waiting tells us nothing a few seconds wouldn't — meanwhile the dashboard
-# card spins for the full half-minute. It also used to race the upstream's own
-# 30s DB-pool timeout, so a pool-starved upstream never got to answer
-# "degraded" before we gave up and called it unreachable.
+# Each health probe has both HTTP phase timeouts and an overall deadline.
+# Other upstream requests retain their independent 30-second setting.
 HEALTH_TIMEOUT = 8.0
 
 _REQUEST_LIMITS = httpx.Limits(max_connections=50, max_keepalive_connections=10)
@@ -101,7 +97,7 @@ class _SSEBackoff:
 _sse_breaker_system1 = _SSEBackoff()
 _sse_breaker_system2 = _SSEBackoff()
 
-# Last successful (2xx) connection timestamp per upstream — survives only for
+# Last HTTP-200 health check per upstream — survives only for
 # the lifetime of the Gateway process. The dashboard uses these to surface a
 # "system was last seen at …" indicator even after the upstream goes down.
 _system1_last_connected_at: Optional[datetime] = None
@@ -130,51 +126,49 @@ def _describe_exc(exc: Exception) -> str:
 
 
 def _health_payload(r: httpx.Response) -> dict:
-    """Normalise an upstream `/health` response into something the dashboard
-    can always render. Non-2xx bodies keep whatever `status` they declared
-    (an upstream is allowed to answer `degraded` with a non-200) but are
-    guaranteed to carry a status and an error naming the HTTP code, so a 500
-    or an HTML error page from a proxy never arrives as a blank reason."""
+    """Only HTTP 200 passes; body diagnostics never affect this check."""
+    health = {"http_status": r.status_code, "timestamp": None}
+    if r.status_code != 200:
+        health["error"] = f"HTTP {r.status_code}"
     try:
         payload = r.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {"status": payload}
-    if not r.is_success:
-        payload.setdefault("status", "unreachable")
-        payload.setdefault("error", f"HTTP {r.status_code}")
-    return payload
+    except ValueError:
+        return health
+    if isinstance(payload, dict) and isinstance(payload.get("timestamp"), str):
+        health["timestamp"] = payload["timestamp"]
+    return health
+
+
+async def _probe_health(client: httpx.AsyncClient, path: str) -> dict:
+    try:
+        response = await asyncio.wait_for(
+            client.get(path, timeout=HEALTH_TIMEOUT), timeout=HEALTH_TIMEOUT
+        )
+        return _health_payload(response)
+    except (httpx.RequestError, asyncio.TimeoutError) as exc:
+        return {"http_status": None, "error": _describe_exc(exc)}
 
 
 async def get_system1_health() -> dict:
     global _system1_last_connected_at
-    try:
-        r = await _system1.get("/api/v1/health", timeout=HEALTH_TIMEOUT)
-        if r.is_success:
-            _system1_last_connected_at = datetime.now(timezone.utc)
-        return _health_payload(r)
-    except Exception as e:
-        return {"status": "unreachable", "error": _describe_exc(e)}
+    health = await _probe_health(_system1, "/api/v1/health")
+    if health["http_status"] == 200:
+        _system1_last_connected_at = datetime.now(timezone.utc)
+    return health
 
 
 async def get_system2_health() -> dict:
     global _system2_last_connected_at
-    try:
-        r = await _system2.get("/api/health", timeout=HEALTH_TIMEOUT)
-        if r.is_success:
-            _system2_last_connected_at = datetime.now(timezone.utc)
-        return _health_payload(r)
-    except Exception as e:
-        return {"status": "unreachable", "error": _describe_exc(e)}
+    health = await _probe_health(_system2, "/api/health")
+    if health["http_status"] == 200:
+        _system2_last_connected_at = datetime.now(timezone.utc)
+    return health
 
 
 async def get_live_vehicles() -> list[dict]:
-    global _system2_last_connected_at
     try:
         r = await _system2.get("/api/vehicles")
         if r.is_success:
-            _system2_last_connected_at = datetime.now(timezone.utc)
             return r.json()
         return []
     except Exception:
@@ -182,11 +176,9 @@ async def get_live_vehicles() -> list[dict]:
 
 
 async def get_live_slots() -> list[dict]:
-    global _system2_last_connected_at
     try:
         r = await _system2.get("/api/slots")
         if r.is_success:
-            _system2_last_connected_at = datetime.now(timezone.utc)
             return r.json()
         return []
     except Exception:
@@ -194,11 +186,9 @@ async def get_live_slots() -> list[dict]:
 
 
 async def get_system2_stats() -> dict:
-    global _system2_last_connected_at
     try:
         r = await _system2.get("/api/stats")
         if r.is_success:
-            _system2_last_connected_at = datetime.now(timezone.utc)
             return r.json()
         return {}
     except Exception:
