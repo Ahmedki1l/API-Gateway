@@ -465,11 +465,13 @@ async def get_entry_exit(
         else:
             clauses.append("ps.status = :status")
             params["status"] = status
+    # Completed visits are selected by departure date, including overnight stays.
+    date_column = "ps.exit_time" if status == ParkingSessionStatus.closed else "ps.entry_time"
     if date_from:
-        clauses.append("CAST(ps.entry_time AS DATE) >= :date_from")
+        clauses.append(f"CAST({date_column} AS DATE) >= :date_from")
         params["date_from"] = str(date_from)
     if date_to:
-        clauses.append("CAST(ps.entry_time AS DATE) <= :date_to")
+        clauses.append(f"CAST({date_column} AS DATE) <= :date_to")
         params["date_to"] = str(date_to)
     if min_duration_seconds is not None:
         clauses.append("ps.duration_seconds >= :min_dur")
@@ -568,11 +570,13 @@ async def export_entry_exit_csv(
         else:
             clauses.append("ps.status = :status")
             params["status"] = status
+    # Completed visits are selected by departure date, including overnight stays.
+    date_column = "ps.exit_time" if status == ParkingSessionStatus.closed else "ps.entry_time"
     if date_from:
-        clauses.append("CAST(ps.entry_time AS DATE) >= :date_from")
+        clauses.append(f"CAST({date_column} AS DATE) >= :date_from")
         params["date_from"] = str(date_from)
     if date_to:
-        clauses.append("CAST(ps.entry_time AS DATE) <= :date_to")
+        clauses.append(f"CAST({date_column} AS DATE) <= :date_to")
         params["date_to"] = str(date_to)
     if min_duration_seconds is not None:
         clauses.append("ps.duration_seconds >= :min_dur")
