@@ -115,7 +115,7 @@ def _alert_query_bits(cols: dict) -> dict[str, str]:
             # Keep the legacy name in the critical bucket so historical rows
             # render with the correct severity in the meantime.
             "WHEN a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation') THEN 'critical' "
-            "WHEN a.alert_type IN ('unknown_vehicle','overstay','capacity_exceeded','special_needs_review') THEN 'warning' "
+            "WHEN a.alert_type IN ('unknown_vehicle','overstay','capacity_exceeded') THEN 'warning' "
             "ELSE 'info' END"
         )
     )
@@ -172,9 +172,9 @@ def _where(search, severity, alert_type, resolved, date_from, date_to, cols, flo
                 # to critical.
                 clauses.append("a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation')")
             elif severity == "warning":
-                clauses.append("a.alert_type IN ('unknown_vehicle','overstay','capacity_exceeded','special_needs_review')")
+                clauses.append("a.alert_type IN ('unknown_vehicle','overstay','capacity_exceeded')")
             else:
-                clauses.append("a.alert_type NOT IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation','unknown_vehicle','overstay','capacity_exceeded','special_needs_review')")
+                clauses.append("a.alert_type NOT IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation','unknown_vehicle','overstay','capacity_exceeded')")
 
     if alert_type:
         clauses.append("a.alert_type = :alert_type")

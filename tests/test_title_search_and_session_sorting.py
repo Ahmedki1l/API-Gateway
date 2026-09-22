@@ -179,38 +179,32 @@ class TitleSearchAndSessionSortingTests(unittest.IsolatedAsyncioTestCase):
         records = list(csv.DictReader(io.StringIO(exported.text.lstrip("\ufeff"))))
         self.assertEqual([record["Plate Number"] for record in records], ["A-100"])
 
-    async def test_historical_alert_filters_match_list_and_csv(self):
-        for alert_type in ("reserved_slot_unidentified", "special_needs_review"):
-            with self.subTest(alert_type=alert_type):
-                self.db.execute("UPDATE alerts SET alert_type=:alert_type WHERE id=1", {
-                    "alert_type": alert_type,
-                })
-                params = {"alert_type": alert_type}
-                listed = await self.client.get("/alerts/", params=params)
-                exported = await self.client.get("/alerts/export/csv", params=params)
+    async def test_historical_unidentified_filter_matches_list_and_csv(self):
+        self.db.execute("UPDATE alerts SET alert_type='reserved_slot_unidentified' WHERE id=1")
+        params = {"alert_type": "reserved_slot_unidentified"}
+        listed = await self.client.get("/alerts/", params=params)
+        exported = await self.client.get("/alerts/export/csv", params=params)
 
-                self.assertEqual(listed.status_code, 200, listed.text)
-                self.assertEqual(exported.status_code, 200, exported.text)
-                self.assertEqual(listed.json()["total_count"], 1)
-                self.assertEqual([item["plate_number"] for item in listed.json()["items"]], ["A-100"])
-                records = list(csv.DictReader(io.StringIO(exported.text.lstrip("\ufeff"))))
-                self.assertEqual([record["Plate Number"] for record in records], ["A-100"])
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(exported.status_code, 200, exported.text)
+        self.assertEqual(listed.json()["total_count"], 1)
+        self.assertEqual([item["plate_number"] for item in listed.json()["items"]], ["A-100"])
+        records = list(csv.DictReader(io.StringIO(exported.text.lstrip("\ufeff"))))
+        self.assertEqual([record["Plate Number"] for record in records], ["A-100"])
 
-    async def test_historical_review_rows_support_generic_mutations_and_no_review_post(self):
-        self.db.execute(
-            "UPDATE alerts SET alert_type='special_needs_review', is_resolved=0, resolved_at=NULL WHERE id=1"
-        )
+    async def test_alerts_support_generic_resolve_and_delete(self):
         resolved = await self.client.patch("/alerts/1/resolve")
         self.assertEqual(resolved.status_code, 200, resolved.text)
         self.assertEqual(self.db.execute("SELECT is_resolved FROM alerts WHERE id=1").fetchone()[0], 1)
 
-        self.db.execute(
-            "UPDATE alerts SET alert_type='special_needs_review', is_resolved=0, resolved_at=NULL WHERE id=2"
-        )
         deleted = await self.client.delete("/alerts/2")
         self.assertEqual(deleted.status_code, 200, deleted.text)
         self.assertIsNone(self.db.execute("SELECT id FROM alerts WHERE id=2").fetchone())
 
+    async def test_cancelled_special_needs_review_is_not_an_available_api(self):
+        for path in ("/alerts/", "/alerts/export/csv"):
+            response = await self.client.get(path, params={"alert_type": "special_needs_review"})
+            self.assertEqual(response.status_code, 422, response.text)
         review = await self.client.post("/alerts/1/special-needs-review", json={})
         self.assertEqual(review.status_code, 404, review.text)
 

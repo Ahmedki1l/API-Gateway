@@ -61,7 +61,6 @@ class AlertType(str, Enum):
     vehicle_intrusion = "vehicle_intrusion"
     vehicle_violation = "vehicle_violation"
     named_slot_violation = "named_slot_violation"
-    special_needs_review = "special_needs_review"
     special_needs_violation = "special_needs_violation"
     # Retained for filtering historical records; no longer emitted by VA.
     reserved_slot_unidentified = "reserved_slot_unidentified"
