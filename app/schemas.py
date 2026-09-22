@@ -1080,3 +1080,57 @@ class CameraFeedItem(BaseModel):
     plate_number: Optional[str] = None
     snapshot_url: Optional[str] = None
     timestamp: Optional[datetime] = None
+
+
+# ── Settings (runtime-editable, Damanat-DB-Migrator 0010) ─────────────────────
+
+# Severity vocabulary accepted on WRITE to dbo.alert_types — mirrors the table's
+# CK_alert_types_severity. Responses stay a plain str (strict on write,
+# tolerant on read) so one out-of-vocabulary row cannot 500 the settings page.
+AlertLevelLiteral = Literal["critical", "high", "medium", "low"]
+ALERT_LEVELS: tuple[str, ...] = ("critical", "high", "medium", "low")
+
+
+class ReportSettings(BaseModel):
+    """The saved reporting window. `source` is "env" when dbo.report_settings is
+    absent or unusable and the .env defaults are in force."""
+    business_hours_enabled: bool
+    business_hour_from: int                 # inclusive, facility-local
+    business_hour_to: int                   # exclusive; 24 = end of day
+    business_days: list[str]                # e.g. ["Sun", "Mon", ...], Mon..Sun order
+    source: Literal["db", "env"]
+    updated_at: Optional[datetime] = None
+    updated_by: Optional[str] = None
+
+
+class ReportSettingsUpdate(BaseModel):
+    """Full replacement of the reporting window (PUT semantics)."""
+    business_hours_enabled: StrictBool
+    business_hour_from: int = Field(ge=0, le=23)
+    business_hour_to: int = Field(ge=1, le=24)
+    business_days: list[str] = Field(min_length=1)
+    updated_by: Optional[str] = Field(None, max_length=100)
+
+    @model_validator(mode="after")
+    def _valid_window(self):
+        if self.business_hour_from >= self.business_hour_to:
+            raise ValueError("business_hour_from must be less than business_hour_to")
+        return self
+
+
+class AlertTypeSetting(BaseModel):
+    alert_type: str
+    display_name: str
+    severity: str
+    enabled: bool
+    source: Optional[str] = None            # PMS-AI | VA
+    updated_at: Optional[datetime] = None
+    updated_by: Optional[str] = None
+
+
+class AlertTypeUpdate(BaseModel):
+    """Partial update — send only the fields that change."""
+    severity: Optional[AlertLevelLiteral] = None
+    enabled: Optional[StrictBool] = None
+    display_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    updated_by: Optional[str] = Field(None, max_length=100)

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.services.report_settings import get_report_window
 from app.database import get_db, scalar, rows
 from app.routers._helpers import (
     _floor_schema,
@@ -1529,7 +1529,7 @@ class _ReportBase:
     def window_meta(self) -> dict:
         """The `OccupancyReportWindow` fields, echoed by all three widgets so a
         chart can caption itself instead of hardcoding a window that drifts
-        from the deployment's .env."""
+        from the saved reporting window."""
         return dict(
             start_time=self.start_time,
             end_time=self.end_time,
@@ -1555,17 +1555,19 @@ def _report_base(
         raise HTTPException(status_code=400, detail="start_time must be before end_time")
 
     # ── Reporting window ──────────────────────────────────────────────────────
-    # Per-request params win over .env; omitting them uses the configured
-    # defaults. Passing hour_from/hour_to alone implies business_hours=true, so
-    # a caller can A/B two windows without touching the deployment.
-    applied = settings.report_business_hours_enabled if business_hours is None else business_hours
+    # Per-request params win over the configured defaults, which come from
+    # dbo.report_settings (editable via PUT /settings/report) and fall back to
+    # .env. Passing hour_from/hour_to alone implies business_hours=true, so a
+    # caller can A/B two windows without touching the deployment.
+    window = get_report_window(db)
+    applied = window.enabled if business_hours is None else business_hours
     if hour_from is not None or hour_to is not None:
         applied = True if business_hours is None else business_hours
-    h_from = hour_from if hour_from is not None else settings.report_business_hour_from
-    h_to = hour_to if hour_to is not None else settings.report_business_hour_to
+    h_from = hour_from if hour_from is not None else window.hour_from
+    h_to = hour_to if hour_to is not None else window.hour_to
     if applied and h_from >= h_to:
         raise HTTPException(status_code=400, detail="hour_from must be less than hour_to")
-    days = settings.business_weekdays if applied else frozenset(range(7))
+    days = window.weekdays if applied else frozenset(range(7))
 
     # Denominators: slot counts per floor, and their total. Violation zones and
     # non-parking slot types are excluded, exactly as everywhere else.
@@ -1618,16 +1620,16 @@ def _report_base_dep(
     )],
     business_hours: Optional[bool] = Query(
         None,
-        description="Restrict percentages to operating hours. Omit to use "
-                    "REPORT_BUSINESS_HOURS_ENABLED from .env.",
+        description="Restrict percentages to operating hours. Omit to use the "
+                    "saved setting (GET /settings/report).",
     ),
     hour_from: Optional[int] = Query(
         None, ge=0, le=23,
-        description="Override REPORT_BUSINESS_HOUR_FROM for this request only.",
+        description="Override the saved business_hour_from for this request only.",
     ),
     hour_to: Optional[int] = Query(
         None, ge=1, le=24,
-        description="Override REPORT_BUSINESS_HOUR_TO (exclusive) for this request only.",
+        description="Override the saved business_hour_to (exclusive) for this request only.",
     ),
     db: Session = Depends(get_db),
 ) -> _ReportBase:
@@ -1975,7 +1977,7 @@ async def occupancy_report_heatmap(
     weeks (4 recommended) — with one week every cell is a single day.
 
     Rows follow the reporting window (`business_hours` / `hour_from` /
-    `hour_to`, else `.env`); with `business_hours=false` they cover 00-24.
+    `hour_to`, else the saved setting); with `business_hours=false` they cover 00-24.
     Non-operating days come back as NULL cells, not 0%.
     """
     return _report_heatmap(base, block_hours)

@@ -5,6 +5,31 @@ from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
+WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def parse_business_days(raw: str, label: str = "REPORT_BUSINESS_DAYS") -> frozenset[int]:
+    """A comma-separated day list ("Sun,Mon,...") as Python weekday ints
+    (Mon=0 .. Sun=6), matching `datetime.date.weekday()`. Case-insensitive,
+    first three letters significant. Shared by the .env setting and the
+    `report_settings` row so both reject the same typos."""
+    names = {n.lower(): i for i, n in enumerate(WEEKDAY_NAMES)}
+    parsed = set()
+    for token in raw.split(","):
+        key = token.strip().lower()[:3]
+        if not key:
+            continue
+        if key not in names:
+            raise ValueError(
+                f"{label}: unrecognised day {token.strip()!r} "
+                f"(expected any of Mon,Tue,Wed,Thu,Fri,Sat,Sun)"
+            )
+        parsed.add(names[key])
+    if not parsed:
+        raise ValueError(f"{label} must list at least one day")
+    return frozenset(parsed)
+
+
 class Settings(BaseSettings):
     db_driver: str = "ODBC Driver 18 for SQL Server"
     db_server: str = "localhost"
@@ -108,21 +133,7 @@ class Settings(BaseSettings):
     def business_weekdays(self) -> frozenset[int]:
         """`report_business_days` as Python weekday ints (Mon=0 .. Sun=6),
         matching `datetime.date.weekday()`."""
-        names = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
-        parsed = set()
-        for token in self.report_business_days.split(","):
-            key = token.strip().lower()[:3]
-            if not key:
-                continue
-            if key not in names:
-                raise ValueError(
-                    f"REPORT_BUSINESS_DAYS: unrecognised day {token.strip()!r} "
-                    f"(expected any of Mon,Tue,Wed,Thu,Fri,Sat,Sun)"
-                )
-            parsed.add(names[key])
-        if not parsed:
-            raise ValueError("REPORT_BUSINESS_DAYS must list at least one day")
-        return frozenset(parsed)
+        return parse_business_days(self.report_business_days)
 
     # Where the PMS-AI snapshot files appear inside the gateway container.
     # Mount the same volume PMS-AI writes to (read-only). When the directory

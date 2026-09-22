@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 import logging
 
-from app.database import get_db
+from app.database import get_db, scalar
 from app.services.auth import require_internal_token
 
 from app.routers.prefix_injection import (get_prefix)
@@ -33,10 +33,17 @@ _DELETE_TABLES = (
     "camera_feeds",
     "intrusions",
     "slot_status",
+    # hik_validations holds FKs to entry_exit_log and parking_sessions
+    # (Damanat-DB-Migrator 0006), so it must go before either.
+    "hik_validations",
     "entry_exit_log",
     "parking_sessions",
     "vehicles",
 )
+
+# Deleted only when present — PMS-AI's create_tables() omits hik_validations,
+# so a database the migrator never ran against does not have it.
+_OPTIONAL_DELETE_TABLES = frozenset({"hik_validations"})
 
 
 # State-resetting UPDATEs run after the DELETEs. Each tuple is
@@ -128,6 +135,10 @@ async def reset_database(
     try:
         # Phase 1: DELETE the transactional tables in FK-safe order.
         for table in _DELETE_TABLES:
+            if table in _OPTIONAL_DELETE_TABLES and scalar(
+                db, "SELECT OBJECT_ID(:t, N'U')", {"t": f"dbo.{table}"}
+            ) is None:
+                continue
             result = db.execute(text(f"DELETE FROM dbo.{table}"))
             deleted[table] = result.rowcount or 0
 
