@@ -141,10 +141,10 @@ python run.py
 |--------|------------------------|-------------------------------------------------------|
 | GET    | `/alerts/stats`        | —                                                     |
 | GET    | `/alerts/stream`       | — (Server-Sent Events)                                |
-| GET    | `/alerts/`             | page, page_size, search, severity, alert_type, resolved, date_from, date_to |
+| GET    | `/alerts/`             | page, page_size, search (plate, slot, zone, description, or vehicle title), severity, alert_type, resolved, date_from, date_to |
 | PATCH  | `/alerts/{id}/resolve` | —                                                     |
 | DELETE | `/alerts/{id}`         | —                                                     |
-| GET    | `/alerts/export/csv`   | same filters as list                                  |
+| GET    | `/alerts/export/csv`   | search, severity, alert_type, resolved, date_from, date_to |
 
 # Test Alerts
 | Method | Path                   | Query Params                                          |
@@ -157,8 +157,8 @@ python run.py
 |--------|---------------------------|-------------------------------------------------------|
 | GET    | `/entry-exit/kpis`        | target_date (ISO, optional — for yesterday compare)   |
 | GET    | `/entry-exit/traffic`     | period = daily \| weekly \| monthly                   |
-| GET    | `/entry-exit/`            | page, page_size, search, floor, is_employee, date_from, date_to |
-| GET    | `/entry-exit/export/csv`  | same filters as list                                  |
+| GET    | `/entry-exit/`            | page, page_size, search (plate, owner, or vehicle title), floor, is_employee, date_from, date_to, sort_by (entry_time or exit_time), sort_direction (asc or desc) |
+| GET    | `/entry-exit/export/csv`  | same filters and sorting as list; defaults to entry_time descending, timestamps with NULL sort last, then id |
 
 ### Vehicles
 | Method | Path                    | Query Params                                  |
@@ -184,6 +184,8 @@ python run.py
 | GET    | `/occupancy/zones`            | page, page_size, search, floor (**deprecated** — use `/floors`) |
 
 > Violation-zone slots (`is_violation_zone = 1`) are excluded from every count and list.  
+> Availability (`free_slots` / `available_slots`) is `max(monitored slots - occupied monitored slots, 0)`; physical totals remain the full inventory.
+> For deprecated `/occupancy/zones`, only canonical `<floor>-PARKING` rows and `GARAGE-TOTAL` use floor or garage aggregates. Other zone rows use explicit System 2 slot membership (`zone_id` or `zone`); an unknown membership reports zero slot-derived `occupied` and `available` while retaining its raw `current_count`.
 > Reserved slots can be filtered with `?reservation_type=SPECIAL`.  
 > Each slot row now includes `reservation_type` and `reserved_for` fields.
 
@@ -313,3 +315,15 @@ API Gateway/
 
 4. **Typed return annotations** — wire `schemas.py` into each router's  
    `response_model=` parameter for automatic OpenAPI docs generation.
+
+### Session duration and traffic windows
+
+Entry/Exit lists, duration filters, and CSV exports use the same elapsed-duration rule: closed visits use their stored final duration, or calculate it from entry (falling back to parking time) to exit when absent. Open visits calculate duration through the facility-local report time. Missing starts remain unknown; calculated negative durations are clamped to zero. CSV durations retain fractional minutes. The average-stay KPI includes completed visits whose exit falls within the selected facility-local date, or today when omitted.
+
+Daily traffic uses a facility-local operating day starting at `TRAFFIC_DAY_START_HOUR` (default `8`). Before 08:00, the chart covers the preceding day at 08:00 through today at 08:00. At/after 08:00 it covers today's operating day. Boundaries are start-inclusive/end-exclusive, with 24 zero-filled hourly buckets. Weekly/monthly traffic retains rolling 7/30 calendar-day windows. These counts are raw non-test gate events, not deduplicated parking sessions. Timestamps are interpreted using the documented facility-local database convention; no timezone is guessed from recent traffic.
+
+### Filtered Entry/Exit cards and weekly alert counters
+
+`GET /entry-exit/kpis?scope=filtered` accepts the same search, floor, employee, status, date-range, and duration filters as the session list. Total entries counts the selected sessions; total exits and average stay use completed sessions within that selection. Overstays counts distinct selected plates still open before today's facility-local midnight. In the closed view, date filters use exit time. Empty selections return zero counts. `target_date` remains supported; explicit range endpoints take precedence in filtered scope. The default `scope=today` preserves existing dashboard behavior.
+
+`GET /alerts/stats?period=week` counts non-test alerts created in the current facility-local Monday–Sunday week, with a start-inclusive/end-exclusive boundary. Active/critical counters use unresolved alerts from that cohort; resolved counts use resolved alerts from the same creation cohort, not resolution date. `period=all` remains the API default and includes earlier unresolved alerts. This is a display filter only: no alerts are deleted, archived, resolved, or reset. All historical records remain available in the alerts list.

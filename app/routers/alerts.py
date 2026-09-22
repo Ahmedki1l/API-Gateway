@@ -2,14 +2,14 @@ import asyncio
 import json
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
-from typing import Optional
+from typing import Literal, Optional
  
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
  
-from app.config import localize_naive
+from app.config import facility_now_naive, localize_naive
 from app.database import get_db, rows, scalar
 from app.routers._helpers import _floor_schema, resolve_floor_id
 from app.services.snapshots import resolve_snapshot_url
@@ -114,7 +114,7 @@ def _alert_query_bits(cols: dict) -> dict[str, str]:
             # sql/migrate_named_slot_violation_to_vehicle_intrusion.sql runs.
             # Keep the legacy name in the critical bucket so historical rows
             # render with the correct severity in the meantime.
-            "WHEN a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation') THEN 'critical' "
+            "WHEN a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation') THEN 'critical' "
             "WHEN a.alert_type IN ('unknown_vehicle','overstay','capacity_exceeded') THEN 'warning' "
             "ELSE 'info' END"
         )
@@ -155,7 +155,8 @@ def _where(search, severity, alert_type, resolved, date_from, date_to, cols, flo
             f"{bits['slot_id_expr']} LIKE :search OR "
             f"{bits['slot_name_expr']} LIKE :search OR "
             f"{bits['zone_name_expr']} LIKE :search OR "
-            "a.description LIKE :search"
+            "a.description LIKE :search OR "
+            "v.title LIKE :search"
             ")"
         )
         params["search"] = f"%{search}%"
@@ -169,11 +170,11 @@ def _where(search, severity, alert_type, resolved, date_from, date_to, cols, flo
                 # `named_slot_violation` is the legacy name for `vehicle_intrusion`
                 # (still present on historical rows until migration runs); both map
                 # to critical.
-                clauses.append("a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation')")
+                clauses.append("a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation')")
             elif severity == "warning":
                 clauses.append("a.alert_type IN ('unknown_vehicle','overstay','capacity_exceeded')")
             else:
-                clauses.append("a.alert_type NOT IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation','unknown_vehicle','overstay','capacity_exceeded')")
+                clauses.append("a.alert_type NOT IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','unknown_vehicle','overstay','capacity_exceeded')")
 
     if alert_type:
         clauses.append("a.alert_type = :alert_type")
@@ -264,26 +265,32 @@ async def _pump(source_system: str, iterator, queue: asyncio.Queue):
  
  
 @router.get("/stats", response_model=AlertStats)
-async def alert_stats(db: Session = Depends(get_db)):
+async def alert_stats(
+    period: Literal["all", "week"] = Query("all"),
+    db: Session = Depends(get_db),
+):
+    """Counts by alert creation week; history and resolution state are preserved."""
     cols = _alerts_extra_cols()
-    # All counters are ALL-TIME (no date window) — the Alerts Center card is
-    # labelled "Showing All-time Data". Unresolved/critical counts are
-    # naturally bounded since they exclude resolved rows.
-    if cols["severity"]:
-        critical_sql = "SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0 AND severity='critical'"
-    else:
-        critical_sql = """
-            SELECT COUNT(*) FROM alerts
-            WHERE is_resolved=0 AND is_test=0
-              AND alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation')
-        """
-
-    return AlertStats(
-        active_alerts=scalar(db, "SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0") or 0,
-        critical_violations=scalar(db, critical_sql) or 0,
-        resolved_total=scalar(db,
-            "SELECT COUNT(*) FROM alerts WHERE is_resolved=1 AND is_test=0") or 0,
+    where = "is_test=0"
+    params = {}
+    if period == "week":
+        now = facility_now_naive()
+        start = (now - timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        where += " AND triggered_at >= :start AND triggered_at < :end"
+        params = {"start": start, "end": start + timedelta(days=7)}
+    critical = (
+        "severity='critical'" if cols["severity"] else
+        "alert_type IN ('violence','intrusion','vehicle_intrusion',"
+        "'vehicle_violation','named_slot_violation')"
     )
+    return AlertStats(
+        active_alerts=scalar(db, f"SELECT COUNT(*) FROM alerts WHERE {where} AND is_resolved=0", params) or 0,
+        critical_violations=scalar(db, f"SELECT COUNT(*) FROM alerts WHERE {where} AND is_resolved=0 AND {critical}", params) or 0,
+        resolved_total=scalar(db, f"SELECT COUNT(*) FROM alerts WHERE {where} AND is_resolved=1", params) or 0,
+    )
+
  
  
 @router.get("/", response_model=PagedResponse[AlertItem])
@@ -354,6 +361,7 @@ async def get_alerts(
     total = scalar(db, f"""
         SELECT COUNT(*) FROM alerts a
         {bits["slot_join"]}
+        LEFT JOIN vehicles v ON v.plate_number = a.plate_number
         LEFT JOIN cameras c ON c.camera_id = a.camera_id
         {floors_join}
         WHERE {where}
@@ -409,7 +417,6 @@ ALERT_TEMPLATES = [
     {"alert_type": "vehicle_violation", "severity": "critical", "description": "Illegal parking maneuver detected"},
     {"alert_type": "unknown_vehicle", "severity": "warning", "description": "Unregistered plate detected: ABC-123", "plate_number": "ABC-123"},
     {"alert_type": "vehicle_intrusion", "severity": "critical", "description": "Visitor parked in CEO reserved slot", "slot_id": "CEO-01", "slot_name": "CEO Reserved"},
-    {"alert_type": "special_needs_violation", "severity": "critical", "description": "Unauthorized vehicle in special needs slot"},
     {"alert_type": "overstay", "severity": "warning", "description": "Vehicle exceeded 24h limit", "plate_number": "XYZ-999"},
     {"alert_type": "capacity_exceeded", "severity": "info", "description": "Floor 1 is at 95% capacity", "floor": "1"},
 ]

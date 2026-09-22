@@ -102,8 +102,8 @@ class SlotRef(BaseModel):
     has_active_violation: StrictBool = False
     # The alert_type of the most-recent unresolved violation alert on this
     # slot — null when none. One of the violation-style AlertType values
-    # (`vehicle_violation`, `named_slot_violation`, `special_needs_violation`,
-    # `vehicle_intrusion`). FE picks the icon / tooltip text per type.
+    # (`vehicle_violation`, `named_slot_violation`, `vehicle_intrusion`). FE
+    # picks the icon / tooltip text per type.
     # Typed Optional[str] (not the enum) so a future upstream alert_type
     # doesn't 500 the serializer.
     active_violation_type: Optional[str] = None
@@ -190,6 +190,8 @@ class DashboardKPIs(BaseModel):
     # Inventory headline — every parking slot on the property regardless of
     # camera coverage (monitored + unmonitored). Excludes violation-zone rows.
     total_slots: int
+    # Available monitored bays: max(monitored_slots - occupied_slots, 0).
+    # `total_slots` deliberately remains the physical inventory figure.
     free_slots: int
     # Slots whose latest VA `slot_status` row reads non-vacant. Restricted to
     # `is_monitored = 1` rows — a slot VA can't observe can't be reported as

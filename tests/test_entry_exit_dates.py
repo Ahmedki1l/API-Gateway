@@ -28,8 +28,10 @@ class EntryExitDateTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.db = sqlite3.connect(':memory:')
         self.db.row_factory = sqlite3.Row
-        self.db.create_function('DATEDIFF', 3, lambda _, a, b: int(
-            (datetime.fromisoformat(b) - datetime.fromisoformat(a)).total_seconds()))
+        def datediff(unit, start, end):
+            delta = datetime.fromisoformat(end) - datetime.fromisoformat(start)
+            return int(delta.total_seconds() / {'SECOND': 1, 'HOUR': 3600, 'DAY': 86400}[unit])
+        self.db.create_function('DATEDIFF', 3, datediff)
         self.db.executescript('''
             CREATE TABLE vehicles (id INTEGER, plate_number TEXT, owner_name TEXT,
                 vehicle_type TEXT, is_employee INTEGER);
@@ -74,7 +76,8 @@ class EntryExitDateTests(unittest.IsolatedAsyncioTestCase):
         sql = re.sub(r'CAST\((ps\.\w+) AS DATE\)', r'date(\1)', sql)
         sql = sql.replace('OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY',
                           'LIMIT :page_size OFFSET :offset')
-        sql = sql.replace('DATEDIFF(SECOND,', "DATEDIFF('SECOND',")
+        for unit in ('SECOND', 'HOUR', 'DAY'):
+            sql = sql.replace(f'DATEDIFF({unit},', f"DATEDIFF('{unit}',")
         return self.db.execute(sql, params)
 
     def scalar(self, db, sql, params):
@@ -118,3 +121,101 @@ class EntryExitDateTests(unittest.IsolatedAsyncioTestCase):
     async def test_closed_without_dates_preserves_existing_population(self):
         await self.assert_results({'status': 'closed'},
             {'overnight', 'same-day', 'next-day', 'previous-day', 'missing-exit'})
+
+    async def test_exit_kpi_uses_departure_day_and_matches_closed_list(self):
+        response = await self.client.get('/entry-exit/kpis',
+                                         params={'target_date': '2026-09-16'})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body['total_exit'], 2)
+        self.assertEqual(body['total_enter'], 4)
+        self.assertEqual(body['avg_stay_minutes'], 60.0)
+        listing = await self.client.get('/entry-exit/', params={
+            'status': 'closed', 'date_from': '2026-09-16', 'date_to': '2026-09-16'})
+        self.assertEqual(listing.status_code, 200, listing.text)
+        self.assertEqual(body['total_exit'], listing.json()['total_count'])
+
+    async def test_default_exit_kpi_uses_current_facility_day(self):
+        with patch.object(entry_exit, 'facility_today_utc',
+                          return_value=datetime(2026, 9, 16)):
+            response = await self.client.get('/entry-exit/kpis')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['total_exit'], 2)
+
+    async def test_exit_kpi_returns_zero_for_day_without_departures(self):
+        response = await self.client.get('/entry-exit/kpis',
+                                         params={'target_date': '2026-09-18'})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['total_exit'], 0)
+
+    async def test_duration_list_export_and_completed_average_agree(self):
+        self.db.execute('DELETE FROM parking_sessions')
+        self.db.executemany('INSERT INTO parking_sessions '
+            '(id,plate_number,status,entry_time,exit_time,parked_at,duration_seconds) '
+            'VALUES (?,?,?,?,?,?,?)', [
+                (10, 'computed', 'closed', '2026-09-15 23:45:00', '2026-09-16 00:15:30', None, None),
+                (11, 'stored', 'closed', '2026-09-16 08:00:00', '2026-09-16 09:00:00', None, 1200),
+                (12, 'live', 'open', '2026-09-16 11:50:00', None, None, 9999),
+                (13, 'slot-start', 'closed', None, '2026-09-16 10:05:00', '2026-09-16 10:00:00', None),
+                (14, 'negative-clock', 'closed', '2026-09-16 11:00:00', '2026-09-16 10:59:00', None, None),
+            ])
+        with patch.object(entry_exit, 'facility_now_naive', return_value=datetime(2026, 9, 16, 12)):
+            listing = await self.client.get('/entry-exit/')
+            exported = await self.client.get('/entry-exit/export/csv')
+            kpi = await self.client.get('/entry-exit/kpis', params={'target_date': '2026-09-16'})
+        for response in (listing, exported, kpi):
+            self.assertEqual(response.status_code, 200, response.text)
+        durations = {row['plate_number']: row['duration_seconds'] for row in listing.json()['items']}
+        self.assertEqual(durations, {'computed': 1830, 'stored': 1200, 'live': 600,
+                                    'slot-start': 300, 'negative-clock': 0})
+        csv_rows = list(csv.DictReader(io.StringIO(exported.text.lstrip('\ufeff'))))
+        self.assertEqual({row['Plate Number']: float(row['Duration (min)']) for row in csv_rows},
+                         {plate: seconds / 60 for plate, seconds in durations.items()})
+        self.assertEqual(kpi.json()['avg_stay_minutes'], 13.9)
+
+    async def test_duration_filters_use_effective_duration_in_list_and_csv(self):
+        self.db.execute('UPDATE parking_sessions SET duration_seconds = NULL WHERE id=1')
+        with patch.object(entry_exit, 'facility_now_naive', return_value=datetime(2026, 9, 16, 12)):
+            await self.assert_results({'status': 'closed', 'min_duration_seconds': 14400,
+                                       'max_duration_seconds': 14400}, {'overnight'})
+
+    async def test_traffic_operating_day_uses_local_boundaries_without_utc_guessing(self):
+        self.db.execute('CREATE TABLE entry_exit_log (event_time TEXT, gate TEXT, is_test INTEGER)')
+        self.db.executemany('INSERT INTO entry_exit_log VALUES (?,?,?)', [
+            ('2026-09-21 07:59:59', 'entry', 0),
+            ('2026-09-21 08:00:00', 'entry', 0),
+            ('2026-09-21 21:30:00', 'exit', 0),
+            ('2026-09-22 07:59:59', 'exit', 0),
+            ('2026-09-22 08:00:00', 'entry', 0),
+            ('2026-09-21 09:00:00', 'entry', 1),
+        ])
+        with patch.object(entry_exit, 'facility_now_naive', return_value=datetime(2026, 9, 22, 7, 59)):
+            response = await self.client.get('/entry-exit/traffic', params={'period': 'daily'})
+        self.assertEqual(response.status_code, 200, response.text)
+        buckets = response.json()
+        self.assertEqual(len(buckets), 24)
+        self.assertEqual(buckets[0], {'label': '08:00', 'entries': 1, 'exits': 0})
+        self.assertEqual(buckets[13], {'label': '21:00', 'entries': 0, 'exits': 1})
+        self.assertEqual(buckets[23], {'label': '07:00', 'entries': 0, 'exits': 1})
+        self.assertEqual(sum(b['entries'] for b in buckets), 1)
+        self.assertEqual(sum(b['exits'] for b in buckets), 2)
+        with patch.object(entry_exit, 'facility_now_naive', return_value=datetime(2026, 9, 22, 8)):
+            response = await self.client.get('/entry-exit/traffic', params={'period': 'daily'})
+        self.assertEqual(response.json()[0]['entries'], 1)
+        self.assertEqual(sum(b['exits'] for b in response.json()), 0)
+
+    async def test_weekly_and_monthly_traffic_keep_late_local_events_on_their_date(self):
+        self.db.execute('CREATE TABLE entry_exit_log (event_time TEXT, gate TEXT, is_test INTEGER)')
+        self.db.executemany('INSERT INTO entry_exit_log VALUES (?,?,0)', [
+            ('2026-09-21 23:30:00', 'exit'), ('2026-09-22 00:00:00', 'entry'),
+        ])
+        with patch.object(entry_exit, 'facility_now_naive', return_value=datetime(2026, 9, 22, 12)):
+            for period, count in [('weekly', 7), ('monthly', 30)]:
+                response = await self.client.get('/entry-exit/traffic', params={'period': period})
+                self.assertEqual(response.status_code, 200, response.text)
+                buckets = response.json()
+                self.assertEqual(len(buckets), count)
+                self.assertEqual(buckets[-2]['exits'], 1)
+                self.assertEqual(buckets[-1]['entries'], 1)
+                self.assertEqual(buckets[-1]['exits'], 0)
+        self.assertEqual((await self.client.get('/entry-exit/traffic', params={'period': 'bogus'})).status_code, 422)
