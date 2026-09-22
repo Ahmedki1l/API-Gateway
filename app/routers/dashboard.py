@@ -9,7 +9,7 @@ from app.config import facility_today_utc, localize_naive
 from app.database import get_db, scalar, rows
 from app.routers._helpers import _floor_schema
 from app.routers.alerts import _alerts_extra_cols
-from app.routers.occupancy import _monitored_only, _slot_type_excl
+from app.routers.occupancy import _monitored_slot_availability, _slot_type_excl
 from app.services.snapshots import resolve_snapshot_url
 from app.schemas import (
     ActiveVehicle,
@@ -93,29 +93,7 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
     differ when cars park in blind spots or unmarked areas; the gap pairs with
     `OccupancyKPIs.unmonitored_slots` to render blind-spot hints.
     """
-    slot_excl = _slot_type_excl()
-    slot_excl_pk = _slot_type_excl("pk")
-    monitored_pk = _monitored_only("pk")
-
-    total_slots = scalar(db, f"""
-        SELECT COUNT(*) FROM parking_slots
-        WHERE is_violation_zone = 0 {slot_excl}
-    """)
-
-    occupied_slots = scalar(db, f"""
-        SELECT COUNT(*) FROM parking_slots pk
-        LEFT JOIN slot_status ss
-          ON ss.slot_id = pk.slot_id
-          AND ss.time = (SELECT MAX(time) FROM slot_status WHERE slot_id = pk.slot_id)
-        WHERE pk.is_violation_zone = 0
-          {slot_excl_pk}
-          {monitored_pk}
-          AND ss.status IS NOT NULL
-          AND UPPER(ss.status) NOT IN ('EMPTY', 'AVAILABLE', 'FREE', 'VACANT')
-    """)
-
-    occupied_slots = occupied_slots or 0
-    free_slots = (total_slots or 0) - occupied_slots
+    total_slots, _monitored_slots, occupied_slots, free_slots = _monitored_slot_availability(db)
 
     parked_vehicles = scalar(
         db, "SELECT COUNT(DISTINCT plate_number) FROM parking_sessions WHERE status = 'open'"

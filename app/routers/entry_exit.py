@@ -1,6 +1,5 @@
-import calendar
-from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from datetime import date, datetime, timedelta
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -38,14 +37,14 @@ def _live_duration_seconds(
     Rules:
       - If the session is closed (exit_time set), trust the stored value when
         present, otherwise compute (exit_time - start) ourselves.
-      - If still open, count from whichever start signal fired first:
+      - If still open, use the entry timestamp, falling back to slot occupation:
           * `entry_time` (line-crossing at B1 entry, or ANPR at the gate),
           * else `parked_at` (slot occupation on the Ground Floor / direct
             slot detection without a prior entry event).
       - Returns None when neither start signal has fired yet.
 
-    All timestamps are UTC; we normalise tz-naive values to UTC so the
-    arithmetic doesn't blow up on DBs that strip tzinfo.
+    Naive database timestamps are facility-local. Aware timestamps retain
+    their offsets when computing elapsed time.
     """
     def _as_aware(dt):
         if dt is None:
@@ -60,12 +59,26 @@ def _live_duration_seconds(
     start = entry_utc or parked_utc
     if start is None:
         return None
-    end = exit_utc or datetime.now(timezone.utc)
+    end = exit_utc or _as_aware(facility_now_naive())
     if exit_utc is not None and stored_duration is not None:
         # Trust the writer's stored value once a session is closed — it's
         # what reports/CSVs have been pinned to historically.
         return int(stored_duration)
     return max(int((end - start).total_seconds()), 0)
+
+
+def _duration_sql(alias: str = "ps") -> str:
+    """SQL equivalent of _live_duration_seconds; aliases are internal constants."""
+    prefix = f"{alias}." if alias else ""
+    start = f"COALESCE({prefix}entry_time, {prefix}parked_at)"
+    end = f"COALESCE({prefix}exit_time, :now_naive)"
+    return f"""CASE
+        WHEN {start} IS NULL THEN NULL
+        WHEN {prefix}exit_time IS NOT NULL AND {prefix}duration_seconds IS NOT NULL
+            THEN {prefix}duration_seconds
+        WHEN {end} < {start} THEN 0
+        ELSE DATEDIFF(SECOND, {start}, {end})
+    END"""
 
 
 def _event_from_row(r: dict, plate_number: str) -> VehicleEvent:
@@ -141,6 +154,90 @@ VEHICLE_TYPE_EXPR = "COALESCE(v_id.vehicle_type, v_plate.vehicle_type, ps.vehicl
 # detail page consistent — fixes the bug where a vehicle showed under the
 # "Employee = No" filter but its detail read "Employee = Yes".
 IS_EMPLOYEE_EXPR = "COALESCE(v_id.is_employee, v_plate.is_employee, ps.is_employee)"
+VEHICLE_TITLE_EXPR = "COALESCE(v_id.title, v_plate.title)"
+
+
+def _entry_exit_filters(
+    db: Session,
+    schema: dict,
+    *,
+    search: Optional[str],
+    floor: Optional[str],
+    floor_id: Optional[int],
+    is_employee: Optional[bool],
+    status: Optional[ParkingSessionStatus],
+    date_from: Optional[date],
+    date_to: Optional[date],
+    min_duration_seconds: Optional[int],
+    max_duration_seconds: Optional[int],
+) -> tuple[str, dict]:
+    """Build the filter shared by the Entry/Exit list, count, and CSV export."""
+    clauses = ["1=1"]
+    params: dict = {"now_naive": facility_now_naive()}
+
+    if search:
+        plate_clause = plate_search_clause("ps.plate_number", search, params)
+        clauses.append(
+            f"({plate_clause} OR {OWNER_NAME_EXPR} LIKE :search "
+            f"OR {VEHICLE_TITLE_EXPR} LIKE :search)"
+        )
+        params["search"] = f"%{search}%"
+    # Schema-compat: when the floor_id column doesn't exist yet, fall through
+    # to the legacy string filter.
+    resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=None)
+    if resolved_floor_id is not None and schema["parking_sessions_floor_id"]:
+        clauses.append("ps.floor_id = :floor_id")
+        params["floor_id"] = resolved_floor_id
+    elif floor:
+        clauses.append("ps.floor = :floor")
+        params["floor"] = floor
+    if is_employee is not None:
+        # Match the vehicle's CURRENT employee status, not the frozen session snapshot.
+        clauses.append(f"{IS_EMPLOYEE_EXPR} = :is_employee")
+        params["is_employee"] = 1 if is_employee else 0
+    if status:
+        if status == "overstay":
+            clauses.append("ps.status IN ('open', 'overstay')")
+            clauses.append("ps.entry_time < :overstay_cutoff")
+            params["overstay_cutoff"] = facility_today_utc()
+        else:
+            clauses.append("ps.status = :status")
+            params["status"] = status
+    # Completed visits are selected by departure date, including overnight stays.
+    date_column = "ps.exit_time" if status == ParkingSessionStatus.closed else "ps.entry_time"
+    if date_from:
+        clauses.append(f"CAST({date_column} AS DATE) >= :date_from")
+        params["date_from"] = str(date_from)
+    if date_to:
+        clauses.append(f"CAST({date_column} AS DATE) <= :date_to")
+        params["date_to"] = str(date_to)
+    if min_duration_seconds is not None:
+        clauses.append(f"({_duration_sql()}) >= :min_dur")
+        params["min_dur"] = min_duration_seconds
+    if max_duration_seconds is not None:
+        clauses.append(f"({_duration_sql()}) <= :max_dur")
+        params["max_dur"] = max_duration_seconds
+    return " AND ".join(clauses), params
+
+
+def _entry_exit_order(
+    sort_by: Literal["entry_time", "exit_time"],
+    sort_direction: Literal["asc", "desc"],
+) -> str:
+    """Return the only supported, deterministic session ordering.
+
+    A NULL timestamp always follows dated sessions. Rows with the same
+    timestamp (including NULL timestamps) use ``ps.id`` in the requested
+    direction, so pagination cannot shuffle them between requests.
+    """
+    columns = {"entry_time": "ps.entry_time", "exit_time": "ps.exit_time"}
+    directions = {"asc": "ASC", "desc": "DESC"}
+    column = columns[sort_by]
+    direction = directions[sort_direction]
+    return (
+        f"CASE WHEN {column} IS NULL THEN 1 ELSE 0 END ASC, "
+        f"{column} {direction}, ps.id {direction}"
+    )
  
 # entry_exit_log real columns:
 #   id, plate_number, vehicle_id, vehicle_type, gate, camera_id,
@@ -159,8 +256,45 @@ IS_EMPLOYEE_EXPR = "COALESCE(v_id.is_employee, v_plate.is_employee, ps.is_employ
 @router.get("/kpis", response_model=EntryExitKPIs)
 async def entry_exit_kpis(
     target_date: Optional[date] = Query(None, description="ISO date e.g. 2024-06-01"),
+    scope: Literal["today", "filtered"] = Query("today"),
+    search: Optional[str] = Query(None),
+    floor: Optional[str] = Query(None),
+    floor_id: Optional[int] = Query(None),
+    is_employee: Optional[bool] = Query(None),
+    status: Optional[ParkingSessionStatus] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    min_duration_seconds: Optional[int] = Query(None, ge=0),
+    max_duration_seconds: Optional[int] = Query(None, ge=0),
     db: Session = Depends(get_db),
 ):
+    if scope == "filtered":
+        where, params = _entry_exit_filters(
+            db, _floor_schema(), search=search, floor=floor, floor_id=floor_id,
+            is_employee=is_employee, status=status,
+            date_from=date_from or target_date, date_to=date_to or target_date,
+            min_duration_seconds=min_duration_seconds,
+            max_duration_seconds=max_duration_seconds,
+        )
+        params["start_of_today"] = facility_today_utc()
+        summary = rows(db, f"""
+            SELECT COUNT(*) AS total_enter,
+                SUM(CASE WHEN ps.status = 'closed' THEN 1 ELSE 0 END) AS total_exit,
+                AVG(CASE WHEN ps.status = 'closed'
+                    THEN CAST({_duration_sql()} AS FLOAT) END) AS avg_stay_sec,
+                COUNT(DISTINCT CASE WHEN ps.status IN ('open', 'overstay')
+                    AND ps.entry_time < :start_of_today
+                    THEN ps.plate_number END) AS overstays
+            FROM parking_sessions ps
+            {VEHICLE_JOIN}
+            WHERE {where}
+        """, params)[0]
+        return EntryExitKPIs(
+            total_enter=summary["total_enter"] or 0,
+            total_exit=summary["total_exit"] or 0,
+            avg_stay_minutes=round((summary["avg_stay_sec"] or 0) / 60, 1),
+            overstays=summary["overstays"] or 0,
+        )
     if target_date:
         # Specific date provided: filter for that 24h window in facility-local time.
         # NAIVE local, not UTC-aware: parking_sessions timestamps are stored
@@ -184,42 +318,25 @@ async def entry_exit_kpis(
         WHERE 1=1 {date_filter}
     """, params)
 
-    # Counts on the SAME axis as the list endpoint (`?status=closed&date_from=…`),
-    # which filters `entry_time` — so this is "of the cars that entered in this
-    # window, how many have since left", NOT "how many cars left today".
-    #
-    # It used to filter `exit_time`, and the two surfaces then disagreed for every
-    # car that arrived before the window and left inside it: on 2026-09-16 the KPI
-    # card read 13 while the closed list underneath it showed 3, the 10 missing
-    # being overnight stays. `status = 'closed'` (not `exit_time IS NOT NULL`)
-    # mirrors the list's own predicate exactly; every writer of `exit_time` goes
-    # through `_close_session_record`, which sets both together.
-    #
-    # NOTE this makes the KPI blind to a car that entered yesterday and left
-    # today. If you ever want the exit-day meaning back, the list has to move to
-    # `exit_time` in the same commit or the cards drift apart again.
-    total_exit = scalar(db, f"""
+    # Departures belong to their exit day, including visits entered earlier.
+    # Use a half-open facility-local day for explicit dates and today's default.
+    total_exit = scalar(db, """
         SELECT COUNT(*)
         FROM parking_sessions
-        WHERE status = 'closed' {date_filter}
-    """, params)
+        WHERE status = 'closed'
+          AND exit_time >= :start AND exit_time < :end
+    """, {"start": start_local, "end": start_local + timedelta(days=1)})
 
-    # duration_seconds → minutes average (include open sessions using live elapsed time).
-    # DB stores facility-local naive timestamps; use facility_now_naive() not GETUTCDATE()
-    # to avoid a negative DATEDIFF when the local clock is ahead of UTC.
+    # Completed visits only, attributed to departure day. Open visits continue
+    # displaying live duration in lists/exports but do not distort completed stays.
     now_naive = facility_now_naive()
     avg_stay_sec = scalar(db, f"""
-        SELECT AVG(CAST(
-            CASE
-                WHEN duration_seconds IS NOT NULL THEN duration_seconds
-                WHEN entry_time IS NOT NULL THEN DATEDIFF(SECOND, entry_time, :now_naive)
-                ELSE NULL
-            END
-        AS FLOAT))
+        SELECT AVG(CAST({_duration_sql('')} AS FLOAT))
         FROM parking_sessions
-        WHERE entry_time IS NOT NULL
-          {date_filter}
-    """, {**params, "now_naive": now_naive})
+        WHERE status = 'closed'
+          AND exit_time >= :start AND exit_time < :end
+    """, {"start": start_local, "end": start_local + timedelta(days=1),
+           "now_naive": now_naive})
     avg_stay_minutes = round((avg_stay_sec or 0) / 60, 1)
 
     # Overstays = unique vehicles that entered before today's local midnight and are still open
@@ -241,184 +358,64 @@ async def entry_exit_kpis(
  
 @router.get("/traffic", response_model=list[TrafficBucket])
 async def traffic_chart(
-    period: str = Query("daily", description="daily | weekly | monthly"),
+    period: Literal["daily", "weekly", "monthly"] = Query("daily"),
     db: Session = Depends(get_db),
 ):
-    """Rolling-window traffic counts from `entry_exit_log`, zero-filled.
+    """Zero-filled traffic from facility-local-naive entry_exit_log timestamps.
 
-    Window semantics:
-      - **daily**   → last 24 hours from now (24 hourly buckets,
-                     anchored on the current hour boundary).
-      - **weekly**  → last 7 days starting today  (today + 6 prior, daily buckets).
-      - **monthly** → last 30 days starting today (today + 29 prior, daily buckets).
-
-    Buckets and labels live in facility-local time
-    (`FACILITY_TIMEZONE_OFFSET_HOURS`, default UTC+2). Events stored in UTC
-    are shifted into facility-local before being grouped, so the daily
-    buckets line up with the operator's wall clock. Labels are ISO strings
-    (`YYYY-MM-DDTHH:00` for daily, `YYYY-MM-DD` for weekly/monthly) so the
-    chart can render them unambiguously regardless of locale.
+    Daily covers the operating day (08:00–08:00 by default); before its start,
+    the previous operating day is shown. Weekly/monthly retain their rolling
+    7/30 calendar-day windows ending today. No timestamp-format guessing or
+    historical data rewriting is performed.
     """
-    from app.config import settings  # local import to avoid a circular at module load
-    offset_minutes = int(settings.facility_timezone_offset_hours * 60)
-    local_tz = facility_tz()
+    from app.config import settings
 
+    now_local = facility_now_naive()
     if period == "daily":
-        # 24 hourly buckets, anchored on the current local hour.
-        now_local = datetime.now(local_tz)
-        current_hour_local = now_local.replace(minute=0, second=0, microsecond=0)
-        window_start_local = current_hour_local - timedelta(hours=23)
-        window_end_local   = current_hour_local + timedelta(hours=1)
-        
-        # We query using UTC boundaries for performance, but bucket using local time
-        # to ensure the labels match what the user expects.
-        window_start_utc = window_start_local.astimezone(timezone.utc)
-        window_end_utc   = window_end_local.astimezone(timezone.utc)
+        window_start = now_local.replace(
+            hour=settings.traffic_day_start_hour, minute=0, second=0, microsecond=0
+        )
+        if now_local < window_start:
+            window_start -= timedelta(days=1)
+        window_end = window_start + timedelta(days=1)
+        count, unit, step, date_fmt = 24, "HOUR", timedelta(hours=1), "%H:00"
+    else:
+        count = 7 if period == "weekly" else 30
+        today = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        window_start = today - timedelta(days=count - 1)
+        window_end = today + timedelta(days=1)
+        unit, step = "DAY", timedelta(days=1)
+        date_fmt = "%A" if period == "weekly" else (
+            "%b %d, %Y" if window_start.year != today.year else "%b %d"
+        )
 
-        full_labels: list[dict] = [
-            {
-                "label": (window_start_local + timedelta(hours=i)).strftime("%H:00"),
-                "entries": 0,
-                "exits": 0,
-            }
-            for i in range(24)
-        ]
-        
-        # Hybrid query handles transition from Local to UTC storage
-        sql = """
-            SELECT
-                bucket_idx,
-                SUM(is_entry) AS entries,
-                SUM(is_exit)  AS exits
-            FROM (
-                SELECT
-                    DATEDIFF(HOUR, :start_local, 
-                        CASE 
-                            WHEN event_time >= :start_local THEN event_time 
-                            ELSE DATEADD(MINUTE, :offset_min, event_time) 
-                        END
-                    ) AS bucket_idx,
-                    CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END AS is_entry,
-                    CASE WHEN gate LIKE '%exit%'  OR gate LIKE '%out%' THEN 1 ELSE 0 END AS is_exit
-                FROM entry_exit_log
-                WHERE ((event_time >= :start_utc AND event_time < :end_utc)
-                   OR (event_time >= :start_local AND event_time < :end_local))
-                  AND is_test = 0
-            ) AS t
-            WHERE bucket_idx >= 0 AND bucket_idx < 24
-            GROUP BY bucket_idx
-        """
-        params = {
-            "start_local": window_start_local.replace(tzinfo=None),
-            "end_local": window_end_local.replace(tzinfo=None),
-            "start_utc": window_start_utc.replace(tzinfo=None), 
-            "end_utc": window_end_utc.replace(tzinfo=None),
-            "offset_min": offset_minutes
-        }
+    buckets = [
+        {"label": (window_start + i * step).strftime(date_fmt), "entries": 0, "exits": 0}
+        for i in range(count)
+    ]
+    # unit is selected internally above; every timestamp boundary is parameterized.
+    result = rows(db, f"""
+        SELECT DATEDIFF({unit}, :start_local, event_time) AS bucket_idx,
+               SUM(CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END) AS entries,
+               SUM(CASE WHEN gate LIKE '%exit%' OR gate LIKE '%out%' THEN 1 ELSE 0 END) AS exits
+        FROM entry_exit_log
+        WHERE event_time >= :start_local AND event_time < :end_local
+          AND is_test = 0
+        GROUP BY DATEDIFF({unit}, :start_local, event_time)
+    """, {"start_local": window_start, "end_local": window_end})
+    for row in result:
+        index = row["bucket_idx"]
+        if index is not None and 0 <= index < count:
+            buckets[index]["entries"] = row["entries"] or 0
+            buckets[index]["exits"] = row["exits"] or 0
+    return buckets
 
-    elif period == "weekly":
-        # 7 daily buckets in facility-local time: today-6, …, today.
-        # Each day-of-week appears at most once in a 7-day window, so the
-        # weekday name is an unambiguous label.
-        now_local = datetime.now(local_tz)
-        today_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-        window_start_local = today_local - timedelta(days=6)
-        window_end_local   = today_local + timedelta(days=1)
-        window_start_utc = window_start_local.astimezone(timezone.utc)
-        window_end_utc   = window_end_local.astimezone(timezone.utc)
 
-        full_labels = [
-            {
-                "label": (window_start_local + timedelta(days=i)).strftime("%A"),  # "Monday"
-                "entries": 0,
-                "exits": 0,
-            }
-            for i in range(7)
-        ]
-        # Shift events into facility-local before bucketing by day.
-        sql = """
-            SELECT
-                bucket_idx,
-                SUM(is_entry) AS entries,
-                SUM(is_exit)  AS exits
-            FROM (
-                SELECT
-                    DATEDIFF(DAY, :start_local_date, DATEADD(MINUTE, :offset_min, event_time)) AS bucket_idx,
-                    CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END AS is_entry,
-                    CASE WHEN gate LIKE '%exit%'  OR gate LIKE '%out%' THEN 1 ELSE 0 END AS is_exit
-                FROM entry_exit_log
-                WHERE event_time >= :start_utc
-                  AND event_time <  :end_utc
-                  AND is_test = 0
-            ) AS t
-            GROUP BY bucket_idx
-        """
-        params = {
-            "start_local_date": window_start_local.date(),
-            "offset_min": offset_minutes,
-            "start_utc": window_start_utc,
-            "end_utc": window_end_utc,
-        }
-
-    else:  # monthly — 30 daily buckets
-        now_local = datetime.now(local_tz)
-        today_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-        window_start_local = today_local - timedelta(days=29)
-        window_end_local   = today_local + timedelta(days=1)
-        window_start_utc = window_start_local.astimezone(timezone.utc)
-        window_end_utc   = window_end_local.astimezone(timezone.utc)
-
-        # Format: "Apr 25" when the 30-day window stays within one year;
-        # "Apr 25, 2026" when the window crosses a year boundary.
-        crosses_year = window_start_local.year != today_local.year
-        date_fmt = "%b %d, %Y" if crosses_year else "%b %d"
-        full_labels = [
-            {
-                "label": (window_start_local + timedelta(days=i)).strftime(date_fmt),
-                "entries": 0,
-                "exits": 0,
-            }
-            for i in range(30)
-        ]
-        sql = """
-            SELECT
-                bucket_idx,
-                SUM(is_entry) AS entries,
-                SUM(is_exit)  AS exits
-            FROM (
-                SELECT
-                    DATEDIFF(DAY, :start_local_date, DATEADD(MINUTE, :offset_min, event_time)) AS bucket_idx,
-                    CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END AS is_entry,
-                    CASE WHEN gate LIKE '%exit%'  OR gate LIKE '%out%' THEN 1 ELSE 0 END AS is_exit
-                FROM entry_exit_log
-                WHERE event_time >= :start_utc
-                  AND event_time <  :end_utc
-                  AND is_test = 0
-            ) AS t
-            GROUP BY bucket_idx
-        """
-        params = {
-            "start_local_date": window_start_local.date(),
-            "offset_min": offset_minutes,
-            "start_utc": window_start_utc,
-            "end_utc": window_end_utc,
-        }
-
-    print(f"DEBUG: traffic_chart SQL: {sql}")
-    db_results = rows(db, sql, params)
-    for row in db_results:
-        idx = row["bucket_idx"]
-        if idx is not None and 0 <= idx < len(full_labels):
-            full_labels[idx]["entries"] = row["entries"]
-            full_labels[idx]["exits"] = row["exits"]
-    return full_labels
- 
- 
 @router.get("/", response_model=PagedResponse[VehicleEvent])
 async def get_entry_exit(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    search: Optional[str] = Query(None, description="plate number or owner name"),
+    search: Optional[str] = Query(None, description="plate number, owner name, or vehicle title"),
     floor: Optional[str] = Query(None),
     # WS-8.E: integer-id sibling filter; wins over `?floor=` when both are sent.
     floor_id: Optional[int] = Query(None),
@@ -428,6 +425,8 @@ async def get_entry_exit(
     date_to: Optional[date] = Query(None),
     min_duration_seconds: Optional[int] = Query(None, ge=0),
     max_duration_seconds: Optional[int] = Query(None, ge=0),
+    sort_by: Literal["entry_time", "exit_time"] = Query("entry_time"),
+    sort_direction: Literal["asc", "desc"] = Query("desc"),
     db: Session = Depends(get_db),
 ):
     """Flat list of every parking event (one row per entry, expanded with its
@@ -436,51 +435,13 @@ async def get_entry_exit(
     # WS-8 schema-compat: cache the probe so SELECT and WHERE branch in lockstep.
     schema = _floor_schema()
     ps_floor_id = "ps.floor_id" if schema["parking_sessions_floor_id"] else "NULL"
-    clauses = ["1=1"]
-    params: dict = {}
-
-    if search:
-        plate_clause = plate_search_clause("ps.plate_number", search, params)
-        clauses.append(f"({plate_clause} OR {OWNER_NAME_EXPR} LIKE :search)")
-        params["search"] = f"%{search}%"
-    # WS-8.E: integer-id filter wins; fall back to legacy string filter for back-compat.
-    # Schema-compat: when the floor_id column doesn't exist yet, fall through to the string filter.
-    resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=None)
-    if resolved_floor_id is not None and schema["parking_sessions_floor_id"]:
-        clauses.append("ps.floor_id = :floor_id")
-        params["floor_id"] = resolved_floor_id
-    elif floor:
-        clauses.append("ps.floor = :floor")
-        params["floor"] = floor
-    if is_employee is not None:
-        # Match the vehicle's CURRENT employee status (same source the detail
-        # page shows), not the frozen parking_sessions snapshot.
-        clauses.append(f"{IS_EMPLOYEE_EXPR} = :is_employee")
-        params["is_employee"] = 1 if is_employee else 0
-    if status:
-        if status == "overstay":
-            clauses.append("ps.status IN ('open', 'overstay')")
-            clauses.append("ps.entry_time < :overstay_cutoff")
-            params["overstay_cutoff"] = facility_today_utc()
-        else:
-            clauses.append("ps.status = :status")
-            params["status"] = status
-    # Completed visits are selected by departure date, including overnight stays.
-    date_column = "ps.exit_time" if status == ParkingSessionStatus.closed else "ps.entry_time"
-    if date_from:
-        clauses.append(f"CAST({date_column} AS DATE) >= :date_from")
-        params["date_from"] = str(date_from)
-    if date_to:
-        clauses.append(f"CAST({date_column} AS DATE) <= :date_to")
-        params["date_to"] = str(date_to)
-    if min_duration_seconds is not None:
-        clauses.append("ps.duration_seconds >= :min_dur")
-        params["min_dur"] = min_duration_seconds
-    if max_duration_seconds is not None:
-        clauses.append("ps.duration_seconds <= :max_dur")
-        params["max_dur"] = max_duration_seconds
-
-    where = " AND ".join(clauses)
+    where, params = _entry_exit_filters(
+        db, schema, search=search, floor=floor, floor_id=floor_id,
+        is_employee=is_employee, status=status, date_from=date_from,
+        date_to=date_to, min_duration_seconds=min_duration_seconds,
+        max_duration_seconds=max_duration_seconds,
+    )
+    order_by = _entry_exit_order(sort_by, sort_direction)
     total = scalar(db, f"""
         SELECT COUNT(*)
         FROM parking_sessions ps
@@ -520,7 +481,7 @@ async def get_entry_exit(
         {VEHICLE_JOIN}
         LEFT JOIN parking_slots pk ON pk.slot_id = ps.slot_id
         WHERE {where}
-        ORDER BY ps.entry_time DESC
+        ORDER BY {order_by}
         OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
     """, params)
 
@@ -530,7 +491,7 @@ async def get_entry_exit(
 
 @router.get("/export/csv")
 async def export_entry_exit_csv(
-    search: Optional[str] = Query(None),
+    search: Optional[str] = Query(None, description="plate number, owner name, or vehicle title"),
     floor: Optional[str] = Query(None),
     # WS-8.E: integer-id sibling filter; wins over `?floor=` when both are sent.
     floor_id: Optional[int] = Query(None),
@@ -540,57 +501,22 @@ async def export_entry_exit_csv(
     date_to: Optional[date] = Query(None),
     min_duration_seconds: Optional[int] = Query(None, ge=0),
     max_duration_seconds: Optional[int] = Query(None, ge=0),
+    sort_by: Literal["entry_time", "exit_time"] = Query("entry_time"),
+    sort_direction: Literal["asc", "desc"] = Query("desc"),
     db: Session = Depends(get_db),
 ):
     schema = _floor_schema()
     ps_floor_id = "ps.floor_id" if schema["parking_sessions_floor_id"] else "NULL"
-    clauses = ["1=1"]
-    params: dict = {}
-    if search:
-        plate_clause = plate_search_clause("ps.plate_number", search, params)
-        clauses.append(f"({plate_clause} OR {OWNER_NAME_EXPR} LIKE :search)")
-        params["search"] = f"%{search}%"
-    # WS-8.E: same dual-key floor filter pattern as the list endpoint.
-    # Schema-compat: when ps.floor_id column missing, fall through to legacy string filter.
-    resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=None)
-    if resolved_floor_id is not None and schema["parking_sessions_floor_id"]:
-        clauses.append("ps.floor_id = :floor_id")
-        params["floor_id"] = resolved_floor_id
-    elif floor:
-        clauses.append("ps.floor = :floor")
-        params["floor"] = floor
-    if is_employee is not None:
-        clauses.append(f"{IS_EMPLOYEE_EXPR} = :is_employee")
-        params["is_employee"] = 1 if is_employee else 0
-    if status:
-        if status == "overstay":
-            clauses.append("ps.status IN ('open', 'overstay')")
-            clauses.append("ps.entry_time < :overstay_cutoff")
-            params["overstay_cutoff"] = facility_today_utc()
-        else:
-            clauses.append("ps.status = :status")
-            params["status"] = status
-    # Completed visits are selected by departure date, including overnight stays.
-    date_column = "ps.exit_time" if status == ParkingSessionStatus.closed else "ps.entry_time"
-    if date_from:
-        clauses.append(f"CAST({date_column} AS DATE) >= :date_from")
-        params["date_from"] = str(date_from)
-    if date_to:
-        clauses.append(f"CAST({date_column} AS DATE) <= :date_to")
-        params["date_to"] = str(date_to)
-    if min_duration_seconds is not None:
-        clauses.append("ps.duration_seconds >= :min_dur")
-        params["min_dur"] = min_duration_seconds
-    if max_duration_seconds is not None:
-        clauses.append("ps.duration_seconds <= :max_dur")
-        params["max_dur"] = max_duration_seconds
+    where, params = _entry_exit_filters(
+        db, schema, search=search, floor=floor, floor_id=floor_id,
+        is_employee=is_employee, status=status, date_from=date_from,
+        date_to=date_to, min_duration_seconds=min_duration_seconds,
+        max_duration_seconds=max_duration_seconds,
+    )
+    order_by = _entry_exit_order(sort_by, sort_direction)
 
-    # Open sessions have no duration_seconds yet. Report elapsed-so-far instead of a
-    # blank cell, matching the live-elapsed rule /entry-exit/kpis uses for
-    # avg_stay_minutes. facility_now_naive() (not GETUTCDATE()) because the DB stores
-    # facility-local naive timestamps — GETUTCDATE() goes negative when local is ahead.
-    params["now_naive"] = facility_now_naive()
-
+    # Closed visits use stored/final elapsed duration; open visits use the
+    # same facility-local report clock as duration filters.
     data = rows(db, f"""
         SELECT
             ps.plate_number                                  AS [Plate Number],
@@ -600,11 +526,7 @@ async def export_entry_exit_csv(
             ps.status                                        AS [Status],
             ps.entry_time                                    AS [Entry Time],
             ps.exit_time                                     AS [Exit Time],
-            CASE
-                WHEN ps.duration_seconds IS NOT NULL THEN ps.duration_seconds
-                WHEN ps.entry_time IS NOT NULL THEN DATEDIFF(SECOND, ps.entry_time, :now_naive)
-                ELSE NULL
-            END / 60                                         AS [Duration (min)],
+            ({_duration_sql()}) / 60.0                       AS [Duration (min)],
             ps.floor                                         AS [Floor],
             {ps_floor_id}                                    AS [Floor ID],
             ps.slot_id                                       AS [Slot ID],
@@ -616,8 +538,8 @@ async def export_entry_exit_csv(
         FROM parking_sessions ps
     """ + VEHICLE_JOIN + f"""
         LEFT JOIN parking_slots pk ON pk.slot_id = ps.slot_id
-        WHERE {" AND ".join(clauses)}
-        ORDER BY ps.entry_time DESC
+        WHERE {where}
+        ORDER BY {order_by}
     """, params)
 
     # WS-8.E: Floor ID column added next to Floor.
@@ -689,11 +611,12 @@ async def get_events_by_vehicle(
     if date_to:
         clauses.append("CAST(ps.entry_time AS DATE) <= :date_to")
         params["date_to"] = str(date_to)
+    params["now_naive"] = facility_now_naive()
     if min_duration_seconds is not None:
-        clauses.append("ps.duration_seconds >= :min_dur")
+        clauses.append(f"({_duration_sql()}) >= :min_dur")
         params["min_dur"] = min_duration_seconds
     if max_duration_seconds is not None:
-        clauses.append("ps.duration_seconds <= :max_dur")
+        clauses.append(f"({_duration_sql()}) <= :max_dur")
         params["max_dur"] = max_duration_seconds
 
     where = " AND ".join(clauses)

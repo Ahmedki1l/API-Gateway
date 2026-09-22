@@ -190,6 +190,8 @@ class DashboardKPIs(BaseModel):
     # Inventory headline — every parking slot on the property regardless of
     # camera coverage (monitored + unmonitored). Excludes violation-zone rows.
     total_slots: int
+    # Available monitored bays: max(monitored_slots - occupied_slots, 0).
+    # `total_slots` deliberately remains the physical inventory figure.
     free_slots: int
     # Slots whose latest VA `slot_status` row reads non-vacant. Restricted to
     # `is_monitored = 1` rows — a slot VA can't observe can't be reported as
