@@ -114,7 +114,7 @@ def _alert_query_bits(cols: dict) -> dict[str, str]:
             # sql/migrate_named_slot_violation_to_vehicle_intrusion.sql runs.
             # Keep the legacy name in the critical bucket so historical rows
             # render with the correct severity in the meantime.
-            "WHEN a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation') THEN 'critical' "
+            "WHEN a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation') THEN 'critical' "
             "WHEN a.alert_type IN ('unknown_vehicle','overstay','capacity_exceeded') THEN 'warning' "
             "ELSE 'info' END"
         )
@@ -170,11 +170,11 @@ def _where(search, severity, alert_type, resolved, date_from, date_to, cols, flo
                 # `named_slot_violation` is the legacy name for `vehicle_intrusion`
                 # (still present on historical rows until migration runs); both map
                 # to critical.
-                clauses.append("a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation')")
+                clauses.append("a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation')")
             elif severity == "warning":
                 clauses.append("a.alert_type IN ('unknown_vehicle','overstay','capacity_exceeded')")
             else:
-                clauses.append("a.alert_type NOT IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation','unknown_vehicle','overstay','capacity_exceeded')")
+                clauses.append("a.alert_type NOT IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','unknown_vehicle','overstay','capacity_exceeded')")
 
     if alert_type:
         clauses.append("a.alert_type = :alert_type")
@@ -283,7 +283,7 @@ async def alert_stats(
     critical = (
         "severity='critical'" if cols["severity"] else
         "alert_type IN ('violence','intrusion','vehicle_intrusion',"
-        "'vehicle_violation','named_slot_violation','special_needs_violation')"
+        "'vehicle_violation','named_slot_violation')"
     )
     return AlertStats(
         active_alerts=scalar(db, f"SELECT COUNT(*) FROM alerts WHERE {where} AND is_resolved=0", params) or 0,

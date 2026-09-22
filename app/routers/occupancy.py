@@ -205,7 +205,7 @@ def _current_plate_col(slots_alias: str = "pk", status_alias: str = "ss") -> str
 # from the AlertType enum; `intrusion` (general, area-level) is excluded.
 _VIOLATION_ALERT_TYPES = (
     "'vehicle_violation', 'named_slot_violation', "
-    "'special_needs_violation', 'vehicle_intrusion'"
+    "'vehicle_intrusion'"
 )
 
 

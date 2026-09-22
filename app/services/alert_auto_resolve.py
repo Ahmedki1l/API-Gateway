@@ -2,10 +2,10 @@
 
 Background: the violation alerts raised upstream (VideoAnalytics / PMS-AI)
 compare what the camera saw against what the registry knew *at that moment*.
-When an operator later fixes the registry — gives the car the title `CEO`,
-registers an unknown plate, marks a car as special-needs — the alert that was
-raised is no longer a violation, but nothing clears it and it keeps the slot
-red on the Occupancy map.
+When an operator later fixes the registry — gives the car the title `CEO` or
+registers an unknown plate — the alert that was raised is no longer a
+violation, but nothing clears it and it keeps the slot red on the Occupancy
+map.
 
 `auto_resolve_alerts_for_vehicle()` is called after every successful write in
 `routers/vehicles.py` (POST and PUT). It re-evaluates that plate's open,
@@ -18,9 +18,6 @@ when the new data positively clears it:
    the vehicle's `title` (comparison ignores case, spaces and punctuation, so
    `"C.E.O"` clears a slot reserved for `CEO`).
 2. **`unknown_vehicle`** — resolved when the plate is now `is_registered = 1`.
-3. **`special_needs_violation`** — resolved when the vehicle's title marks it
-   as special-needs entitled (`_SPECIAL_NEEDS_TITLES`) or matches the slot's
-   `reserved_for` the same way rule 1 does.
 
 Nothing here ever *raises* an alert, and a resolved alert is never re-opened —
 if a later edit removes the title, the historical resolution stands.
@@ -43,18 +40,6 @@ from app.database import rows
 # has been run everywhere — see routers/alerts.py for the same pairing.
 _NAMED_SLOT_TYPES = ("vehicle_intrusion", "named_slot_violation")
 
-# Titles that mean "this vehicle may use a special-needs slot". Normalised
-# with `_norm()` before comparison, so spacing/case/punctuation don't matter.
-# Extend this set rather than the matching code when operators adopt a new label.
-_SPECIAL_NEEDS_TITLES = frozenset({
-    "special",
-    "specialneeds",
-    "disabled",
-    "handicap",
-    "handicapped",
-    "accessible",
-})
-
 _RESOLVED_BY = "system:auto"
 
 
@@ -74,10 +59,6 @@ def _clears_alert(alert_type: str, title: str, reserved_for: str, is_registered:
         return bool(title) and bool(reserved_for) and title == reserved_for
     if alert_type == "unknown_vehicle":
         return is_registered
-    if alert_type == "special_needs_violation":
-        if title and title in _SPECIAL_NEEDS_TITLES:
-            return True
-        return bool(title) and bool(reserved_for) and title == reserved_for
     return False
 
 
@@ -122,7 +103,7 @@ def auto_resolve_alerts_for_vehicle(db: Session, plate_number: str) -> list[int]
           AND a.is_test = 0
           AND a.alert_type IN (
               'vehicle_intrusion', 'named_slot_violation',
-              'unknown_vehicle', 'special_needs_violation'
+              'unknown_vehicle'
           )
     """, {"plate": plate_number})
 

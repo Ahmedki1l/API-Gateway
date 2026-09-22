@@ -102,8 +102,8 @@ class SlotRef(BaseModel):
     has_active_violation: StrictBool = False
     # The alert_type of the most-recent unresolved violation alert on this
     # slot — null when none. One of the violation-style AlertType values
-    # (`vehicle_violation`, `named_slot_violation`, `special_needs_violation`,
-    # `vehicle_intrusion`). FE picks the icon / tooltip text per type.
+    # (`vehicle_violation`, `named_slot_violation`, `vehicle_intrusion`). FE
+    # picks the icon / tooltip text per type.
     # Typed Optional[str] (not the enum) so a future upstream alert_type
     # doesn't 500 the serializer.
     active_violation_type: Optional[str] = None

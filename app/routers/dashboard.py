@@ -116,7 +116,7 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
             SELECT COUNT(*) FROM alerts
             WHERE is_resolved=0 AND is_test=0
               AND alert_type IN ('violence','intrusion','vehicle_intrusion',
-                                 'vehicle_violation','named_slot_violation','special_needs_violation')
+                                 'vehicle_violation','named_slot_violation')
               AND triggered_at >= :today
         """
     critical_alerts = scalar(db, critical_sql, {"today": today_start})
