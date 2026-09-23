@@ -14,6 +14,8 @@ from unittest.mock import patch
 
 import httpx
 from fastapi import FastAPI
+from sqlalchemy import text
+from sqlalchemy.dialects.mssql.pyodbc import MSDialect_pyodbc
 
 with patch.dict(os.environ, {
     'CAMERAS_ENCRYPTION_KEY': base64.urlsafe_b64encode(bytes(32)).decode(),
@@ -219,3 +221,21 @@ class EntryExitDateTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(buckets[-1]['entries'], 1)
                 self.assertEqual(buckets[-1]['exits'], 0)
         self.assertEqual((await self.client.get('/entry-exit/traffic', params={'period': 'bogus'})).status_code, 422)
+
+    async def test_traffic_grouping_has_no_distinct_odbc_parameter_expressions(self):
+        # The production failure occurs before rows are read, even on an empty day.
+        self.db.execute('CREATE TABLE entry_exit_log (event_time TEXT, gate TEXT, is_test INTEGER)')
+        for period, count in [('daily', 24), ('weekly', 7), ('monthly', 30)]:
+            with self.subTest(period=period):
+                with patch.object(entry_exit, 'rows', wraps=self.rows) as query:
+                    response = await self.client.get('/entry-exit/traffic', params={'period': period})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(len(response.json()), count)
+                self.assertTrue(all(b['entries'] == b['exits'] == 0 for b in response.json()))
+                sql = query.call_args.args[1]
+                compiled = text(sql).compile(dialect=MSDialect_pyodbc(paramstyle='qmark'))
+                # SQLite accepts the old query. Inspect actual ODBC SQL to catch
+                # repeated parameterized grouping expressions that it cannot reject.
+                grouping = str(compiled).upper().split('GROUP BY', 1)[1]
+                self.assertNotIn('?', grouping)
+                self.assertNotIn('EVENT_TIME', grouping)
