@@ -393,15 +393,20 @@ async def traffic_chart(
         {"label": (window_start + i * step).strftime(date_fmt), "entries": 0, "exits": 0}
         for i in range(count)
     ]
+    # Group by the derived column: repeating a bound DATEDIFF expression in
+    # SELECT and GROUP BY produces distinct ODBC parameters and SQL Server 8120.
     # unit is selected internally above; every timestamp boundary is parameterized.
     result = rows(db, f"""
-        SELECT DATEDIFF({unit}, :start_local, event_time) AS bucket_idx,
+        SELECT bucket_idx,
                SUM(CASE WHEN gate LIKE '%entry%' OR gate LIKE '%in%' THEN 1 ELSE 0 END) AS entries,
                SUM(CASE WHEN gate LIKE '%exit%' OR gate LIKE '%out%' THEN 1 ELSE 0 END) AS exits
-        FROM entry_exit_log
-        WHERE event_time >= :start_local AND event_time < :end_local
-          AND is_test = 0
-        GROUP BY DATEDIFF({unit}, :start_local, event_time)
+        FROM (
+            SELECT DATEDIFF({unit}, :start_local, event_time) AS bucket_idx, gate
+            FROM entry_exit_log
+            WHERE event_time >= :start_local AND event_time < :end_local
+              AND is_test = 0
+        ) AS bucketed_events
+        GROUP BY bucket_idx
     """, {"start_local": window_start, "end_local": window_end})
     for row in result:
         index = row["bucket_idx"]
