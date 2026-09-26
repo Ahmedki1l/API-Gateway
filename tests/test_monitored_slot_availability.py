@@ -60,18 +60,20 @@ class MonitoredSlotAvailabilityTests(unittest.IsolatedAsyncioTestCase):
         self.db.executemany(
             "INSERT INTO floors VALUES (?,?,1,?)", [(1, "B1", 1), (2, "B2", 2)]
         )
+        # Last column is is_available — the occupancy source of truth. It
+        # mirrors the latest slot_status below (M1 vacated, M3 blank → free).
         self.db.executemany(
-            "INSERT INTO parking_slots VALUES (?,?,?,?,?,?,?,1)",
+            "INSERT INTO parking_slots VALUES (?,?,?,?,?,?,?,?)",
             [
-                ("M1", "M1", "B1", 1, 0, "regular", 1),
-                ("M2", "M2", "B1", 1, 0, "regular", 1),
-                ("M3", "M3", "B1", 1, 0, "regular", 1),
-                ("M4", "M4", "B1", 1, 0, "regular", 1),
-                ("M5", "M5", "B1", 1, 0, "regular", 1),
-                ("U1", "U1", "B1", 1, 0, "regular", 0),
-                ("U2", "U2", "B2", 2, 0, "regular", 0),
-                ("V1", "V1", "B1", 1, 1, "regular", 1),
-                ("R1", "R1", "B1", 1, 0, "roi", 1),
+                ("M1", "M1", "B1", 1, 0, "regular", 1, 1),
+                ("M2", "M2", "B1", 1, 0, "regular", 1, 0),
+                ("M3", "M3", "B1", 1, 0, "regular", 1, 1),
+                ("M4", "M4", "B1", 1, 0, "regular", 1, 0),
+                ("M5", "M5", "B1", 1, 0, "regular", 1, 1),
+                ("U1", "U1", "B1", 1, 0, "regular", 0, 0),
+                ("U2", "U2", "B2", 2, 0, "regular", 0, 0),
+                ("V1", "V1", "B1", 1, 1, "regular", 1, 0),
+                ("R1", "R1", "B1", 1, 0, "roi", 1, 0),
             ],
         )
         self.db.executemany(
@@ -114,6 +116,7 @@ class MonitoredSlotAvailabilityTests(unittest.IsolatedAsyncioTestCase):
             patch.object(occupancy, "scalar", self.scalar),
             patch.object(_helpers, "scalar", self.scalar),
             patch.object(dashboard, "scalar", self.scalar),
+            patch.object(dashboard, "rows", self.rows),
             patch.object(dashboard, "_alerts_extra_cols", return_value={"severity": True}),
             patch.object(
                 occupancy,
@@ -213,6 +216,41 @@ class MonitoredSlotAvailabilityTests(unittest.IsolatedAsyncioTestCase):
             (zones_by_id["B1-UNMAPPED"]["occupied"], zones_by_id["B1-UNMAPPED"]["available"], zones_by_id["B1-UNMAPPED"]["current_count"]),
             (0, 0, 13),
         )
+
+    async def test_car_kpis_follow_is_available_flag(self):
+        # M2 + M4 on B1 and G1 + G2 on Ground are occupied; U1/U2 are flagged
+        # too but unmonitored, so they must not count.
+        self.db.executemany(
+            "INSERT INTO parking_slots VALUES (?,?,'Ground',3,0,'regular',1,0)",
+            [("G1", "G1"), ("G2", "G2")],
+        )
+        # 5 distinct open sessions (one plate duplicated), one closed.
+        self.db.executemany(
+            "INSERT INTO parking_sessions VALUES (?,?)",
+            [("A", "open"), ("B", "open"), ("C", "open"), ("D", "open"),
+             ("E", "open"), ("E", "open"), ("F", "closed")],
+        )
+        kpis = await self.get_json("/dashboard/kpis")
+        self.assertEqual(kpis["on_slot"], 4)
+        self.assertEqual(kpis["parked_vehicles"], 5 + 2)
+        self.assertEqual(kpis["off_slot"], 5 - 2)
+
+    async def test_stale_slot_status_does_not_count_as_occupied(self):
+        # B9 in prod: latest slot_status row says OCCUPIED but VA has since
+        # cleared is_available, and the grid renders the slot empty.
+        self.db.execute("UPDATE parking_slots SET is_available = 1 WHERE slot_id = 'M4'")
+        self.db.execute("INSERT INTO parking_sessions VALUES ('A', 'open')")
+        self.db.execute("INSERT INTO parking_sessions VALUES ('B', 'open')")
+        kpis = await self.get_json("/dashboard/kpis")
+        self.assertEqual(kpis["occupied_slots"], 1)  # M2 only
+        self.assertEqual(kpis["on_slot"], 1)
+        self.assertEqual(kpis["free_slots"], 4)
+        self.assertEqual(kpis["off_slot"], 1)
+
+    async def test_off_slot_never_goes_negative(self):
+        self.db.execute("INSERT INTO parking_sessions VALUES ('A', 'open')")
+        kpis = await self.get_json("/dashboard/kpis")
+        self.assertEqual(kpis["off_slot"], 0)
 
     async def test_all_monitored_uses_physical_total_only_for_inventory(self):
         self.db.execute("UPDATE parking_slots SET is_monitored = 1 WHERE is_violation_zone = 0 AND slot_type = 'regular'")

@@ -86,18 +86,26 @@ async def ai_status():
 async def dashboard_kpis(db: Session = Depends(get_db)):
     """Dashboard headline counters.
 
-    `occupied_slots` is sourced from VA's `slot_status` table and restricted to
-    monitored slots — it's the count of slot polygons VA currently sees a car in.
-    `parked_vehicles` is sourced from open `parking_sessions` (line-crossing at
-    entry/exit cameras) — the count of cars physically in the garage. The two
-    differ when cars park in blind spots or unmarked areas; the gap pairs with
-    `OccupancyKPIs.unmonitored_slots` to render blind-spot hints.
+    `occupied_slots` / `on_slot` count monitored slots whose
+    `parking_slots.is_available` is 0 — the flag the slot grid renders.
+    `parked_vehicles` is open `parking_sessions` (line-crossing at the basement
+    ramp) plus occupied Ground slots — Ground cars never cross the ramp line, so
+    they only exist as VA slot occupancy. `off_slot` is open sessions minus the
+    occupied B1 + B2 slots: basement cars VA can't place in a monitored slot
+    (blind spot, unmarked area, or still driving).
     """
     total_slots, _monitored_slots, occupied_slots, free_slots = _monitored_slot_availability(db)
+    ground_occupied = _monitored_slot_availability(db, floor="Ground")[2]
+    basement_occupied = (
+        _monitored_slot_availability(db, floor="B1")[2]
+        + _monitored_slot_availability(db, floor="B2")[2]
+    )
 
-    parked_vehicles = scalar(
+    open_sessions = scalar(
         db, "SELECT COUNT(DISTINCT plate_number) FROM parking_sessions WHERE status = 'open'"
     ) or 0
+    parked_vehicles = open_sessions + ground_occupied
+    off_slot = max(open_sessions - basement_occupied, 0)
 
     cols = _alerts_extra_cols()
     # Dashboard critical-alerts card counts TODAY's unresolved criticals only
@@ -126,6 +134,8 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
         free_slots=free_slots,
         occupied_slots=occupied_slots,
         parked_vehicles=parked_vehicles,
+        on_slot=occupied_slots,
+        off_slot=off_slot,
         critical_alerts=critical_alerts or 0,
     )
  
