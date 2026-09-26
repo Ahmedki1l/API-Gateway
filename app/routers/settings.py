@@ -66,7 +66,7 @@ def _to_report_settings(w: ReportWindow) -> ReportSettings:
 @router.get("/report", response_model=ReportSettings)
 async def get_report_settings(db: Session = Depends(get_db)):
     """The window the occupancy reports use when a request doesn't override it.
-    Falls back to the .env values (`source: "env"`) before migration 0010."""
+    Falls back to .env (`source` = "env") until migration 0010 has run."""
     return _to_report_settings(get_report_window(db))
 
 

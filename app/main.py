@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.routers import admin, dashboard, alerts, entry_exit, vehicles, occupancy, camera_feeds, cameras, settings as settings_router
-from app.services import camera_monitor
+from app.services import camera_monitor, daily_occupancy_job
 
 from app.routers.prefix_injection import (get_prefix)
 
@@ -18,9 +18,11 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     camera_monitor.start()
+    daily_occupancy_job.start()
     try:
         yield
     finally:
+        await daily_occupancy_job.stop()
         await camera_monitor.stop()
 
 

@@ -109,6 +109,18 @@ class Settings(BaseSettings):
     # To switch to the operating week: REPORT_BUSINESS_DAYS=Sun,Mon,Tue,Wed,Thu
     report_business_days: str = "Mon,Tue,Wed,Thu,Fri,Sat,Sun"
 
+    # ── End-of-day slot occupancy (dbo.slot_daily_occupancy) ──────────────────
+    # A background task computes each completed facility-local day. On startup
+    # it fills in every missing day since the first slot_status row (when
+    # backfill is on), then runs nightly at RUN_HOUR:RUN_MINUTE facility-local.
+    # Read once at startup (a change needs a restart). Out-of-range times fall
+    # back to 00:10 with a warning instead of failing boot — this is a
+    # reporting add-on and must never stop the Gateway.
+    daily_occupancy_enabled: bool = True
+    daily_occupancy_run_hour: int = 0
+    daily_occupancy_run_minute: int = 10
+    daily_occupancy_backfill: bool = True
+
     @field_validator("report_business_hour_from", "report_business_hour_to")
     @classmethod
     def _valid_hour(cls, v: int) -> int:
