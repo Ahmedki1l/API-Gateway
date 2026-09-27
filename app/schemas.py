@@ -21,6 +21,9 @@ from datetime import date
 T = TypeVar("T")
 
 CameraRoleLiteral = Literal["entry", "exit", "floor_counting", "slot_detection", "other"]
+# Camera hardware kind accepted on WRITE — keep in sync with
+# schemas_enums.CameraType. Responses return it as a plain str.
+CameraTypeLiteral = Literal["fixed", "dome", "ptz", "anpr", "other"]
 # Camera-area vocabulary accepted on WRITE — keep in sync with
 # schemas_enums.CameraArea. Deliberately NOT used on the read path: see
 # CameraRef.area for why a response must not enforce this list.
@@ -1007,6 +1010,7 @@ class CameraItem(CameraRef):
     username: Optional[str] = None
     has_password: bool
     rtsp_url_masked: str
+    camera_type: str = "fixed"      # fixed | dome | ptz | anpr | other
     enabled: bool
     notes: Optional[str] = None
     created_at: datetime
@@ -1033,6 +1037,7 @@ class CameraCreate(BaseModel):
     # Phase-1 of WS-8 floor refactor; create requests can use either `floor` or `floor_id`.
     floor_id: Optional[int] = None
     role: CameraRoleLiteral = "other"
+    camera_type: CameraTypeLiteral = "fixed"
     watches_floor: Optional[str] = None
     # Phase-1 of WS-8 floor refactor; create requests can use either `watches_floor` or `watches_floor_id`.
     watches_floor_id: Optional[int] = None
@@ -1061,6 +1066,7 @@ class CameraUpdate(BaseModel):
     # Phase-1 of WS-8 floor refactor; update requests can use either `floor` or `floor_id`.
     floor_id: Optional[int] = None
     role: Optional[CameraRoleLiteral] = None
+    camera_type: Optional[CameraTypeLiteral] = None
     watches_floor: Optional[str] = None
     # Phase-1 of WS-8 floor refactor; update requests can use either `watches_floor` or `watches_floor_id`.
     watches_floor_id: Optional[int] = None
@@ -1117,6 +1123,19 @@ class CameraFeed(BaseModel):
 class CameraFeedClosed(BaseModel):
     session_id: str
     closed: bool
+
+
+class CameraTypeCount(BaseModel):
+    """One slice of the Camera Type Distribution donut."""
+    camera_type: str        # fixed | dome | ptz | anpr | other
+    count: int
+    pct: float              # share of total, 1 decimal
+
+
+class CameraTypeDistribution(BaseModel):
+    """Every camera by type; all five types, `count: 0` included."""
+    total: int              # centre number
+    items: list[CameraTypeCount]
 
 
 class CameraKPIs(BaseModel):

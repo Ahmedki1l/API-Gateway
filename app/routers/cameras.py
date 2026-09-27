@@ -25,12 +25,14 @@ from app.schemas import (
     CameraInternalListResponse,
     CameraItem,
     CameraKPIs,
+    CameraTypeCount,
+    CameraTypeDistribution,
     CameraUpdate,
     CameraWithCredentials,
     EntityActionResponse,
     PagedResponse,
 )
-from app.schemas_enums import CameraArea, CameraRole
+from app.schemas_enums import CameraArea, CameraRole, CameraType
 from app.config import settings
 from app.routers._helpers import _floor_schema, resolve_floor_id
 from app.services.camera_monitor import check_one, derive_is_online
@@ -157,6 +159,7 @@ def _row_to_item(row: dict) -> dict:
         "username": row.get("username"),
         "has_password": has_password,
         "rtsp_url_masked": masked,
+        "camera_type": row.get("camera_type") or "fixed",
         "enabled": bool(row["enabled"]),
         "notes": row.get("notes"),
         "created_at": row["created_at"],
@@ -187,6 +190,7 @@ def _select_cols() -> str:
         col("floor_id",         schema["cameras_floor_id"]),
         col("watches_floor",    schema["cameras_watches_floor"]),
         col("watches_floor_id", schema["cameras_watches_floor_id"]),
+        col("camera_type",      schema["cameras_camera_type"]),
         "ip_address", "rtsp_port", "rtsp_path",
         "username", "password_encrypted", "enabled",
         col("notes",         schema["cameras_notes"]),
@@ -249,6 +253,31 @@ async def cameras_kpis(db: Session = Depends(get_db)):
     )
 
 
+@router.get("/types", response_model=CameraTypeDistribution)
+async def camera_type_distribution(db: Session = Depends(get_db)):
+    """Camera Type Distribution donut: every camera (enabled or not) by
+    `camera_type`. Always all five types in a fixed order, `count: 0`
+    included; `pct` is each type's share of `total`. A value outside the five
+    (only possible by editing the table directly) counts as `other`. Before
+    migrator 0014 every camera reads as `fixed`."""
+    counts = dict.fromkeys((t.value for t in CameraType), 0)
+    if _floor_schema()["cameras_camera_type"]:
+        grouped = rows(db, "SELECT camera_type, COUNT(*) AS n FROM cameras GROUP BY camera_type")
+    else:
+        grouped = [{"camera_type": "fixed", "n": scalar(db, "SELECT COUNT(*) FROM cameras") or 0}]
+    for r in grouped:
+        t = r["camera_type"] if r["camera_type"] in counts else "other"
+        counts[t] += int(r["n"])
+    total = sum(counts.values())
+    return CameraTypeDistribution(
+        total=total,
+        items=[
+            CameraTypeCount(camera_type=t, count=n, pct=round(n / total * 100, 1) if total else 0.0)
+            for t, n in counts.items()
+        ],
+    )
+
+
 # ── Paged list ────────────────────────────────────────────────────────────────
 @router.get("/", response_model=PagedResponse[CameraItem])
 async def list_cameras(
@@ -263,6 +292,7 @@ async def list_cameras(
     is_online: Optional[bool] = Query(None),
     last_status: Optional[str] = Query(None),
     role: Optional[CameraRole] = Query(None),
+    camera_type: Optional[CameraType] = Query(None),
     watches_floor: Optional[str] = Query(None),
     # WS-8.E: integer-id sibling filter; wins over `?watches_floor=` when both are sent.
     watches_floor_id: Optional[int] = Query(None),
@@ -282,6 +312,12 @@ async def list_cameras(
     if area is not None and schema["cameras_area"]:
         clauses.append("area = :area")
         params["area"] = area.value
+    if camera_type is not None:
+        if schema["cameras_camera_type"]:
+            clauses.append("camera_type = :camera_type")
+            params["camera_type"] = camera_type.value
+        elif camera_type != CameraType.fixed:
+            clauses.append("1 = 0")     # before 0014 every camera reads 'fixed'
     # WS-8.E: prefer `floor_id` (resolved from either side) for the new column;
     # the legacy string `floor =` filter is preserved when only `?floor=` is sent
     # so callers running against pre-WS-8 rows (where `floor_id` is NULL) still
@@ -437,6 +473,10 @@ async def create_camera(body: CameraCreate, db: Session = Depends(get_db)):
         cols.append("notes")
         vals.append(":notes")
         params["notes"] = body.notes
+    if schema["cameras_camera_type"]:
+        cols.append("camera_type")
+        vals.append(":camera_type")
+        params["camera_type"] = body.camera_type
     cols.extend(["created_at", "updated_at"])
     vals.extend([":now", ":now"])
 
@@ -452,7 +492,7 @@ async def create_camera(body: CameraCreate, db: Session = Depends(get_db)):
 _UPDATABLE_COLUMNS = {
     "name", "area", "floor", "floor_id", "watches_floor", "watches_floor_id",
     "ip_address", "rtsp_port", "rtsp_path",
-    "username", "enabled", "notes",
+    "username", "enabled", "notes", "camera_type",
 }
 
 
@@ -501,6 +541,10 @@ async def update_camera(camera_id: str, body: CameraUpdate, db: Session = Depend
         updates.pop("watches_floor_id", None)
     if not schema["cameras_notes"]:
         updates.pop("notes", None)
+    if not schema["cameras_camera_type"]:
+        updates.pop("camera_type", None)
+    if updates.get("camera_type", "") is None:
+        raise HTTPException(status_code=400, detail="camera_type cannot be null")
 
     for k, v in updates.items():
         if k == "password":
@@ -955,6 +999,7 @@ async def export_cameras_csv(
     is_online: Optional[bool] = Query(None),
     last_status: Optional[str] = Query(None),
     role: Optional[CameraRole] = Query(None),
+    camera_type: Optional[CameraType] = Query(None),
     watches_floor: Optional[str] = Query(None),
     # WS-8.E: integer-id sibling filter; wins over `?watches_floor=` when both are sent.
     watches_floor_id: Optional[int] = Query(None),
@@ -974,6 +1019,12 @@ async def export_cameras_csv(
     if area is not None and schema["cameras_area"]:
         clauses.append("area = :area")
         params["area"] = area.value
+    if camera_type is not None:
+        if schema["cameras_camera_type"]:
+            clauses.append("camera_type = :camera_type")
+            params["camera_type"] = camera_type.value
+        elif camera_type != CameraType.fixed:
+            clauses.append("1 = 0")     # before 0014 every camera reads 'fixed'
     # WS-8.E: prefer floor_id (already-resolved id) when provided. Schema-compat:
     # fall back to the legacy string filter when the column is missing.
     resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=None)
@@ -1018,6 +1069,7 @@ async def export_cameras_csv(
         col_or_null("floor_id",         schema["cameras_floor_id"]),
         col_or_null("watches_floor",    schema["cameras_watches_floor"]),
         col_or_null("watches_floor_id", schema["cameras_watches_floor_id"]),
+        col_or_null("camera_type",      schema["cameras_camera_type"]),
         "ip_address", "rtsp_port", "rtsp_path",
         "username", "enabled",
         col_or_null("last_seen_at", schema["cameras_last_seen_at"]),
@@ -1047,6 +1099,7 @@ async def export_cameras_csv(
             "role": role,
             "watches_floor": wf_name,
             "watches_floor_id": wf_id,
+            "camera_type": r.get("camera_type") or "fixed",
             "ip_address": r["ip_address"],
             "rtsp_port": r["rtsp_port"],
             "rtsp_path": r["rtsp_path"],
@@ -1061,7 +1114,7 @@ async def export_cameras_csv(
 
     headers = [
         "id", "camera_id", "name", "area", "floor", "floor_id", "role",
-        "watches_floor", "watches_floor_id",
+        "watches_floor", "watches_floor_id", "camera_type",
         "ip_address", "rtsp_port",
         "rtsp_path", "username", "enabled", "is_online", "last_seen_at", "last_status",
         "created_at", "updated_at",

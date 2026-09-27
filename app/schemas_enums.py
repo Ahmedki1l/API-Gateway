@@ -191,6 +191,16 @@ class CameraArea(str, Enum):
     GATE_EXIT = "GATE-EXIT"
 
 
+class CameraType(str, Enum):
+    """`cameras.camera_type` — the camera hardware kind (migrator 0014).
+    Mirrors `schemas.CameraTypeLiteral`; keep both in sync."""
+    fixed = "fixed"
+    dome = "dome"
+    ptz = "ptz"
+    anpr = "anpr"
+    other = "other"
+
+
 class CameraRole(str, Enum):
     """`cameras.role` — what a camera is wired to do in the deployment.
     Mirrors `schemas.CameraRoleLiteral`; keep both in sync."""
