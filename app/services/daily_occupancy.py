@@ -1,19 +1,28 @@
-"""End-of-day slot occupancy — one `dbo.slot_daily_occupancy` row per slot per
-facility-local day (table: Damanat-DB-Migrator 0011).
+"""End-of-day slot occupancy — one `dbo.slot_hourly_occupancy` row per slot per
+facility-local hour, written a whole completed day at a time (table:
+Damanat-DB-Migrator 0012).
 
 The seconds come from `_occupied_seconds_sql`, the same time-weighted
-slot_status query behind the live occupancy reports, run at hour grain over
-one day. Reusing it rather than re-deriving it is the point: a stored day and a
-live report over the same day must agree to the second.
+slot_status query behind the live occupancy reports, at the same hour grain.
+Reusing it rather than re-deriving it is the point: the reports read these rows
+for finished days instead of re-scanning slot_status, and must get the same
+numbers they would have computed live.
 
-The reporting window is `dbo.report_settings` at the moment a day is computed
-(falling back to .env), and it is stored on the row. Changing the settings does
-not rewrite computed days — `compute_range()` does that on request.
+Each row is stamped with the working hours of its day (is_working_hour,
+working_hour_from/to), taken from the window log — the window in force on that
+day, not today's, so a day stored late still gets its own. The stamp is never
+updated afterwards: history keeps the window it was measured under. The
+seconds are stored for every hour regardless, so the reports can still cut any
+other window from the same rows.
+
+All 24 hours of every slot are stored, zeros included, so a day is either
+fully stored or absent — the reports rely on that to decide which days they
+can read and which they must compute live.
 
 Days on which VA wrote no slot_status rows at all are skipped rather than
 stored. The query carries each slot's last known state into the window, so
-across a VA outage a slot last seen OCCUPIED would read 100% occupied for every
-missing day.
+across a VA outage a slot last seen OCCUPIED would read occupied for every
+missing hour.
 
 Only completed days are computed — today is still changing.
 """
@@ -22,7 +31,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal, Optional
 
 from sqlalchemy import text
@@ -32,23 +40,17 @@ from app.config import facility_now_naive
 from app.database import rows, scalar
 from app.routers._helpers import _floor_schema
 from app.routers.occupancy import _history_filter, _occupied_seconds_sql, _slot_type_excl
-from app.services.report_settings import ReportWindow, get_report_window
+from app.services.report_settings import WindowHistory, get_window_history
 
 log = logging.getLogger(__name__)
 
-_DAY_SECONDS = 86400
-
 _INSERT = text("""
-    INSERT INTO dbo.slot_daily_occupancy (
-        occupancy_date, slot_id, parking_slot_id, floor, floor_id,
-        occupied_seconds_24h, occupancy_pct_24h,
-        is_working_day, business_hours_applied, window_hour_from, window_hour_to,
-        window_seconds, occupied_seconds_window, occupancy_pct, transition_count
+    INSERT INTO dbo.slot_hourly_occupancy (
+        occupancy_hour, slot_id, parking_slot_id, floor, floor_id,
+        occupied_seconds, is_working_hour, working_hour_from, working_hour_to
     ) VALUES (
-        :occupancy_date, :slot_id, :parking_slot_id, :floor, :floor_id,
-        :occupied_seconds_24h, :occupancy_pct_24h,
-        :is_working_day, :business_hours_applied, :window_hour_from, :window_hour_to,
-        :window_seconds, :occupied_seconds_window, :occupancy_pct, :transition_count
+        :occupancy_hour, :slot_id, :parking_slot_id, :floor, :floor_id,
+        :occupied_seconds, :is_working_hour, :working_hour_from, :working_hour_to
     )
 """)
 
@@ -58,16 +60,11 @@ class DayResult:
     day: date
     status: Literal["written", "skipped_no_data"]
     slots: int = 0
-    transitions: int = 0
 
 
 def yesterday() -> date:
     """The most recent completed facility-local day."""
     return facility_now_naive().date() - timedelta(days=1)
-
-
-def _pct(part: int, whole: int) -> Decimal:
-    return (Decimal(part) * 100 / Decimal(whole)).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
 
 def _day_bounds(day: date) -> tuple[datetime, datetime]:
@@ -90,93 +87,72 @@ def _slots(db: Session) -> list[dict]:
     """)
 
 
-def compute_day(db: Session, day: date, window: Optional[ReportWindow] = None) -> DayResult:
-    """Compute and store one day for every slot, replacing any rows it already
-    has. Commits. Raises on a DB error — the caller decides whether to retry."""
+def compute_day(db: Session, day: date, history: Optional[WindowHistory] = None) -> DayResult:
+    """Compute and store the 24 hours of one day for every slot, replacing any
+    rows the day already has. Commits. Raises on a DB error — the caller
+    decides whether to retry. `history` saves re-reading the window log when
+    computing many days."""
     if day >= facility_now_naive().date():
         raise ValueError(f"{day} is not a completed day yet")
-    window = window or get_report_window(db)
     start, end = _day_bounds(day)
     params = {"start": start, "end": end}
 
-    transitions_by_slot = {
-        r["slot_id"]: int(r["n"]) for r in rows(db, """
-            SELECT slot_id, COUNT(*) AS n FROM slot_status
-            WHERE time >= :start AND time < :end
-            GROUP BY slot_id
-        """, params)
-    }
-    if not transitions_by_slot:
+    if scalar(db, """
+        SELECT TOP 1 1 FROM slot_status WHERE time >= :start AND time < :end
+    """, params) is None:
         # Debug, not info: these days are re-checked on every run, and the job
         # reports the skipped count in its own summary line.
-        log.debug("daily occupancy %s: no slot_status rows (VA down?) - skipped", day)
+        log.debug("slot occupancy %s: no slot_status rows (VA down?) - skipped", day)
         return DayResult(day, "skipped_no_data")
 
-    # Per-slot, per-hour occupied seconds for the day.
+    # slot_id -> {hour: occupied seconds}
     floor_clause, q = _history_filter(db, start, end, "hour", None, None)
-    hourly: dict[str, dict[int, int]] = {}
+    occupied: dict[str, dict[int, int]] = {}
     for r in rows(db, _occupied_seconds_sql("hour", floor_clause, by_slot=True), q):
-        hourly.setdefault(r["slot_id"], {})[r["bucket_start"].hour] = int(
+        occupied.setdefault(r["slot_id"], {})[r["bucket_start"].hour] = int(
             r["total_occupied_seconds"] or 0
         )
 
-    if window.enabled:
-        working = day.weekday() in window.weekdays
-        h_from, h_to = window.hour_from, window.hour_to
-        window_seconds = (h_to - h_from) * 3600 if working else 0
-    else:
-        working, h_from, h_to, window_seconds = True, None, None, _DAY_SECONDS
-
-    records = []
-    for slot in _slots(db):
-        by_hour = hourly.get(slot["slot_id"], {})
-        occupied_24h = sum(by_hour.values())
-        if not working:
-            occupied_window = 0
-        elif h_from is None:
-            occupied_window = occupied_24h
-        else:
-            occupied_window = sum(s for h, s in by_hour.items() if h_from <= h < h_to)
-        records.append({
-            "occupancy_date": day,
+    rule = (history or get_window_history(db)).rule_for(day)
+    slots = _slots(db)
+    records = [
+        {
+            "occupancy_hour": start + timedelta(hours=h),
             "slot_id": slot["slot_id"],
             "parking_slot_id": slot["parking_slot_id"],
             "floor": slot["floor"],
             "floor_id": slot["floor_id"],
-            "occupied_seconds_24h": occupied_24h,
-            "occupancy_pct_24h": _pct(occupied_24h, _DAY_SECONDS),
-            "is_working_day": 1 if working else 0,
-            "business_hours_applied": 1 if window.enabled else 0,
-            "window_hour_from": h_from,
-            "window_hour_to": h_to,
-            "window_seconds": window_seconds,
-            "occupied_seconds_window": occupied_window,
-            "occupancy_pct": _pct(occupied_window, window_seconds) if working else None,
-            "transition_count": transitions_by_slot.get(slot["slot_id"], 0),
-        })
+            "occupied_seconds": occupied.get(slot["slot_id"], {}).get(h, 0),
+            "is_working_hour": 1 if rule.counts(h) else 0,
+            "working_hour_from": rule.hour_from,
+            "working_hour_to": rule.hour_to,
+        }
+        for slot in slots
+        for h in range(24)
+    ]
 
     # Replace the whole day in one transaction, so it is never half-written.
     try:
-        db.execute(text("DELETE FROM dbo.slot_daily_occupancy WHERE occupancy_date = :d"),
-                   {"d": day})
+        db.execute(text("""
+            DELETE FROM dbo.slot_hourly_occupancy
+            WHERE occupancy_hour >= :start AND occupancy_hour < :end
+        """), params)
         if records:
             db.execute(_INSERT, records)
         db.commit()
     except Exception:
         db.rollback()
         raise
-    return DayResult(day, "written", slots=len(records),
-                     transitions=sum(transitions_by_slot.values()))
+    return DayResult(day, "written", slots=len(slots))
 
 
 def compute_range(db: Session, first: date, last: date) -> list[DayResult]:
-    """Recompute every day in [first, last] with the CURRENT settings,
-    overwriting what is stored. One settings read for the whole range."""
-    window = get_report_window(db)
+    """Recompute every day in [first, last], overwriting what is stored."""
     results = []
+    history = get_window_history(db)
     day = first
     while day <= last:
-        results.append(compute_day(db, day, window))
+        results.append(compute_day(db, day, history))
         day += timedelta(days=1)
     return results
 
@@ -191,10 +167,11 @@ def missing_days(db: Session, through: Optional[date] = None) -> list[date]:
     if first is None or first > through:
         return []
     have = {
-        r["occupancy_date"] for r in rows(db, """
-            SELECT DISTINCT occupancy_date FROM dbo.slot_daily_occupancy
-            WHERE occupancy_date BETWEEN :a AND :b
-        """, {"a": first, "b": through})
+        r["d"] for r in rows(db, """
+            SELECT DISTINCT CAST(occupancy_hour AS DATE) AS d
+            FROM dbo.slot_hourly_occupancy
+            WHERE occupancy_hour >= :a AND occupancy_hour < :b
+        """, {"a": first, "b": through + timedelta(days=1)})
     }
     days, day = [], first
     while day <= through:
@@ -205,6 +182,6 @@ def missing_days(db: Session, through: Optional[date] = None) -> list[date]:
 
 
 def backfill(db: Session, through: Optional[date] = None) -> list[DayResult]:
-    """Compute every missing day. Existing days are left as they were computed."""
-    window = get_report_window(db)
-    return [compute_day(db, day, window) for day in missing_days(db, through)]
+    """Compute every missing day. Days already stored are left alone."""
+    history = get_window_history(db)
+    return [compute_day(db, day, history) for day in missing_days(db, through)]

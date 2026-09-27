@@ -72,6 +72,11 @@ async def get_report_settings(db: Session = Depends(get_db)):
 
 @router.put("/report", response_model=ReportSettings)
 async def update_report_settings(body: ReportSettingsUpdate, db: Session = Depends(get_db)):
+    """Change the working hours / days. Applies from today on: days already
+    measured keep the hours they were measured under. A trigger on the table
+    (migrator 0012) logs the change to dbo.report_settings_history, which is
+    how the reports and the end-of-day job know which hours applied on which
+    day."""
     try:
         weekdays = parse_business_days(",".join(body.business_days), "business_days")
     except ValueError as exc:

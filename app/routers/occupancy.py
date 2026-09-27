@@ -1,14 +1,15 @@
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Annotated, Optional
 from io import StringIO
 import csv
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.services.report_settings import get_report_window
+from app.services.report_settings import DayRule, get_window_history
 from app.database import get_db, scalar, rows
 from app.routers._helpers import (
     _floor_schema,
@@ -49,6 +50,8 @@ from app.shared import build_paged
 
 from app.routers.prefix_injection import (get_prefix)
 prefix = get_prefix() + "/occupancy"
+
+log = logging.getLogger(__name__)
 
 
 # Latest slot_status per slot_id — reused by /floors, /slots/{id}, etc.
@@ -1504,23 +1507,27 @@ class _ReportBase:
     capacity_by_floor: dict
     total_capacity: int
     buckets: list           # rows of (floor, bucket_start, total_occupied_seconds)
-    applied: bool           # business-hours window in force?
+    applied: bool           # business-hours window in force? (caption only)
     h_from: int
     h_to: int
-    days: frozenset         # operating weekday indices
+    days: frozenset         # operating weekday indices (caption only)
+    day_rules: dict         # date -> DayRule: which hours of that day count
     offered_seconds: float  # garage-wide countable seconds in the window
     day_offered: dict       # date -> countable seconds of that calendar day
 
     def counted_span(self, hour_start: datetime) -> float:
         """Seconds of this hour bucket that count toward the denominators.
 
-        Zero when the bucket falls outside the operating window — an excluded
-        hour is NOT a 0% hour, it is a not-measured hour, so it must leave both
-        numerator and denominator rather than dragging the average down.
-        Business hours are whole hours, so a bucket is entirely in or entirely
-        out; only the request's own edges can clip one."""
-        if self.applied and (hour_start.weekday() not in self.days
-                             or not (self.h_from <= hour_start.hour < self.h_to)):
+        Zero when the bucket falls outside its day's working hours — an
+        excluded hour is NOT a 0% hour, it is a not-measured hour, so it must
+        leave both numerator and denominator rather than dragging the average
+        down. Working hours are whole hours, so a bucket is entirely in or
+        entirely out; only the request's own edges can clip one.
+
+        Each day has its own rule (`day_rules`): a past day keeps the working
+        hours it was measured under, so changing the window does not rewrite
+        history."""
+        if not self.day_rules[hour_start.date()].counts(hour_start.hour):
             return 0.0
         span = (min(hour_start + timedelta(hours=1), self.end_time)
                 - max(hour_start, self.start_time)).total_seconds()
@@ -1541,6 +1548,89 @@ class _ReportBase:
         )
 
 
+def _stored_days(db: Session, first: date, last: date) -> dict:
+    """Days in [first, last] that dbo.slot_hourly_occupancy holds, each with
+    the working hours it was stored under. The job stores a day whole (every
+    slot, all 24 hours) with one window, or not at all. Empty when the table is
+    absent (migrator 0012 not run): the reports then compute everything live,
+    as before."""
+    try:
+        return {
+            r["d"]: DayRule(bool(r["working_day"]), int(r["h_from"]), int(r["h_to"]))
+            for r in rows(db, """
+                SELECT CAST(occupancy_hour AS DATE) AS d,
+                       MAX(CAST(is_working_hour AS INT)) AS working_day,
+                       MIN(working_hour_from) AS h_from,
+                       MIN(working_hour_to) AS h_to
+                FROM dbo.slot_hourly_occupancy
+                WHERE occupancy_hour >= :a AND occupancy_hour < :b
+                GROUP BY CAST(occupancy_hour AS DATE)
+            """, {"a": first, "b": last + timedelta(days=1)})
+        }
+    except Exception as exc:  # noqa: BLE001 — an add-on must not break the reports
+        db.rollback()
+        log.warning("slot_hourly_occupancy unreadable (%s); computing reports live", exc)
+        return {}
+
+
+def _floor_hour_buckets(
+    db: Session, start_time: datetime, end_time: datetime, stored: Optional[dict] = None,
+) -> list:
+    """Occupied seconds per (floor, hour) over [start_time, end_time) — the rows
+    every report widget is built from.
+
+    Whole hours of days the end-of-day job has stored are summed from
+    slot_hourly_occupancy; everything else (today, a mid-hour edge, a day not
+    stored yet or skipped for a VA outage) runs the live slot_status query over
+    just that stretch. Occupied seconds add up across adjacent stretches, and
+    the job stores the output of this same live query, so the result equals
+    one live query over the whole range — at a cost that no longer grows with
+    slot_status.
+
+    Every hour is returned, working or not: which hours count is the caller's
+    decision (`_ReportBase.counted_span`)."""
+    if stored is None:
+        stored = _stored_days(db, start_time.date(), end_time.date())
+
+    # Split the range into runs of "stored" and "live" stretches.
+    runs: list[list] = []   # [kind, run_start, run_end]
+    cursor = start_time
+    while cursor < end_time:
+        hour_start = cursor.replace(minute=0, second=0, microsecond=0)
+        hour_end = min(hour_start + timedelta(hours=1), end_time)
+        whole_hour = cursor == hour_start and hour_end == hour_start + timedelta(hours=1)
+        kind = "stored" if whole_hour and hour_start.date() in stored else "live"
+        if runs and runs[-1][0] == kind:
+            runs[-1][2] = hour_end
+        else:
+            runs.append([kind, cursor, hour_end])
+        cursor = hour_end
+
+    totals: dict = {}   # (floor, bucket_start) -> seconds
+    for kind, run_start, run_end in runs:
+        if kind == "stored":
+            found = rows(db, """
+                SELECT floor, occupancy_hour AS bucket_start,
+                       SUM(occupied_seconds) AS total_occupied_seconds
+                FROM dbo.slot_hourly_occupancy
+                WHERE occupancy_hour >= :a AND occupancy_hour < :b
+                GROUP BY floor, occupancy_hour
+            """, {"a": run_start, "b": run_end})
+        else:
+            floor_clause, params = _history_filter(db, run_start, run_end, "hour", None, None)
+            found = rows(db, _occupied_seconds_sql("hour", floor_clause, by_slot=False), params)
+        for r in found:
+            key = (r["floor"], r["bucket_start"])
+            totals[key] = totals.get(key, 0) + int(r["total_occupied_seconds"] or 0)
+
+    # Same shape as the live query: no zero rows, ordered by hour.
+    return [
+        {"floor": f, "bucket_start": b, "total_occupied_seconds": s}
+        for (f, b), s in sorted(totals.items(), key=lambda kv: (kv[0][1], kv[0][0] or ""))
+        if s
+    ]
+
+
 def _report_base(
     db: Session,
     start_time: datetime,
@@ -1555,11 +1645,18 @@ def _report_base(
         raise HTTPException(status_code=400, detail="start_time must be before end_time")
 
     # ── Reporting window ──────────────────────────────────────────────────────
-    # Per-request params win over the configured defaults, which come from
-    # dbo.report_settings (editable via PUT /settings/report) and fall back to
-    # .env. Passing hour_from/hour_to alone implies business_hours=true, so a
-    # caller can A/B two windows without touching the deployment.
-    window = get_report_window(db)
+    # Without overrides, every day uses ITS OWN working hours: a stored day the
+    # hours it was stored under, any other day the window the log says was in
+    # force then (services/report_settings.py). Changing the window therefore
+    # changes today onwards, never the past.
+    #
+    # hour_from / hour_to / business_hours=false are a what-if view for this
+    # request only: that one window is applied to every day in the range,
+    # ignoring the stored hours — possible because the stored seconds cover
+    # every hour. Passing hour_from/hour_to alone implies business_hours=true.
+    history = get_window_history(db)
+    window = history.current
+    override = hour_from is not None or hour_to is not None or business_hours is False
     applied = window.enabled if business_hours is None else business_hours
     if hour_from is not None or hour_to is not None:
         applied = True if business_hours is None else business_hours
@@ -1583,16 +1680,28 @@ def _report_base(
 
     # No inventory — every ratio would divide by zero. Skip the scan entirely
     # and let each widget return a well-formed empty payload rather than 500ing.
+    stored = _stored_days(db, start_time.date(), end_time.date()) if total_capacity else {}
     buckets: list = []
     if total_capacity:
-        floor_clause, params = _history_filter(db, start_time, end_time, "hour", None, None)
-        buckets = rows(db, _occupied_seconds_sql("hour", floor_clause, by_slot=False), params)
+        buckets = _floor_hour_buckets(db, start_time, end_time, stored)
+
+    uniform = (h_from, h_to) if applied else (0, 24)
+    day_rules: dict = {}
+    d = start_time.date()
+    while d <= end_time.date():
+        if override:
+            day_rules[d] = DayRule(d.weekday() in days, *uniform)
+        elif d in stored:
+            day_rules[d] = stored[d]
+        else:
+            day_rules[d] = history.rule_for(d)
+        d += timedelta(days=1)
 
     base = _ReportBase(
         start_time=start_time, end_time=end_time,
         capacity_by_floor=capacity_by_floor, total_capacity=total_capacity,
         buckets=buckets, applied=applied, h_from=h_from, h_to=h_to, days=days,
-        offered_seconds=0.0, day_offered={},
+        day_rules=day_rules, offered_seconds=0.0, day_offered={},
     )
 
     # Every hour bucket in the range, occupied or not — the denominators must
@@ -1894,8 +2003,14 @@ def _report_heatmap(base: _ReportBase, block_hours: int) -> OccupancyHeatmapResp
     by the range edge still counts as one observation, exactly like Q5."""
     # Rows follow the reporting window: with business hours on, the rows are
     # the operating hours only — bands the garage is closed in would be a
-    # permanent 0% stripe.
-    row_from, row_to = (base.h_from, base.h_to) if base.applied else (0, 24)
+    # permanent 0% stripe. When the window changed inside the range, the rows
+    # cover every hour that counted on some day.
+    worked = [r for r in base.day_rules.values() if r.working_day]
+    if worked:
+        row_from = min(r.hour_from for r in worked)
+        row_to = max(r.hour_to for r in worked)
+    else:
+        row_from, row_to = (base.h_from, base.h_to) if base.applied else (0, 24)
     rows_ = []
     h = row_from
     while h < row_to:

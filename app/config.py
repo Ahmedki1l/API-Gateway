@@ -109,7 +109,7 @@ class Settings(BaseSettings):
     # To switch to the operating week: REPORT_BUSINESS_DAYS=Sun,Mon,Tue,Wed,Thu
     report_business_days: str = "Mon,Tue,Wed,Thu,Fri,Sat,Sun"
 
-    # ── End-of-day slot occupancy (dbo.slot_daily_occupancy) ──────────────────
+    # ── End-of-day slot occupancy (dbo.slot_hourly_occupancy) ─────────────────
     # A background task computes each completed facility-local day. On startup
     # it fills in every missing day since the first slot_status row (when
     # backfill is on), then runs nightly at RUN_HOUR:RUN_MINUTE facility-local.
