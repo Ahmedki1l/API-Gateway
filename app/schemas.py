@@ -437,17 +437,55 @@ class VehicleEventDetail(VehicleEvent):
 
 
 # ── Entry / Exit ──────────────────────────────────────────────────────────────
-class EntryExitKPIs(BaseModel):
-    total_enter: int
-    total_exit: int
-    avg_stay_minutes: float
-    overstays: int
+class EntryExitCounts(BaseModel):
+    total_enter: int                # entered in the range
+    total_exit: int                 # left in the range
+    avg_stay_minutes: float         # of the cars that entered in the range
+    overstays: int                  # inside at a midnight in the range
+
+
+class EntryExitKPIs(EntryExitCounts):
+    """Entry/Exit KPI cards for the range, plus the same numbers for the
+    equally long period right before it (for the "vs" arrows)."""
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    previous: Optional[EntryExitCounts] = None
+    previous_from: Optional[date] = None
+    previous_to: Optional[date] = None
+
+
+class PeakHourBucket(BaseModel):
+    hour: int                       # 0-23, facility-local
+    entries: int
+    exits: int
+
+
+class PeakHours(BaseModel):
+    """Peak Entry / Exit Hours: 24 buckets summed over the range."""
+    date_from: date
+    date_to: date
+    items: list[PeakHourBucket]
 
 
 class TrafficBucket(BaseModel):
     label: str | int
     entries: int
     exits: int
+
+
+class VehicleTypeCount(BaseModel):
+    """One slice of the Vehicle Type Distribution donut."""
+    vehicle_type: str       # lower-case, e.g. sedan | suv | other
+    count: int
+    pct: float              # share of total, 1 decimal
+
+
+class VehicleTypeDistribution(BaseModel):
+    """Entries in the range by vehicle type; `other` = no type, always last."""
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    total: int              # centre number
+    items: list[VehicleTypeCount]
 
 
 # ── Vehicles ──────────────────────────────────────────────────────────────────

@@ -13,12 +13,17 @@ from app.schemas import (
     AlertItem,
     CameraRef,
     EntryExitEvent,
+    EntryExitCounts,
     EntryExitKPIs,
     PagedResponse,
+    PeakHourBucket,
+    PeakHours,
     TrafficBucket,
     VehicleEvent,
     VehicleEventDetail,
     VehicleRef,
+    VehicleTypeCount,
+    VehicleTypeDistribution,
 )
 from app.schemas_enums import EntryExitDirection, ParkingSessionStatus
 from app.shared import build_paged, plate_search_clause, stream_csv
@@ -156,37 +161,36 @@ IS_EMPLOYEE_EXPR = "COALESCE(v_id.is_employee, v_plate.is_employee, ps.is_employ
 #   slot_id, slot_name, floor, polygon, is_available, is_violation_zone
  
  
-@router.get("/kpis", response_model=EntryExitKPIs)
-async def entry_exit_kpis(
-    target_date: Optional[date] = Query(None, description="ISO date e.g. 2024-06-01"),
-    db: Session = Depends(get_db),
-):
-    if target_date:
-        # Specific date provided: filter for that 24h window in facility-local time.
-        # NAIVE local, not UTC-aware: parking_sessions timestamps are stored
-        # facility-local-naive (convention since 2026-05-07), so converting to UTC
-        # here shifted the whole window 3h earlier and made a target_date KPI cover
-        # 21:00 the previous evening → 21:00 that day.
-        dt_local = datetime.combine(target_date, datetime.min.time())
-        start_local = dt_local
-        end_local   = dt_local + timedelta(days=1)
-        date_filter = "AND entry_time >= :start AND entry_time < :end"
-        exit_filter = "AND exit_time >= :start AND exit_time < :end"
-        params = {"start": start_local, "end": end_local}
-    else:
-        # facility_today_utc() returns naive facility-local midnight today.
-        start_local = facility_today_utc()
-        date_filter = "AND entry_time >= :start"
-        exit_filter = "AND exit_time >= :start"
-        params = {"start": start_local}
+def _page_range(date_from: Optional[date], date_to: Optional[date]) -> tuple[date, date]:
+    """The Entry/Exit page's date picker: both omitted = today; only
+    date_from = up to today; only date_to = that one day."""
+    if date_from is None and date_to is None:
+        date_from = date_to = facility_now_naive().date()
+    elif date_to is None:
+        date_to = max(date_from, facility_now_naive().date())
+    elif date_from is None:
+        date_from = date_to
+    if date_from > date_to:
+        raise HTTPException(status_code=400, detail="date_from must not be after date_to")
+    return date_from, date_to
 
-    total_enter = scalar(db, f"""
-        SELECT COUNT(*)
-        FROM parking_sessions
-        WHERE 1=1 {date_filter}
+
+def _midnight(d: date) -> datetime:
+    return datetime.combine(d, datetime.min.time())
+
+
+def _kpi_counts(db: Session, date_from: date, date_to: date) -> EntryExitCounts:
+    """The four Entry/Exit cards for [date_from, date_to], facility-local days.
+    parking_sessions stores facility-local naive timestamps (since 2026-05-07),
+    so the day boundaries are plain local midnights."""
+    params = {"start": _midnight(date_from), "end": _midnight(date_to + timedelta(days=1))}
+
+    total_enter = scalar(db, """
+        SELECT COUNT(*) FROM parking_sessions
+        WHERE entry_time >= :start AND entry_time < :end
     """, params)
 
-    # Every session CLOSED in the window, on the exit axis: a car that entered
+    # Every session CLOSED in the range, on the exit axis: a car that entered
     # yesterday and left today counts as one of today's exits. Same definition
     # as /dashboard/kpis.exits_today.
     #
@@ -195,47 +199,100 @@ async def entry_exit_kpis(
     # from pairing this KPI with the entry-date filter; keep the two on the same
     # axis. `status = 'closed'` <=> `exit_time IS NOT NULL`: every writer goes
     # through `_close_session_record`, which sets both.
-    total_exit = scalar(db, f"""
-        SELECT COUNT(*)
-        FROM parking_sessions
-        WHERE status = 'closed' {exit_filter}
+    total_exit = scalar(db, """
+        SELECT COUNT(*) FROM parking_sessions
+        WHERE status = 'closed' AND exit_time >= :start AND exit_time < :end
     """, params)
 
-    # duration_seconds → minutes average (include open sessions using live elapsed time).
-    # DB stores facility-local naive timestamps; use facility_now_naive() not GETUTCDATE()
-    # to avoid a negative DATEDIFF when the local clock is ahead of UTC.
-    now_naive = facility_now_naive()
-    avg_stay_sec = scalar(db, f"""
-        SELECT AVG(CAST(
-            CASE
-                WHEN duration_seconds IS NOT NULL THEN duration_seconds
-                WHEN entry_time IS NOT NULL THEN DATEDIFF(SECOND, entry_time, :now_naive)
-                ELSE NULL
-            END
-        AS FLOAT))
+    # Cars that ENTERED in the range; an open session counts its live elapsed
+    # time. facility_now_naive(), not GETUTCDATE(): the column is local.
+    avg_stay_sec = scalar(db, """
+        SELECT AVG(CAST(COALESCE(duration_seconds, DATEDIFF(SECOND, entry_time, :now)) AS FLOAT))
         FROM parking_sessions
-        WHERE entry_time IS NOT NULL
-          {date_filter}
-    """, {**params, "now_naive": now_naive})
-    avg_stay_minutes = round((avg_stay_sec or 0) / 60, 1)
+        WHERE entry_time >= :start AND entry_time < :end
+    """, {**params, "now": facility_now_naive()})
 
-    # Overstays = unique vehicles that entered before today's local midnight and are still open
+    # Overstay = inside the garage at a local midnight that falls in the range
+    # (the midnights that START each day of it, up to today's). `first_mn` is
+    # the first such midnight after the car entered; it overstayed if that
+    # midnight is still in the range and the car had not left by then. For
+    # "today" this is every car that was inside at 00:00, whether it has
+    # left since or not.
+    last_mn = _midnight(min(date_to, facility_now_naive().date()))
     overstays = scalar(db, """
         SELECT COUNT(DISTINCT plate_number)
-        FROM parking_sessions
-        WHERE plate_number IS NOT NULL
-          AND (status = 'open' OR status = 'overstay')
-          AND entry_time < :start_of_today
-    """, {"start_of_today": start_local})
+        FROM (
+            SELECT plate_number, exit_time,
+                   CASE WHEN DATEADD(DAY, 1, CAST(CAST(entry_time AS DATE) AS DATETIME2)) > :start
+                        THEN DATEADD(DAY, 1, CAST(CAST(entry_time AS DATE) AS DATETIME2))
+                        ELSE :start END AS first_mn
+            FROM parking_sessions
+            WHERE plate_number IS NOT NULL AND entry_time < :last_mn
+        ) s
+        WHERE s.first_mn <= :last_mn AND (s.exit_time IS NULL OR s.exit_time > s.first_mn)
+    """, {"start": params["start"], "last_mn": last_mn})
 
-    return EntryExitKPIs(
+    return EntryExitCounts(
         total_enter=total_enter or 0,
         total_exit=total_exit or 0,
-        avg_stay_minutes=avg_stay_minutes,
+        avg_stay_minutes=round((avg_stay_sec or 0) / 60, 1),
         overstays=overstays or 0,
     )
- 
- 
+
+
+@router.get("/kpis", response_model=EntryExitKPIs)
+async def entry_exit_kpis(
+    date_from: Optional[date] = Query(None, description="First day (inclusive), facility-local. Omit both for today."),
+    date_to: Optional[date] = Query(None, description="Last day (inclusive), facility-local."),
+    target_date: Optional[date] = Query(None, description="Deprecated: one day, same as date_from=date_to=target_date."),
+    db: Session = Depends(get_db),
+):
+    """Entry/Exit KPI cards for the date range (today when omitted).
+    `previous` holds the same four numbers for the equally long period right
+    before it (yesterday, for today); the frontend draws the "vs" arrows."""
+    if target_date and not (date_from or date_to):
+        date_from = date_to = target_date
+    date_from, date_to = _page_range(date_from, date_to)
+    days = (date_to - date_from).days + 1
+    prev_to = date_from - timedelta(days=1)
+    prev_from = prev_to - timedelta(days=days - 1)
+    return EntryExitKPIs(
+        **_kpi_counts(db, date_from, date_to).model_dump(),
+        date_from=date_from,
+        date_to=date_to,
+        previous=_kpi_counts(db, prev_from, prev_to),
+        previous_from=prev_from,
+        previous_to=prev_to,
+    )
+
+
+@router.get("/peak-hours", response_model=PeakHours)
+async def peak_hours(
+    date_from: Optional[date] = Query(None, description="First day (inclusive), facility-local. Omit both for today."),
+    date_to: Optional[date] = Query(None, description="Last day (inclusive), facility-local."),
+    db: Session = Depends(get_db),
+):
+    """Peak Entry / Exit Hours chart: 24 bars (hour 0-23, facility-local),
+    each summed over every day in the range. Same sessions as /kpis, so the
+    bars add up to its total_enter / total_exit."""
+    date_from, date_to = _page_range(date_from, date_to)
+    params = {"start": _midnight(date_from), "end": _midnight(date_to + timedelta(days=1))}
+    items = [PeakHourBucket(hour=h, entries=0, exits=0) for h in range(24)]
+    for r in rows(db, """
+        SELECT DATEPART(HOUR, entry_time) AS h, COUNT(*) AS n FROM parking_sessions
+        WHERE entry_time >= :start AND entry_time < :end
+        GROUP BY DATEPART(HOUR, entry_time)
+    """, params):
+        items[int(r["h"])].entries = int(r["n"])
+    for r in rows(db, """
+        SELECT DATEPART(HOUR, exit_time) AS h, COUNT(*) AS n FROM parking_sessions
+        WHERE status = 'closed' AND exit_time >= :start AND exit_time < :end
+        GROUP BY DATEPART(HOUR, exit_time)
+    """, params):
+        items[int(r["h"])].exits = int(r["n"])
+    return PeakHours(date_from=date_from, date_to=date_to, items=items)
+
+
 @router.get("/traffic", response_model=list[TrafficBucket])
 async def traffic_chart(
     period: str = Query("daily", description="daily | weekly | monthly"),
@@ -411,6 +468,60 @@ async def traffic_chart(
     return full_labels
  
  
+# Values that mean "no type" and are counted as "other".
+_NO_VEHICLE_TYPE = ("", "unknown", "other")
+
+
+@router.get("/vehicle-types", response_model=VehicleTypeDistribution)
+async def vehicle_type_distribution(
+    date_from: Optional[date] = Query(None, description="First entry day (inclusive), facility-local. Omit both for all time."),
+    date_to: Optional[date] = Query(None, description="Last entry day (inclusive), facility-local."),
+    db: Session = Depends(get_db),
+):
+    """Vehicle Type Distribution donut: cars that ENTERED in the range, by
+    type (registry type first, else the session's). A car with no type
+    (NULL, empty or 'unknown') counts as `other`. Types come from the data,
+    lower-case, most first; `other` is always last, `count: 0` included."""
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=400, detail="date_from must not be after date_to")
+    clauses = ["1=1"]
+    params: dict = {}
+    if date_from:
+        clauses.append("ps.entry_time >= :date_from")
+        params["date_from"] = datetime.combine(date_from, datetime.min.time())
+    if date_to:
+        clauses.append("ps.entry_time < :date_to_next")
+        params["date_to_next"] = datetime.combine(date_to + timedelta(days=1), datetime.min.time())
+
+    grouped = rows(db, f"""
+        SELECT LOWER(LTRIM(RTRIM({VEHICLE_TYPE_EXPR}))) AS vehicle_type, COUNT(*) AS n
+        FROM parking_sessions ps
+        {VEHICLE_JOIN}
+        WHERE {" AND ".join(clauses)}
+        GROUP BY LOWER(LTRIM(RTRIM({VEHICLE_TYPE_EXPR})))
+    """, params)
+
+    counts: dict[str, int] = {}
+    other = 0
+    for r in grouped:
+        t, n = r["vehicle_type"], int(r["n"])
+        if t is None or t in _NO_VEHICLE_TYPE:
+            other += n
+        else:
+            counts[t] = counts.get(t, 0) + n
+    total = sum(counts.values()) + other
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])) + [("other", other)]
+    return VehicleTypeDistribution(
+        date_from=date_from,
+        date_to=date_to,
+        total=total,
+        items=[
+            VehicleTypeCount(vehicle_type=t, count=n, pct=round(n / total * 100, 1) if total else 0.0)
+            for t, n in ordered
+        ],
+    )
+
+
 @router.get("/", response_model=PagedResponse[VehicleEvent])
 async def get_entry_exit(
     page: int = Query(1, ge=1),
