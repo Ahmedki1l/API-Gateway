@@ -295,10 +295,33 @@ class VehicleEvent(BaseModel):
 
 
 # ── Alerts ────────────────────────────────────────────────────────────────────
+class AlertPriorityCount(BaseModel):
+    """One slice of the Alerts by Priority donut."""
+    severity: str           # critical | high | medium | low
+    count: int
+    pct: float              # share of total_alerts, 1 decimal
+
+
 class AlertStats(BaseModel):
-    active_alerts: int
-    critical_violations: int
-    resolved_total: int
+    """Alerts page KPI cards. Counts cover the alerts triggered in the
+    requested days (all time without dates), resolved or not, unless the field
+    says otherwise."""
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    total_alerts: int = 0
+    critical_alerts: int = 0
+    high_alerts: int = 0
+    resolved_total: int             # resolved since
+    active_alerts: int              # not resolved yet
+    critical_violations: int        # critical AND not resolved yet
+
+
+class AlertsByPriority(BaseModel):
+    """Alerts by Priority donut: the four levels, most urgent first."""
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    total: int                      # centre number; = AlertStats.total_alerts
+    items: list[AlertPriorityCount]
 
 
 class AlertTypeCount(BaseModel):

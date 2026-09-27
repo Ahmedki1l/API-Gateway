@@ -1,5 +1,6 @@
 import asyncio
 import json
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Optional
@@ -16,6 +17,8 @@ from app.services.snapshots import resolve_snapshot_url
 from app.schemas import (
     AlertDetail,
     AlertItem,
+    AlertPriorityCount,
+    AlertsByPriority,
     AlertStats,
     AlertSummary,
     AlertTypeCount,
@@ -26,7 +29,7 @@ from app.schemas import (
     SuccessResponse,
     VehicleRef,
 )
-from app.schemas_enums import AlertSeverity, AlertType
+from app.schemas_enums import LEGACY_SEVERITY, AlertSeverity, AlertSort, AlertType
 from app.services.auth import require_internal_token
 from app.services.upstream import iter_system1_alert_events, iter_system2_alert_events
 from app.services.bus import alerts_bus
@@ -203,19 +206,27 @@ def _where(search, severity, alert_type, resolved, date_from, date_to, cols, flo
         params["search"] = f"%{search}%"
 
     if severity:
+        # The 4-level scale; old-scale values filter as their new level.
+        level = getattr(severity, "value", severity)
+        level = LEGACY_SEVERITY.get(level, level)
         if cols["severity"]:
             clauses.append("a.severity = :severity")
-            params["severity"] = severity
+            params["severity"] = level
         else:
-            if severity == "critical":
+            # No severity column: severity is derived from alert_type in three
+            # buckets (see _alert_query_bits) — critical, warning (= medium)
+            # and info (= low). Nothing derives to high.
+            if level == "critical":
                 # `named_slot_violation` is the legacy name for `vehicle_intrusion`
                 # (still present on historical rows until migration runs); both map
                 # to critical.
                 clauses.append("a.alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation')")
-            elif severity == "warning":
+            elif level == "medium":
                 clauses.append("a.alert_type IN ('unknown_vehicle','overstay','capacity_exceeded')")
-            else:
+            elif level == "low":
                 clauses.append("a.alert_type NOT IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation','unknown_vehicle','overstay','capacity_exceeded')")
+            else:
+                clauses.append("1 = 0")
 
     if alert_type:
         clauses.append("a.alert_type = :alert_type")
@@ -225,13 +236,16 @@ def _where(search, severity, alert_type, resolved, date_from, date_to, cols, flo
         clauses.append("a.is_resolved = :resolved")
         params["resolved"] = 1 if resolved else 0
 
+    # Whole days, both ends inclusive. Compared as a plain range rather than
+    # CAST(triggered_at AS DATE), so SQL Server can use the triggered_at index
+    # instead of converting every row.
     if date_from:
-        clauses.append("CAST(a.triggered_at AS DATE) >= :date_from")
-        params["date_from"] = str(date_from)
+        clauses.append("a.triggered_at >= :date_from")
+        params["date_from"] = datetime.combine(date_from, datetime.min.time())
 
     if date_to:
-        clauses.append("CAST(a.triggered_at AS DATE) <= :date_to")
-        params["date_to"] = str(date_to)
+        clauses.append("a.triggered_at < :date_to_next")
+        params["date_to_next"] = datetime.combine(date_to + timedelta(days=1), datetime.min.time())
 
     # WS-8: build IN-list from columns that actually exist in this DB.
     # Older deployments don't have `cameras.watches_floor`.
@@ -305,29 +319,109 @@ async def _pump(source_system: str, iterator, queue: asyncio.Queue):
             await aclose()
  
  
-@router.get("/stats", response_model=AlertStats)
-async def alert_stats(db: Session = Depends(get_db)):
-    cols = _alerts_extra_cols()
-    # All counters are ALL-TIME (no date window) — the Alerts Center card is
-    # labelled "Showing All-time Data". Unresolved/critical counts are
-    # naturally bounded since they exclude resolved rows.
-    if cols["severity"]:
-        critical_sql = "SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0 AND severity='critical'"
-    else:
-        critical_sql = """
-            SELECT COUNT(*) FROM alerts
-            WHERE is_resolved=0 AND is_test=0
-              AND alert_type IN ('violence','intrusion','vehicle_intrusion','vehicle_violation','named_slot_violation','special_needs_violation')
-        """
+PRIORITY_LEVELS = ("critical", "high", "medium", "low")
 
+# GET /alerts/ ordering. id breaks ties so paging is stable; unresolved rows
+# (NULL resolved_at) sort after every resolved one.
+_ORDER_BY = {
+    AlertSort.triggered_at: "a.triggered_at DESC, a.id DESC",
+    AlertSort.resolved_at: "CASE WHEN a.resolved_at IS NULL THEN 1 ELSE 0 END, "
+                           "a.resolved_at DESC, a.id DESC",
+}
+
+
+@dataclass
+class _RangeCounts:
+    total: int = 0
+    active: int = 0
+    critical_active: int = 0
+    per_level: dict = field(default_factory=lambda: dict.fromkeys(PRIORITY_LEVELS, 0))
+
+
+def _range_counts(db: Session, date_from: Optional[date], date_to: Optional[date]) -> _RangeCounts:
+    """Alerts TRIGGERED in [date_from, date_to] (all time without dates),
+    resolved since or not, counted by priority and status in one query. The
+    same rows `GET /alerts/?date_from=&date_to=` lists. Old-scale values
+    (warning / info) count as medium / low. Shared by /stats and /by-priority
+    so the cards and the donut cannot disagree."""
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=400, detail="date_from must not be after date_to")
+    cols = _alerts_extra_cols()
+    bits = _alert_query_bits(cols)
+    where, params = _where(None, None, None, None, date_from, date_to, cols)
+    grouped = rows(db, f"""
+        SELECT {bits["severity_expr"]} AS severity, a.is_resolved AS resolved, COUNT(*) AS n
+        FROM alerts a
+        WHERE {where}
+        GROUP BY {bits["severity_expr"]}, a.is_resolved
+    """, params)
+
+    c = _RangeCounts()
+    for r in grouped:
+        n = int(r["n"])
+        level = LEGACY_SEVERITY.get(r["severity"], r["severity"])
+        c.total += n
+        if not r["resolved"]:
+            c.active += n
+            if level == "critical":
+                c.critical_active += n
+        if level in c.per_level:
+            c.per_level[level] += n
+    return c
+
+
+_DATE_FROM = Query(None, description="First day (inclusive), facility-local. Omit both for all time.")
+_DATE_TO = Query(None, description="Last day (inclusive), facility-local.")
+
+
+@router.get("/stats", response_model=AlertStats)
+async def alert_stats(
+    date_from: Optional[date] = _DATE_FROM,
+    date_to: Optional[date] = _DATE_TO,
+    db: Session = Depends(get_db),
+):
+    """Alerts page KPI cards: Total, Critical, High, Resolved — for the alerts
+    triggered in the range (all time without dates), resolved or not.
+
+    `active_alerts` and `critical_violations` (still open) are kept for older
+    callers."""
+    c = _range_counts(db, date_from, date_to)
     return AlertStats(
-        active_alerts=scalar(db, "SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND is_test=0") or 0,
-        critical_violations=scalar(db, critical_sql) or 0,
-        resolved_total=scalar(db,
-            "SELECT COUNT(*) FROM alerts WHERE is_resolved=1 AND is_test=0") or 0,
+        date_from=date_from,
+        date_to=date_to,
+        total_alerts=c.total,
+        critical_alerts=c.per_level["critical"],
+        high_alerts=c.per_level["high"],
+        resolved_total=c.total - c.active,
+        active_alerts=c.active,
+        critical_violations=c.critical_active,
     )
- 
- 
+
+
+@router.get("/by-priority", response_model=AlertsByPriority)
+async def alerts_by_priority(
+    date_from: Optional[date] = _DATE_FROM,
+    date_to: Optional[date] = _DATE_TO,
+    db: Session = Depends(get_db),
+):
+    """Alerts by Priority donut — the same alerts as /stats, split into the
+    four levels. `items` always has all four, most urgent first, `count: 0`
+    included; `pct` is each level's share of `total`, the centre number."""
+    c = _range_counts(db, date_from, date_to)
+    return AlertsByPriority(
+        date_from=date_from,
+        date_to=date_to,
+        total=c.total,
+        items=[
+            AlertPriorityCount(
+                severity=level, count=n,
+                pct=round(n / c.total * 100, 1) if c.total else 0.0,
+            )
+            for level, n in c.per_level.items()
+        ],
+    )
+
+
 @router.get("/summary", response_model=AlertSummary)
 async def alert_summary(
     resolved: Optional[bool] = Query(
@@ -471,6 +565,11 @@ async def get_alerts(
     date_to: Optional[date] = Query(None),
     floor: Optional[str] = Query(None),
     floor_id: Optional[int] = Query(None),
+    sort: AlertSort = Query(
+        AlertSort.triggered_at,
+        description="`triggered_at` (default): newest raised first. `resolved_at`: most "
+                    "recently resolved first — for Recent Resolved Alerts, with resolved=true.",
+    ),
     db: Session = Depends(get_db),
 ):
     cols = _alerts_extra_cols()
@@ -564,7 +663,7 @@ async def get_alerts(
         -- WS-8: integer floor_id alongside the legacy `floor` name string.
         {floors_join}
         WHERE {where}
-        ORDER BY a.triggered_at DESC, a.id DESC
+        ORDER BY {_ORDER_BY[sort]}
         OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
     """, params)
     for it in items:

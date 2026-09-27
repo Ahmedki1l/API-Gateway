@@ -70,12 +70,30 @@ StrictQueryBool = Annotated[bool, BeforeValidator(_strict_query_bool)]
 
 
 class AlertSeverity(str, Enum):
-    """Alert urgency. Sourced from `alerts.severity` column (post-schema-v2)
-    or derived from `alert_type` on pre-migration deployments — see
-    `routers/alerts.py:_alert_query_bits` for the CASE expression."""
+    """Alert priority filter: the 4-level scale of dbo.alert_types
+    (Damanat-DB-Migrator 0010), most urgent first. Sourced from the
+    `alerts.severity` column, or derived from `alert_type` on pre-migration
+    deployments — see `routers/alerts.py:_alert_query_bits`.
+
+    `warning` and `info` are the old 3-level scale, still accepted so an
+    older frontend keeps working: they filter as `medium` and `low`
+    (`LEGACY_SEVERITY`), which is where migration 0013 moved those alerts."""
     critical = "critical"
-    warning = "warning"
-    info = "info"
+    high = "high"
+    medium = "medium"
+    low = "low"
+    warning = "warning"     # deprecated -> medium
+    info = "info"           # deprecated -> low
+
+
+class AlertSort(str, Enum):
+    """Order of GET /alerts/, newest first either way."""
+    triggered_at = "triggered_at"   # when the alert was raised (default)
+    resolved_at = "resolved_at"     # when it was resolved; unresolved rows last
+
+
+# Old-scale value -> the level it filters as.
+LEGACY_SEVERITY = {"warning": "medium", "info": "low"}
 
 
 class AlertType(str, Enum):
