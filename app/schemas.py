@@ -307,9 +307,13 @@ class AlertTypeCount(BaseModel):
     # the `alert_type` query param on GET /alerts/, so clicking a slice can
     # drill into exactly the rows that were counted.
     alert_type: str
+    # Label to show in the legend — dbo.alert_types.display_name (editable on
+    # the settings screen), else made from alert_type ("Unknown Vehicle").
+    display_name: str
     count: int
-    # Severity the alert_type maps to, so the donut can colour slices without
-    # hardcoding the bucket list the backend already owns (_alert_query_bits).
+    # Severity to colour the slice with: the configured level from
+    # dbo.alert_types (critical | high | medium | low), or for a type with no
+    # settings entry, the severity its alerts were stored with.
     severity: str
 
 

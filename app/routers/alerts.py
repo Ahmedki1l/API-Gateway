@@ -101,6 +101,27 @@ def _static_severity(alert_type: str) -> str:
     return "info"
 
 
+def _humanize_type(alert_type: str) -> str:
+    """'unknown_vehicle' -> 'Unknown Vehicle': the label for a type that
+    dbo.alert_types does not name."""
+    return alert_type.replace("_", " ").strip().title() or "Unknown"
+
+
+def _alert_type_settings(db: Session) -> Optional[list[dict]]:
+    """The rows of dbo.alert_types (display name + configured severity), in
+    display order. None when the table is absent (migrator 0010 not run) —
+    callers then keep their built-in type list."""
+    try:
+        return rows(db, """
+            SELECT alert_type, display_name, severity
+            FROM dbo.alert_types
+            ORDER BY display_name
+        """)
+    except Exception:  # noqa: BLE001 — an add-on must not break the alerts page
+        db.rollback()
+        return None
+
+
 def _alert_query_bits(cols: dict) -> dict[str, str]:
     """
     Build SQL expression fragments based on which columns exist in the alerts table.
@@ -336,12 +357,19 @@ async def alert_summary(
     slice is drill-down-exact: `?alert_type=<slice.alert_type>` plus the same
     filters returns precisely the rows counted here.
 
-    Types with zero rows are included with `count: 0` so the legend keeps a
-    stable order and colour assignment across refreshes; the card filters to
-    `count > 0` before rendering. Note `named_slot_violation` is the legacy
-    name for `vehicle_intrusion` and is reported as its own slice — merging
-    them here would break the drill-down, since the list endpoint filters on
-    the raw column."""
+    Slice names and colours come from dbo.alert_types (the settings screen):
+    `display_name` is the label to show, `severity` the configured level, so a
+    rename or re-level there shows on the donut at once. Every type in that
+    table is listed, `count: 0` included, so the legend keeps a stable order
+    and colour assignment across refreshes; the card filters to `count > 0`
+    before rendering. A type with rows but no settings entry (a legacy name
+    such as `named_slot_violation`, or a new type) is appended with its stored
+    severity and a label made from its name — never dropped. Merging legacy
+    names into their successor would break the drill-down, since the list
+    endpoint filters on the raw column.
+
+    Without dbo.alert_types, the built-in type list and severity map are used
+    as before."""
     cols = _alerts_extra_cols()
     bits = _alert_query_bits(cols)
     schema = _floor_schema()
@@ -390,18 +418,31 @@ async def alert_summary(
     }
 
     by_type: list[AlertTypeCount] = []
-    for known in AlertType:
-        count, sev = counts.pop(known.value, (0, None))
-        by_type.append(AlertTypeCount(
-            alert_type=known.value,
-            count=count,
-            severity=sev or _static_severity(known.value),
-        ))
-    # Anything upstream started emitting that AlertType doesn't cover yet —
-    # appended rather than dropped, so the card can't silently under-report.
+    configured = _alert_type_settings(db)
+    if configured is not None:
+        for t in configured:
+            count, _ = counts.pop(t["alert_type"], (0, None))
+            by_type.append(AlertTypeCount(
+                alert_type=t["alert_type"],
+                display_name=t["display_name"] or _humanize_type(t["alert_type"]),
+                count=count,
+                severity=t["severity"],
+            ))
+    else:
+        for known in AlertType:
+            count, sev = counts.pop(known.value, (0, None))
+            by_type.append(AlertTypeCount(
+                alert_type=known.value,
+                display_name=_humanize_type(known.value),
+                count=count,
+                severity=sev or _static_severity(known.value),
+            ))
+    # Types with alerts but no entry above — appended rather than dropped, so
+    # the card can't silently under-report.
     for atype, (count, sev) in counts.items():
         by_type.append(AlertTypeCount(
             alert_type=atype,
+            display_name=_humanize_type(atype),
             count=count,
             severity=sev or _static_severity(atype),
         ))
