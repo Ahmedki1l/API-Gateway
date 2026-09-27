@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Annotated, Optional
+
+from app.config import facility_now_naive
 from io import StringIO
 import csv
 import logging
@@ -131,14 +133,16 @@ _VIOLATION_ALERT_TYPES = (
 
 
 def _active_violation_cols(alias: str = "pk") -> str:
-    """SELECT expression producing three correlated columns:
+    """SELECT expressions for three columns, read from the `av` derived table
+    that `_active_violation_join()` adds — every query using these must also
+    include that join:
       `active_violation_type` — alert_type of the most-recent unresolved,
          non-test violation alert on this slot (NULL when none).
       `active_violation_severity` — severity of the same alert (NULL when
          none). Reads `alerts.severity` when the column exists; falls back
          to the literal `'critical'` (the gateway's default for the four
          violation alert types — see `alerts.py:_alert_query_bits`).
-      `has_active_violation` — 0/1 BIT mirroring the same EXISTS check.
+      `has_active_violation` — 0/1 mirroring whether such an alert exists.
          Kept as an FE convenience flag; the model_validator on SlotRef /
          SlotListItem re-derives it from `active_violation_type` so the
          two fields can never disagree at the API boundary.
@@ -146,36 +150,35 @@ def _active_violation_cols(alias: str = "pk") -> str:
     Used by every slot list/detail SELECT so the frontend can recolor slots
     with live violations, surface the type as a tooltip, and pick a colour
     intensity per severity."""
+    return """av.alert_type AS active_violation_type,
+    av.severity AS active_violation_severity,
+    CASE WHEN av.alert_type IS NOT NULL THEN 1 ELSE 0 END AS has_active_violation"""
+
+
+def _active_violation_join(alias: str = "pk") -> str:
+    """LEFT JOIN of each slot's most-recent active violation alert, as `av`.
+
+    One pass over `alerts`, numbered per slot, rather than a TOP 1 subquery
+    per slot: for a slot with no violation, SQL Server walked the whole
+    alerts table (newest first, via the triggered_at index) before giving up
+    — 37 slots x 3 subqueries x every alert on each refresh of the live grid
+    (~640 ms at 5k alerts, growing with the table; this is ~3 ms). `a.id`
+    breaks ties between alerts raised in the same instant."""
     # Late import to dodge a startup-time circular: occupancy is imported by
     # dashboard, which already imports alerts; the alerts module pulls in
     # SQLAlchemy types that would cycle if loaded eagerly here.
     from app.routers.alerts import _alerts_extra_cols
     p = f"{alias}." if alias else ""
-    cols = _alerts_extra_cols()
-    sev_expr = "a.severity" if cols["severity"] else "'critical'"
-    return f"""(SELECT TOP 1 a.alert_type
-        FROM alerts a
-        WHERE a.slot_id = {p}slot_id
-          AND a.is_resolved = 0
-          AND a.is_test = 0
-          AND a.alert_type IN ({_VIOLATION_ALERT_TYPES})
-        ORDER BY a.triggered_at DESC
-    ) AS active_violation_type,
-    (SELECT TOP 1 {sev_expr}
-        FROM alerts a
-        WHERE a.slot_id = {p}slot_id
-          AND a.is_resolved = 0
-          AND a.is_test = 0
-          AND a.alert_type IN ({_VIOLATION_ALERT_TYPES})
-        ORDER BY a.triggered_at DESC
-    ) AS active_violation_severity,
-    CASE WHEN EXISTS (
-        SELECT 1 FROM alerts a
-        WHERE a.slot_id = {p}slot_id
-          AND a.is_resolved = 0
-          AND a.is_test = 0
-          AND a.alert_type IN ({_VIOLATION_ALERT_TYPES})
-    ) THEN 1 ELSE 0 END AS has_active_violation"""
+    sev_expr = "a.severity" if _alerts_extra_cols()["severity"] else "'critical'"
+    return f"""LEFT JOIN (
+            SELECT a.slot_id, a.alert_type, {sev_expr} AS severity,
+                   ROW_NUMBER() OVER (PARTITION BY a.slot_id
+                                      ORDER BY a.triggered_at DESC, a.id DESC) AS rn
+            FROM alerts a
+            WHERE a.is_resolved = 0
+              AND a.is_test = 0
+              AND a.alert_type IN ({_VIOLATION_ALERT_TYPES})
+        ) av ON av.slot_id = {p}slot_id AND av.rn = 1"""
 
 
 
@@ -519,6 +522,7 @@ async def get_slots(
             ss.status           AS current_status,
             ss.time             AS status_updated_at
         FROM parking_slots ps
+        {_active_violation_join('ps')}
         LEFT JOIN slot_status ss ON ss.slot_id = ps.slot_id
             AND ss.time = (
                 SELECT MAX(time) FROM slot_status WHERE slot_id = ps.slot_id
@@ -685,6 +689,7 @@ async def export_occupancy_csv(
             ss.status AS current_status,
             ss.time AS status_updated_at
         FROM parking_slots ps
+        {_active_violation_join('ps')}
         LEFT JOIN slot_status ss
             ON ss.slot_id = ps.slot_id
             AND ss.time = (
@@ -1071,6 +1076,7 @@ async def get_slots_by_floor(
             ss.status           AS current_status,
             ss.time             AS status_updated_at
         FROM parking_slots pk
+        {_active_violation_join('pk')}
         {_LATEST_STATUS_JOIN}
         {floor_id_lookup_join}
         LEFT JOIN dbo.floors fo ON fo.name = pk.floor
@@ -1131,6 +1137,7 @@ async def get_slot_detail(slot_id: str, db: Session = Depends(get_db)):
             ss.status           AS current_status,
             ss.time             AS status_updated_at
         FROM parking_slots pk
+        {_active_violation_join('pk')}
         {_LATEST_STATUS_JOIN}
         WHERE pk.slot_id = :slot_id
     """, {"slot_id": slot_id})
@@ -1748,6 +1755,47 @@ def _report_base_dep(
     return _report_base(db, start_time, end_time, business_hours, hour_from, hour_to)
 
 
+def _last_7_days() -> tuple[datetime, datetime]:
+    """Today and the 6 days before it, facility-local: 00:00 six days ago ->
+    now. Exactly one date per weekday column; today's is the partial one."""
+    now = facility_now_naive()
+    first = datetime.combine(now.date() - timedelta(days=6), datetime.min.time())
+    return first, now
+
+
+def _heatmap_base_dep(
+    start_time: Annotated[Optional[FacilityNaiveDatetime], Query(
+        description="Window start, facility-local naive. Omit BOTH start_time "
+                    "and end_time for the last 7 days (today and the 6 before).",
+    )] = None,
+    end_time: Annotated[Optional[FacilityNaiveDatetime], Query(
+        description="Window end, exclusive. Omit with start_time for the last 7 days.",
+    )] = None,
+    business_hours: Optional[bool] = Query(
+        None,
+        description="Restrict to operating hours. Omit to use each day's saved "
+                    "working hours; `false` shows all 24 hours.",
+    ),
+    hour_from: Optional[int] = Query(
+        None, ge=0, le=23,
+        description="Override the working hours' start for this request only.",
+    ),
+    hour_to: Optional[int] = Query(
+        None, ge=1, le=24,
+        description="Override the working hours' end (exclusive) for this request only.",
+    ),
+    db: Session = Depends(get_db),
+) -> _ReportBase:
+    """`_report_base_dep` with a default range, for the Occupancy page's Peak
+    Hours card, which has no date picker."""
+    if (start_time is None) != (end_time is None):
+        raise HTTPException(status_code=400,
+                            detail="send both start_time and end_time, or neither")
+    if start_time is None:
+        start_time, end_time = _last_7_days()
+    return _report_base(db, start_time, end_time, business_hours, hour_from, hour_to)
+
+
 # ── KPI cards ─────────────────────────────────────────────────────────────────
 
 def _report_kpis(base: _ReportBase) -> OccupancyReportKpis:
@@ -2082,14 +2130,18 @@ async def occupancy_report_heatmap(
                     "reporting window's first hour; the last band is shorter "
                     "when the window isn't a multiple of this.",
     ),
-    base: _ReportBase = Depends(_report_base_dep),
+    base: _ReportBase = Depends(_heatmap_base_dep),
 ):
     """Peak Hours heatmap — typical occupancy by weekday x time of day.
 
     Same data and same time-weighted method as `/history/trend`, arranged as
     a weekly pattern instead of a timeline: each cell averages every
-    occurrence of that weekday in the range, so the range should span several
-    weeks (4 recommended) — with one week every cell is a single day.
+    occurrence of that weekday in the range.
+
+    Without start_time/end_time the range is the last 7 days — today and
+    the 6 days before it — for the Occupancy page's Peak Hours card. Each
+    weekday column is then exactly one date; today's column covers the hours
+    up to now, and its later bands are NULL.
 
     Rows follow the reporting window (`business_hours` / `hour_from` /
     `hour_to`, else the saved setting); with `business_hours=false` they cover 00-24.

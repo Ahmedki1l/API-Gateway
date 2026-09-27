@@ -765,3 +765,36 @@ class TestWorkingHoursHistory:
         assert get_window_history(db).rule_for(day) == DayRule(True, 10, 12)   # the log now says 10-12
         for r in REPORTS:
             assert client.get(f"/occupancy/history/{r}?{qs}").json() == before[r], r
+
+
+# ── 8. Peak Hours default range (Occupancy page) ─────────────────────────────
+
+class TestPeakHoursDefault:
+    NOW = datetime(2026, 7, 29, 15, 30)    # a Wednesday afternoon with data
+
+    def test_default_is_today_and_the_6_days_before(self, client, monkeypatch):
+        monkeypatch.setattr(occupancy, "facility_now_naive", lambda: self.NOW)
+        r = client.get("/occupancy/history/heatmap?block_hours=4&business_hours=false")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["start_time"].startswith("2026-07-23T00:00:00")
+        assert body["end_time"].startswith("2026-07-29T15:30:00")
+        assert [row["label"] for row in body["rows"]] == [
+            "00:00-04:00", "04:00-08:00", "08:00-12:00",
+            "12:00-16:00", "16:00-20:00", "20:00-24:00"]
+        today = self.NOW.weekday()
+        for cell in body["cells"]:
+            later_today = cell["weekday_index"] == today and cell["row_index"] >= 4   # 16:00 onwards
+            if later_today:
+                assert cell["occupancy"] is None and cell["days_sampled"] == 0
+            else:
+                # every weekday column is exactly one date
+                assert cell["days_sampled"] == 1, cell
+
+        explicit = client.get("/occupancy/history/heatmap?block_hours=4&business_hours=false"
+                              "&start_time=2026-07-23T00:00:00&end_time=2026-07-29T15:30:00")
+        assert explicit.json() == body
+
+    def test_one_edge_only_is_rejected(self, client):
+        r = client.get("/occupancy/history/heatmap?start_time=2026-07-23T00:00:00")
+        assert r.status_code == 400
