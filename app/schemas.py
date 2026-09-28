@@ -497,6 +497,11 @@ class VehicleKPIs(BaseModel):
     unregistered: int
     registered: int
     employee: int
+    # Cars in the garage right now: open parking_sessions plates. Same number
+    # as DashboardKPIs.parked_vehicles.
+    currently_parked: int = 0
+    # Active floors (floors.is_active = 1). Same as DashboardKPIs.floors_count.
+    floors_count: int = 0
 
 
 # Permissive plate-number pattern. Accepts Latin letters, Arabic-Indic digits

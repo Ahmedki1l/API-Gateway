@@ -336,11 +336,19 @@ async def vehicle_kpis(db: Session = Depends(get_db)):
 
     total = registered + unregistered + employee
 
+    # Same queries as /dashboard/kpis, so the two screens never disagree.
+    currently_parked = scalar(
+        db, "SELECT COUNT(DISTINCT plate_number) FROM parking_sessions WHERE status = 'open'"
+    ) or 0
+    floors_count = scalar(db, "SELECT COUNT(*) FROM floors WHERE is_active = 1") or 0
+
     return VehicleKPIs(
         total_vehicles=total,
         unregistered=unregistered,
         registered=registered,
         employee=employee,
+        currently_parked=currently_parked,
+        floors_count=floors_count,
     )
 
 
