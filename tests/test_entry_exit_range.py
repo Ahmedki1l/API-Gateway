@@ -158,3 +158,81 @@ class TestPeakHours:
 
     def test_reversed_range_is_400(self, client, prefix):
         assert client.get(prefix + "/peak-hours", params={"date_from": D1, "date_to": D}).status_code == 400
+
+
+def _traffic(client, prefix, **params):
+    r = client.get(prefix + "/traffic", params=params)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+class TestTraffic:
+    def test_one_day_is_hourly(self, client, prefix):
+        b = _traffic(client, prefix, date_from=D, date_to=D)
+        assert [x["label"] for x in b] == [f"{D}T{h:02d}:00" for h in range(24)]
+        assert {i: x["entries"] for i, x in enumerate(b) if x["entries"]} == {8: 1, 20: 1, 23: 1}
+        assert {i: x["exits"] for i, x in enumerate(b) if x["exits"]} == {1: 1, 10: 1}
+
+    def test_two_days_stay_hourly(self, client, prefix):
+        b = _traffic(client, prefix, date_from=D, date_to=D1)
+        assert len(b) == 48 and b[24]["label"] == f"{D1}T00:00"
+        assert {i: x["exits"] for i, x in enumerate(b) if x["exits"]} == {1: 1, 10: 1, 32: 1, 33: 1}
+
+    def test_longer_range_is_daily(self, client, prefix):
+        b = _traffic(client, prefix, date_from="2031-01-14", date_to=D1)
+        assert [x["label"] for x in b] == ["2031-01-14", D, D1]
+        assert [x["entries"] for x in b] == [1, 3, 1]
+        assert [x["exits"] for x in b] == [0, 2, 2]
+
+    def test_bars_add_up_to_the_kpis(self, client, prefix):
+        b = _traffic(client, prefix, date_from="2031-01-14", date_to="2031-01-20")
+        k = _kpis(client, prefix, date_from="2031-01-14", date_to="2031-01-20")
+        assert sum(x["entries"] for x in b) == k["total_enter"]
+        assert sum(x["exits"] for x in b) == k["total_exit"]
+
+    def test_default_is_the_last_24_hours(self, client, prefix, monkeypatch):
+        from app.routers import entry_exit
+        monkeypatch.setattr(entry_exit, "facility_now_naive", lambda: datetime(2031, 1, 16, 9, 30))
+        b = _traffic(client, prefix)
+        assert len(b) == 24
+        assert (b[0]["label"], b[-1]["label"]) == (f"{D}T10:00", f"{D1}T09:00")
+        # B, C entered D 20:00 / 23:00; E entered D+1 07:00. A (D 08:00) is too old.
+        assert {x["label"]: x["entries"] for x in b if x["entries"]} == {
+            f"{D}T20:00": 1, f"{D}T23:00": 1, f"{D1}T07:00": 1}
+        # A left D 10:00; E D+1 08:00; B D+1 09:00.
+        assert sum(x["exits"] for x in b) == 3
+
+    def test_period_still_works_without_dates(self, client, prefix):
+        assert len(_traffic(client, prefix, period="daily")) == 24
+
+
+class TestOccupancyTrendDefault:
+    NOW = datetime(2031, 1, 16, 9, 30)
+
+    @pytest.fixture(autouse=True)
+    def occ_clock(self, monkeypatch):
+        from app.routers import occupancy
+        monkeypatch.setattr(occupancy, "facility_now_naive", lambda: self.NOW)
+
+    def test_no_range_is_the_last_24_hours_hourly(self, client):
+        r = client.get("/occupancy/history/trend", params={"business_hours": "false"})
+        assert r.status_code == 200, r.text
+        j = r.json()
+        assert (j["start_time"], j["end_time"]) == ("2031-01-15T10:00:00", "2031-01-16T09:30:00")
+        assert j["grain"] == "hour" and len(j["points"]) == 24
+
+    def test_range_keeps_the_weekday_default(self, client):
+        r = client.get("/occupancy/history/trend", params={
+            "start_time": "2031-01-13T00:00:00", "end_time": "2031-01-20T00:00:00"})
+        assert r.status_code == 200 and r.json()["grain"] == "weekday"
+
+    @pytest.mark.parametrize("path", ["kpis", "by-location", "trend"])
+    def test_other_reports_default_too(self, client, path):
+        assert client.get(f"/occupancy/history/{path}").status_code == 200
+
+    def test_half_a_range_is_400(self, client):
+        r = client.get("/occupancy/history/kpis", params={"start_time": "2031-01-15T00:00:00"})
+        assert r.status_code == 400
+
+    def test_reversed_range_is_400(self, client, prefix):
+        assert client.get(prefix + "/traffic", params={"date_from": D1, "date_to": D}).status_code == 400

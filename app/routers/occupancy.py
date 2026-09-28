@@ -7,7 +7,7 @@ from io import StringIO
 import csv
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -1727,13 +1727,14 @@ def _report_base(
 
 
 def _report_base_dep(
-    start_time: Annotated[FacilityNaiveDatetime, Query(
+    start_time: Annotated[Optional[FacilityNaiveDatetime], Query(
         description="Window start, facility-local naive. A `Z` or `+HH:MM` offset "
-                    "is accepted and IGNORED — the wall-clock digits are the window.",
-    )],
-    end_time: Annotated[FacilityNaiveDatetime, Query(
+                    "is accepted and IGNORED — the wall-clock digits are the window. "
+                    "Omit BOTH start_time and end_time for the last 24 hours.",
+    )] = None,
+    end_time: Annotated[Optional[FacilityNaiveDatetime], Query(
         description="Window end, exclusive. Same offset handling as start_time.",
-    )],
+    )] = None,
     business_hours: Optional[bool] = Query(
         None,
         description="Restrict percentages to operating hours. Omit to use the "
@@ -1752,7 +1753,20 @@ def _report_base_dep(
     """Declares the query contract shared by all four Tab 1 endpoints in one
     place, so the widgets cannot drift apart on parameter names, defaults or
     validation — which would silently produce charts that disagree."""
+    if (start_time is None) != (end_time is None):
+        raise HTTPException(status_code=400,
+                            detail="send both start_time and end_time, or neither")
+    if start_time is None:
+        start_time, end_time = _last_24_hours()
     return _report_base(db, start_time, end_time, business_hours, hour_from, hour_to)
+
+
+def _last_24_hours() -> tuple[datetime, datetime]:
+    """The default report window: the current facility-local hour and the 23
+    before it -> now. 24 hourly buckets, the newest one partial; the same
+    window as GET /entry-exit/traffic's default."""
+    now = facility_now_naive()
+    return now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=23), now
 
 
 def _last_7_days() -> tuple[datetime, datetime]:
@@ -2011,12 +2025,15 @@ def _report_trend_weekday(base: _ReportBase) -> list[OccupancyTrendPoint]:
 
 @router.get("/history/trend", response_model=OccupancyTrendResponse)
 async def occupancy_report_trend(
-    grain: OccupancyTrendGrain = Query(
-        OccupancyTrendGrain.weekday,
+    request: Request,
+    grain: Optional[OccupancyTrendGrain] = Query(
+        None,
         description="X-axis bucketing, chosen by the frontend: hour | day | week "
                     "| month | weekday. `weekday` returns 7 Mon..Sun averages "
                     "and no bucket_start; the rest return a chronological "
-                    "series with one point per bucket the range touches.",
+                    "series with one point per bucket the range touches. "
+                    "Omitted: `hour` for the default last-24-hours window, "
+                    "`weekday` when a range is given.",
     ),
     base: _ReportBase = Depends(_report_base_dep),
 ):
@@ -2032,6 +2049,9 @@ async def occupancy_report_trend(
     is null only when the bucket was never measured — the chart must draw a gap
     there, not a zero-height bar. Time-weighted, not hourly-sampled (Q2).
     """
+    if grain is None:
+        grain = (OccupancyTrendGrain.weekday if "start_time" in request.query_params
+                 else OccupancyTrendGrain.hour)
     return OccupancyTrendResponse(
         grain=grain.value,
         points=_report_trend(base, grain),

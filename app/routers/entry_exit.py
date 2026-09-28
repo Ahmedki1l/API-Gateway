@@ -293,12 +293,73 @@ async def peak_hours(
     return PeakHours(date_from=date_from, date_to=date_to, items=items)
 
 
+# Ranges up to this many days are drawn hour by hour; longer ones day by day.
+_TRAFFIC_HOURLY_MAX_DAYS = 2
+
+
+def _last_24_hours() -> tuple[datetime, datetime]:
+    """The default chart window: the current facility-local hour and the 23
+    before it, so exactly 24 hourly bars with the newest one partial."""
+    start = facility_now_naive().replace(minute=0, second=0, microsecond=0) - timedelta(hours=23)
+    return start, start + timedelta(hours=24)
+
+
+def _ranged_traffic(db: Session, date_from: Optional[date], date_to: Optional[date]) -> list[TrafficBucket]:
+    """Traffic chart for [date_from, date_to], facility-local days, zero-filled;
+    no dates = the last 24 hours. Same sessions as /kpis and /peak-hours, so
+    the bars of a date range add up to its total_enter / total_exit. Labels
+    are `YYYY-MM-DDTHH:00` (hourly) or `YYYY-MM-DD` (daily); the frontend
+    formats them."""
+    if date_from is None and date_to is None:
+        start, end = _last_24_hours()
+        unit, step, fmt, count = "HOUR", timedelta(hours=1), "%Y-%m-%dT%H:00", 24
+    else:
+        date_from, date_to = _page_range(date_from, date_to)
+        start, end = _midnight(date_from), _midnight(date_to + timedelta(days=1))
+        days = (date_to - date_from).days + 1
+        if days <= _TRAFFIC_HOURLY_MAX_DAYS:
+            unit, step, fmt, count = "HOUR", timedelta(hours=1), "%Y-%m-%dT%H:00", days * 24
+        else:
+            unit, step, fmt, count = "DAY", timedelta(days=1), "%Y-%m-%d", days
+    buckets = [
+        TrafficBucket(label=(start + step * i).strftime(fmt), entries=0, exits=0)
+        for i in range(count)
+    ]
+    params = {"start": start, "end": end}
+    for r in rows(db, f"""
+        SELECT idx, COUNT(*) AS n FROM (
+            SELECT DATEDIFF({unit}, :start, entry_time) AS idx FROM parking_sessions
+            WHERE entry_time >= :start AND entry_time < :end
+        ) t GROUP BY idx
+    """, params):
+        buckets[int(r["idx"])].entries = int(r["n"])
+    for r in rows(db, f"""
+        SELECT idx, COUNT(*) AS n FROM (
+            SELECT DATEDIFF({unit}, :start, exit_time) AS idx FROM parking_sessions
+            WHERE status = 'closed' AND exit_time >= :start AND exit_time < :end
+        ) t GROUP BY idx
+    """, params):
+        buckets[int(r["idx"])].exits = int(r["n"])
+    return buckets
+
+
 @router.get("/traffic", response_model=list[TrafficBucket])
 async def traffic_chart(
-    period: str = Query("daily", description="daily | weekly | monthly"),
+    date_from: Optional[date] = Query(None, description="First day (inclusive), facility-local. Omit both for the last 24 hours."),
+    date_to: Optional[date] = Query(None, description="Last day (inclusive), facility-local."),
+    period: Optional[str] = Query(None, description="Deprecated: daily | weekly | monthly rolling window. Ignored when a date is given."),
     db: Session = Depends(get_db),
 ):
-    """Rolling-window traffic counts from `entry_exit_log`, zero-filled.
+    """Entries / exits per bucket.
+
+    Default (and with `date_from` / `date_to`, same picker semantics as
+    /kpis): counts from `parking_sessions`, hourly buckets for ranges of up
+    to 2 days, daily buckets beyond that. No params = the last 24 hours
+    (current hour and the 23 before it), 24 hourly bars.
+
+    Only an explicit `period` (and no date) takes the legacy path below:
+
+    Rolling-window traffic counts from `entry_exit_log`, zero-filled.
 
     Window semantics:
       - **daily**   → last 24 hours from now (24 hourly buckets,
@@ -313,6 +374,9 @@ async def traffic_chart(
     (`YYYY-MM-DDTHH:00` for daily, `YYYY-MM-DD` for weekly/monthly) so the
     chart can render them unambiguously regardless of locale.
     """
+    if period is None or date_from or date_to:
+        return _ranged_traffic(db, date_from, date_to)
+
     from app.config import settings  # local import to avoid a circular at module load
     offset_minutes = int(settings.facility_timezone_offset_hours * 60)
     local_tz = facility_tz()
