@@ -1066,7 +1066,16 @@ async def resolve_alert(alert_id: int, db: Session = Depends(get_db)):
     )
     db.commit()
     if result.rowcount == 0:
-        raise HTTPException(404, "Alert not found or already resolved")
+        # Tell the two cases apart: a second operator resolving the same alert
+        # should hear "already done", not "does not exist".
+        found = rows(db, "SELECT resolved_at FROM alerts WHERE id = :id", {"id": alert_id})
+        if not found:
+            raise HTTPException(404, "Alert not found")
+        at = found[0]["resolved_at"]
+        raise HTTPException(
+            409,
+            f"Alert was already resolved at {at:%Y-%m-%d %H:%M}" if at else "Alert was already resolved",
+        )
     return EntityActionResponse(id=alert_id)
 
 
