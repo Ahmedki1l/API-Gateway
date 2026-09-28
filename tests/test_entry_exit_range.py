@@ -236,3 +236,18 @@ class TestOccupancyTrendDefault:
 
     def test_reversed_range_is_400(self, client, prefix):
         assert client.get(prefix + "/traffic", params={"date_from": D1, "date_to": D}).status_code == 400
+
+
+class TestDashboardMatchesEntryExit:
+    """/dashboard/kpis today == /entry-exit/kpis today, same definitions."""
+
+    def test_overnight_car_that_left_this_morning_is_an_overstay(self, client, prefix, monkeypatch, stale):
+        from app.routers import dashboard, entry_exit
+        at = lambda: datetime(2031, 1, 16, 12, 0)   # D+1 noon; B left at 09:00, C still inside
+        monkeypatch.setattr(entry_exit, "facility_now_naive", at)
+        monkeypatch.setattr(dashboard, "facility_now_naive", at)
+        d = client.get("/dashboard/kpis").json()
+        k = _kpis(client, prefix)
+        assert (d["entries_today"], d["exits_today"], d["overstays_today"]) == \
+               (k["total_enter"], k["total_exit"], k["overstays"])
+        assert d["overstays_today"] == 2 + stale    # B (left since) and C

@@ -4,10 +4,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.config import facility_today_utc, localize_naive
+from app.config import facility_now_naive, facility_today_utc, localize_naive
 from app.database import get_db, scalar, rows
 from app.routers._helpers import _floor_schema
 from app.routers.alerts import _alerts_extra_cols
+from app.routers.entry_exit import _kpi_counts
 from app.routers.occupancy import _monitored_only, _slot_type_excl
 from app.services.snapshots import resolve_snapshot_url
 from app.schemas import (
@@ -166,41 +167,17 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
         db, "SELECT COUNT(DISTINCT plate_number) FROM parking_sessions WHERE status = 'open'"
     ) or 0
 
-    # Entries / Exits / Overstays use exactly the definitions of
-    # /entry-exit/kpis (no target_date), so the dashboard cards and the
+    # Entries / Exits / Overstays come from the very function behind
+    # /entry-exit/kpis (default range = today), so the dashboard cards and the
     # Entry/Exit page can never show different numbers under the same label.
-    today = facility_today_utc()
-
-    # Every session that entered since local midnight, whatever its status —
-    # a car that came in and already left is still one of today's entries.
-    entries_today = scalar(
-        db,
-        "SELECT COUNT(*) FROM parking_sessions WHERE entry_time >= :today",
-        {"today": today},
-    ) or 0
-    # Every session closed since local midnight, on the EXIT axis — a car that
-    # entered yesterday and left today counts here (and drops out of
-    # overstays_today at the same moment). Drill-down: the Entry/Exit list with
-    # ?status=closed&exit_date_from=<today>.
-    exits_today = scalar(
-        db,
-        """
-        SELECT COUNT(*) FROM parking_sessions
-        WHERE status = 'closed' AND exit_time >= :today
-        """,
-        {"today": today},
-    ) or 0
-    # Overstay = still inside after crossing local midnight.
-    overstays_today = scalar(
-        db,
-        """
-        SELECT COUNT(DISTINCT plate_number) FROM parking_sessions
-        WHERE plate_number IS NOT NULL
-          AND status IN ('open', 'overstay')
-          AND entry_time < :today
-        """,
-        {"today": today},
-    ) or 0
+    # Entries: entered since local midnight. Exits: closed since local midnight
+    # (exit axis). Overstays: inside at local midnight, including cars that
+    # have left since.
+    local_today = facility_now_naive().date()
+    counts = _kpi_counts(db, local_today, local_today)
+    entries_today = counts.total_enter
+    exits_today = counts.total_exit
+    overstays_today = counts.overstays
     cols = _alerts_extra_cols()
     # Dashboard critical-alerts card counts TODAY's unresolved criticals only
     # (facility-local midnight onward), matching how the Entry/Exit KPIs scope
