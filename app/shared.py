@@ -57,6 +57,27 @@ def plate_search_clause(column: str, term: str, params: dict, prefix: str = "pla
     return "(" + " OR ".join(ors) + ")"
 
 
+def plate_display_sort_expr(column: str) -> str:
+    """SQL sort key that orders plates the way the frontend SHOWS them.
+
+    The DB stores letters first ("NJS-7894") and the UI displays digits first
+    ("7894-NJS"), so sorting the stored value would look unsorted on screen.
+    Swaps the two halves around the first dash; a plate without a dash
+    ("66565EK") sorts as stored."""
+    dash = f"CHARINDEX('-', {column})"
+    return (f"CASE WHEN {dash} > 0 "
+            f"THEN SUBSTRING({column}, {dash} + 1, 50) + '-' + LEFT({column}, {dash} - 1) "
+            f"ELSE {column} END")
+
+
+def order_by_nulls_last(expr: str, direction: str, *tiebreak: str) -> str:
+    """`ORDER BY` body for one sort key, empty values last in BOTH directions
+    (SQL Server puts NULLs first on ASC), then the tie-break columns in the
+    same direction so paging is stable."""
+    return ", ".join([f"CASE WHEN {expr} IS NULL THEN 1 ELSE 0 END", f"{expr} {direction}",
+                      *(f"{t} {direction}" for t in tiebreak)])
+
+
 def plate_exact_forms(term: str) -> list[str]:
     """Every stored spelling of ONE plate: both digit/letter orders, each with
     no separator, a dash, or a space ("4918-AVD" -> AVD4918, AVD-4918,

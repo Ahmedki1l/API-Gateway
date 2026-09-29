@@ -305,6 +305,15 @@ class AlertPriorityCount(BaseModel):
     pct: float              # share of total_alerts, 1 decimal
 
 
+class AlertStatsCounts(BaseModel):
+    """The Alerts page card numbers for one period."""
+    total_alerts: int = 0
+    critical_alerts: int = 0
+    high_alerts: int = 0
+    resolved_total: int = 0         # resolved since
+    active_alerts: int = 0          # not resolved yet
+
+
 class AlertStats(BaseModel):
     """Alerts page KPI cards. Counts cover the alerts triggered in the
     requested days (all time without dates), resolved or not, unless the field
@@ -317,6 +326,12 @@ class AlertStats(BaseModel):
     resolved_total: int             # resolved since
     active_alerts: int              # not resolved yet
     critical_violations: int        # critical AND not resolved yet
+    # The same cards for the equally long period right before the range, for
+    # the "vs" arrows (yesterday, for a one-day range). Null without both dates:
+    # all time has no previous period.
+    previous: Optional[AlertStatsCounts] = None
+    previous_from: Optional[date] = None
+    previous_to: Optional[date] = None
 
 
 class AlertsByPriority(BaseModel):
@@ -354,7 +369,7 @@ class AlertSummary(BaseModel):
 
 
 class OverstayViolationsReport(BaseModel):
-    """GET /reports/overstay-violations — the Overstay & Violations report
+    """GET /alerts/reports/overstay-violations — the Overstay & Violations report
     headline. Overstay is NOT an alert (nothing writes one); it is counted
     from parking_sessions and kept out of `by_type`."""
     date_from: Optional[date] = None

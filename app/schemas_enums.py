@@ -92,6 +92,56 @@ class AlertSort(str, Enum):
     resolved_at = "resolved_at"     # when it was resolved; unresolved rows last
 
 
+class ResolvedFilter(str, Enum):
+    """`resolved` on GET /alerts/summary."""
+    false = "false"     # active only (default)
+    true = "true"       # resolved only
+    all = "all"         # both — every alert in the range
+
+
+class AlertSortBy(str, Enum):
+    """Sortable columns of GET /alerts/ and its CSV (`sort_by`). Empty values
+    sort last in either direction."""
+    triggered_at = "triggered_at"   # Time
+    resolved_at = "resolved_at"     # unresolved rows last
+    type = "type"                   # alert_type
+    plate = "plate"                 # as displayed, digits first; no plate last
+    location = "location"           # floor as the table shows it, else location
+    severity = "severity"           # desc: critical, high, medium, low
+    status = "status"               # asc: active before resolved
+
+
+class SortDir(str, Enum):
+    """Direction for `sort_by` on the list endpoints."""
+    asc = "asc"
+    desc = "desc"
+
+
+class EntryExitSort(str, Enum):
+    """Sortable columns of GET /entry-exit/ and its CSV. Empty values sort
+    last in either direction."""
+    time = "time"                   # the row's Time column: exit time, else entry time
+    entry_time = "entry_time"
+    exit_time = "exit_time"         # still-inside visits last
+    type = "type"                   # asc: ENTRY (still inside) before EXIT
+    plate = "plate"                 # as displayed, digits first (7894-NJS)
+    floor = "floor"                 # Parking / Location
+    gate = "gate"                   # exit camera, else entry camera
+    duration = "duration"           # stay; open visits count live elapsed time
+
+
+class VehicleSort(str, Enum):
+    """Sortable columns of GET /vehicles/ and its CSV. Empty values sort last
+    in either direction."""
+    plate = "plate"                 # as displayed, digits first (7894-NJS)
+    owner = "owner"                 # registered owners by name; unregistered last
+    vehicle_type = "vehicle_type"   # 'unknown' counts as empty
+    floor = "floor"                 # Parking
+    status = "status"               # asc: registered before unregistered
+    registered_at = "registered_at"
+    parked_at = "parked_at"         # cars not parked last
+
+
 # Old-scale value -> the level it filters as.
 LEGACY_SEVERITY = {"warning": "medium", "info": "low"}
 

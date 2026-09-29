@@ -1774,6 +1774,43 @@ def _last_24_hours() -> tuple[datetime, datetime]:
     return now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=23), now
 
 
+def _trend_base_dep(
+    start_time: Annotated[Optional[FacilityNaiveDatetime], Query(
+        description="Window start, facility-local naive. Omit BOTH start_time and "
+                    "end_time for the last 24 hours.",
+    )] = None,
+    end_time: Annotated[Optional[FacilityNaiveDatetime], Query(
+        description="Window end, exclusive. Same offset handling as start_time.",
+    )] = None,
+    business_hours: Optional[bool] = Query(
+        None,
+        description="Restrict to operating hours. Omitted: the saved setting when a "
+                    "range is sent; all 24 hours for the default last-24-hours window.",
+    ),
+    hour_from: Optional[int] = Query(
+        None, ge=0, le=23,
+        description="Override the working hours' start for this request only.",
+    ),
+    hour_to: Optional[int] = Query(
+        None, ge=1, le=24,
+        description="Override the working hours' end (exclusive) for this request only.",
+    ),
+    db: Session = Depends(get_db),
+) -> _ReportBase:
+    """`_report_base_dep` for the trend chart. Without a range it is the
+    Dashboard's "Last 24 Hours" line, whose axis is the whole day — so the
+    saved working hours only apply when asked for (`business_hours` /
+    `hour_from` / `hour_to`) or when a range is sent (the Reports tab)."""
+    if (start_time is None) != (end_time is None):
+        raise HTTPException(status_code=400,
+                            detail="send both start_time and end_time, or neither")
+    if start_time is None:
+        start_time, end_time = _last_24_hours()
+        if business_hours is None and hour_from is None and hour_to is None:
+            business_hours = False
+    return _report_base(db, start_time, end_time, business_hours, hour_from, hour_to)
+
+
 def _last_7_days() -> tuple[datetime, datetime]:
     """Today and the 6 days before it, facility-local: 00:00 six days ago ->
     now. Exactly one date per weekday column; today's is the partial one."""
@@ -1841,9 +1878,12 @@ def _report_kpis(base: _ReportBase) -> OccupancyReportKpis:
     all_seconds = sum(int(b["total_occupied_seconds"] or 0) for b in base.buckets)
     parking_captured_pct = round(total_seconds / all_seconds * 100, 1) if all_seconds else 100.0
 
-    # KPI 2 — peak: the hour bucket with the most occupied slot-seconds
-    # garage-wide. Each bucket's denominator is its own clamped length, so a
-    # partial hour at either window edge is not penalised.
+    # KPI 2 — peak: the counted hour with the most occupied slot-seconds
+    # garage-wide. An hour outside the reporting window is not measured, so it
+    # cannot be the peak — the same rule Overall Utilization and
+    # /history/peak-hours/kpis -> max_occupancy use. Each bucket's denominator
+    # is its own counted length, so a partial hour at either range edge is not
+    # penalised.
     per_hour: dict = {}
     for b in base.buckets:
         per_hour[b["bucket_start"]] = (
@@ -1853,9 +1893,8 @@ def _report_kpis(base: _ReportBase) -> OccupancyReportKpis:
     peak_occupancy = 0.0
     peak_occupancy_at: Optional[datetime] = None
     for hour_start, secs in per_hour.items():
-        hour_end = hour_start + timedelta(hours=1)
-        span = (min(hour_end, base.end_time) - max(hour_start, base.start_time)).total_seconds()
-        if span <= 0:
+        span = base.counted_span(hour_start)
+        if not span:
             continue
         pct = secs / (base.total_capacity * span) * 100
         if pct > peak_occupancy:
@@ -2040,7 +2079,7 @@ async def occupancy_report_trend(
                     "Omitted: `hour` for the default last-24-hours window, "
                     "`weekday` when a range is given.",
     ),
-    base: _ReportBase = Depends(_report_base_dep),
+    base: _ReportBase = Depends(_trend_base_dep),
 ):
     """Report 1 — the Occupancy Trend chart alone, at the grain the caller asks
     for. The backend never infers a grain from the range length; the frontend

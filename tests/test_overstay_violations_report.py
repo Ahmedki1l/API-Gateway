@@ -1,4 +1,4 @@
-"""GET /reports/overstay-violations — Total Violations = overstays + alerts.
+"""GET /alerts/reports/overstay-violations — Total Violations = overstays + alerts.
 
 Runs against the database in .env. Inserts marker rows on empty PAST days
 (March 2025 — an overstay only counts up to today's midnight, so future days

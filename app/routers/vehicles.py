@@ -47,10 +47,12 @@ from app.schemas import (
     VehicleTimelineItem,
     VehicleUpdate,
 )
-from app.schemas_enums import AlertSeverity, EntryExitDirection, ParkingSessionStatus
+from app.schemas_enums import AlertSeverity, EntryExitDirection, ParkingSessionStatus, SortDir, VehicleSort
 from app.shared import (
     build_paged,
     normalize_plate_term,
+    order_by_nulls_last,
+    plate_display_sort_expr,
     plate_exact_forms,
     plate_in_clause,
     plate_search_clause,
@@ -386,6 +388,34 @@ async def vehicle_kpis(db: Session = Depends(get_db)):
 
 
 # ── GET /vehicles ─────────────────────────────────────────────────────────────
+def _vehicle_order(sort_by: VehicleSort, sort_dir: SortDir, *,
+                   plate: str, vehicle_type: str, floor: str) -> str:
+    """ORDER BY body for the Vehicles list and CSV, whose queries alias the
+    plate / type / floor differently. Only these fixed expressions ever reach
+    ORDER BY. The plate breaks ties (one registry row per plate) so paging is
+    stable."""
+    keys = {
+        VehicleSort.plate: plate_display_sort_expr(plate),
+        # The table shows "Unregistered" instead of a name, so those go last.
+        VehicleSort.owner: "CASE WHEN COALESCE(v.is_registered, 0) = 1 "
+                           "THEN NULLIF(LTRIM(RTRIM(v.owner_name)), '') END",
+        VehicleSort.vehicle_type: f"NULLIF({vehicle_type}, 'unknown')",
+        VehicleSort.floor: floor,
+        VehicleSort.status: "CASE WHEN COALESCE(v.is_registered, 0) = 1 THEN 0 ELSE 1 END",
+        VehicleSort.registered_at: "v.registered_at",
+        VehicleSort.parked_at: "ps.parked_at",
+    }
+    return order_by_nulls_last(keys[sort_by], sort_dir.value.upper(), plate)
+
+
+_VEHICLE_SORT_DOC = ("Column to sort by, applied before paging: plate (as displayed, "
+                     "digits first) | owner (unregistered last) | vehicle_type | floor | "
+                     "status (asc: registered first) | registered_at | parked_at. Empty "
+                     "values sort last either way. Omit for parked cars first, newest "
+                     "registration next.")
+_SORT_DIR_DOC = "asc | desc (default). Ignored without sort_by."
+
+
 @router.get("/", response_model=PagedResponse[VehicleItem])
 async def get_vehicles(
     page: int = Query(1, ge=1),
@@ -410,6 +440,8 @@ async def get_vehicles(
             "null  → all plates (default)"
         ),
     ),
+    sort_by: Optional[VehicleSort] = Query(None, description=_VEHICLE_SORT_DOC),
+    sort_dir: SortDir = Query(SortDir.desc, description=_SORT_DIR_DOC),
     db: Session = Depends(get_db),
 ):
     """Registry view: one row per plate in the `vehicles` table, enriched with
@@ -566,6 +598,14 @@ async def get_vehicles(
         if cols["v_floor_id"] else f"{ps_outer_floor_id}"
     )
 
+    order_by = (
+        "CASE WHEN ps.parked_at IS NOT NULL THEN 0 ELSE 1 END, ps.parked_at DESC, "
+        "v.registered_at DESC, ap.plate_number"
+        if sort_by is None else
+        _vehicle_order(sort_by, sort_dir, plate="ap.plate_number",
+                       vehicle_type="COALESCE(v.vehicle_type, ps.vehicle_type)", floor=floor_expr)
+    )
+
     items = rows(db, f"""
         {all_plates_cte}
         SELECT
@@ -600,11 +640,7 @@ async def get_vehicles(
             ps.duration_seconds
         {base_from}
         WHERE {where}
-        ORDER BY
-            CASE WHEN ps.parked_at IS NOT NULL THEN 0 ELSE 1 END,
-            ps.parked_at DESC,
-            v.registered_at DESC,
-            ap.plate_number
+        ORDER BY {order_by}
         OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
     """, params)
 
@@ -796,6 +832,8 @@ async def export_vehicles_csv(
     is_registered: Optional[bool] = Query(None),
     is_employee: Optional[bool] = Query(None),
     is_currently_parked: Optional[bool] = Query(None),
+    sort_by: Optional[VehicleSort] = Query(None, description=_VEHICLE_SORT_DOC),
+    sort_dir: SortDir = Query(SortDir.desc, description=_SORT_DIR_DOC),
     db: Session = Depends(get_db),
 ):
     """CSV export of vehicles. Filter set matches `GET /vehicles/` so the CSV
@@ -833,6 +871,12 @@ async def export_vehicles_csv(
         slot_join_csv   = ""
         slot_select_csv = "NULL AS [Current Slot ID], NULL AS [Current Slot Name]"
 
+    order_by = (
+        "v.registered_at DESC" if sort_by is None else
+        _vehicle_order(sort_by, sort_dir, plate="v.plate_number",
+                       vehicle_type="v.vehicle_type", floor="ps.floor")
+    )
+
     data = rows(db, f"""
         SELECT
             v.plate_number  AS [Plate Number],
@@ -860,7 +904,7 @@ async def export_vehicles_csv(
         ) ps ON ps.plate_number = v.plate_number AND ps.rn = 1
         {slot_join_csv}
         WHERE {" AND ".join(clauses)}
-        ORDER BY v.registered_at DESC
+        ORDER BY {order_by}
     """, params)
 
     headers = ["Plate Number", "Owner Name", "Vehicle Type", "Employee ID",

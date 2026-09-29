@@ -13,9 +13,10 @@ from app.schemas import OverstayViolationsReport
 from app.schemas_enums import AlertSeverity
 
 from app.routers.prefix_injection import (get_prefix)
-prefix = get_prefix() + "/reports"
+# Lives under /alerts: the report is an alerts view (plus derived overstays).
+prefix = get_prefix() + "/alerts/reports"
 
-router = APIRouter(prefix=prefix, tags=["Reports"])
+router = APIRouter(prefix=prefix, tags=["Alerts"])
 
 
 @router.get("/overstay-violations", response_model=OverstayViolationsReport)

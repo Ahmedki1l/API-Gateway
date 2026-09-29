@@ -20,6 +20,7 @@ from app.schemas import (
     AlertPriorityCount,
     AlertsByPriority,
     AlertStats,
+    AlertStatsCounts,
     AlertSummary,
     AlertTypeCount,
     CameraRef,
@@ -29,11 +30,13 @@ from app.schemas import (
     SuccessResponse,
     VehicleRef,
 )
-from app.schemas_enums import LEGACY_SEVERITY, AlertSeverity, AlertSort, AlertType
+from app.schemas_enums import (
+    LEGACY_SEVERITY, AlertSeverity, AlertSort, AlertSortBy, AlertType, ResolvedFilter, SortDir,
+)
 from app.services.auth import require_internal_token
 from app.services.upstream import iter_system1_alert_events, iter_system2_alert_events
 from app.services.bus import alerts_bus
-from app.shared import build_paged, stream_csv
+from app.shared import build_paged, order_by_nulls_last, plate_display_sort_expr, stream_csv
 
 from app.routers.prefix_injection import (get_prefix)
  
@@ -330,6 +333,44 @@ _ORDER_BY = {
 }
 
 
+# `sort_by` keys, over the columns of alert_items_sql() — the values the table
+# renders — read from a derived table `t`, because SQL Server does not allow a
+# SELECT alias inside an ORDER BY expression. Only these fixed strings ever
+# reach ORDER BY.
+_SORT_BY = {
+    AlertSortBy.triggered_at: "t.triggered_at",
+    AlertSortBy.resolved_at: "t.resolved_at",
+    AlertSortBy.type: "t.alert_type",
+    AlertSortBy.plate: plate_display_sort_expr("NULLIF(t.plate_number, '')"),
+    # The Location column shows the floor, with slot / camera beneath it.
+    AlertSortBy.location: "COALESCE(t.floor, t.location)",
+    # Rank, so desc = most severe first. Legacy warning/info rank as medium/low.
+    AlertSortBy.severity: "CASE t.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 "
+                          "WHEN 'medium' THEN 2 WHEN 'warning' THEN 2 "
+                          "WHEN 'low' THEN 1 WHEN 'info' THEN 1 END",
+    AlertSortBy.status: "CASE WHEN t.is_resolved = 1 THEN 1 ELSE 0 END",
+}
+
+_SORT_BY_DOC = ("Column to sort by, applied before paging; overrides `sort`: triggered_at "
+                "| resolved_at | type | plate (as displayed, digits first) | location "
+                "(floor, else location) | severity (desc = critical first) | status "
+                "(asc = active first). Empty values sort last either way.")
+_SORT_DIR_DOC = "asc | desc (default). Only with sort_by."
+
+
+def _sorted_items_sql(select_from: str, where: str, sort_by: AlertSortBy, sort_dir: SortDir) -> str:
+    """alert_items_sql() rows matching `where`, ordered by `sort_by`; the
+    caller appends OFFSET/FETCH when paging. t.id breaks ties so paging is
+    stable."""
+    return f"""
+        SELECT t.* FROM (
+            {select_from}
+            WHERE {where}
+        ) t
+        ORDER BY {order_by_nulls_last(_SORT_BY[sort_by], sort_dir.value.upper(), "t.id")}
+    """
+
+
 @dataclass
 class _RangeCounts:
     total: int = 0
@@ -383,9 +424,25 @@ async def alert_stats(
     """Alerts page KPI cards: Total, Critical, High, Resolved — for the alerts
     triggered in the range (all time without dates), resolved or not.
 
+    `previous` holds the same cards for the equally long period right before
+    the range (yesterday, for one day) so the frontend can draw the "vs"
+    arrows; it needs both dates — all time has no previous period.
+
     `active_alerts` and `critical_violations` (still open) are kept for older
     callers."""
     c = _range_counts(db, date_from, date_to)
+    prev = prev_from = prev_to = None
+    if date_from and date_to:
+        prev_to = date_from - timedelta(days=1)
+        prev_from = prev_to - (date_to - date_from)
+        p = _range_counts(db, prev_from, prev_to)
+        prev = AlertStatsCounts(
+            total_alerts=p.total,
+            critical_alerts=p.per_level["critical"],
+            high_alerts=p.per_level["high"],
+            resolved_total=p.total - p.active,
+            active_alerts=p.active,
+        )
     return AlertStats(
         date_from=date_from,
         date_to=date_to,
@@ -395,6 +452,9 @@ async def alert_stats(
         resolved_total=c.total - c.active,
         active_alerts=c.active,
         critical_violations=c.critical_active,
+        previous=prev,
+        previous_from=prev_from,
+        previous_to=prev_to,
     )
 
 
@@ -424,13 +484,13 @@ async def alerts_by_priority(
 
 @router.get("/summary", response_model=AlertSummary)
 async def alert_summary(
-    resolved: Optional[bool] = Query(
-        False,
+    resolved: ResolvedFilter = Query(
+        ResolvedFilter.false,
         description=(
-            "Defaults to `false` — the Alerts Summary card is scoped to "
-            "*active* alerts, matching `/alerts/stats.active_alerts`. Pass "
-            "`null`/omit-with-explicit-null semantics via `resolved=` is not "
-            "supported; use `true` for the resolved breakdown."
+            "`false` (default): active alerts only — the Dashboard's Alerts "
+            "Summary, matching `/alerts/stats.active_alerts`. `true`: resolved "
+            "only. `all`: every alert triggered in the range, resolved or not — "
+            "the Alerts page's Alerts by Type, matching `/alerts/stats.total_alerts`."
         ),
     ),
     severity: Optional[AlertSeverity] = Query(None),
@@ -466,8 +526,9 @@ async def alert_summary(
     as before."""
     cols = _alerts_extra_cols()
     resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=floor)
+    resolved_flag = {ResolvedFilter.false: False, ResolvedFilter.true: True, ResolvedFilter.all: None}[resolved]
     where, params = _where(
-        search, severity, None, resolved, date_from, date_to, cols,
+        search, severity, None, resolved_flag, date_from, date_to, cols,
         floor_id=resolved_floor_id, floor=floor,
     )
     total, by_type = _summary_by_type(db, where, params, cols)
@@ -476,7 +537,7 @@ async def alert_summary(
 
 def _summary_by_type(db: Session, where: str, params: dict, cols: dict) -> tuple[int, list[AlertTypeCount]]:
     """`(total, by_type)` for the alerts matching `where` — the Alerts Summary
-    donut. Shared by /summary and GET /reports/overstay-violations."""
+    donut. Shared by /summary and GET /alerts/reports/overstay-violations."""
     bits = _alert_query_bits(cols)
     schema = _floor_schema()
 
@@ -663,6 +724,8 @@ async def get_alerts(
         description="`triggered_at` (default): newest raised first. `resolved_at`: most "
                     "recently resolved first — for Recent Resolved Alerts, with resolved=true.",
     ),
+    sort_by: Optional[AlertSortBy] = Query(None, description=_SORT_BY_DOC),
+    sort_dir: SortDir = Query(SortDir.desc, description=_SORT_DIR_DOC),
     db: Session = Depends(get_db),
 ):
     cols = _alerts_extra_cols()
@@ -688,12 +751,15 @@ async def get_alerts(
         {floors_join}
         WHERE {where}
     """, params)
-    items = rows(db, f"""
-        {select_from}
-        WHERE {where}
-        ORDER BY {_ORDER_BY[sort]}
-        OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
-    """, params)
+    if sort_by is None:
+        items_sql = f"""
+            {select_from}
+            WHERE {where}
+            ORDER BY {_ORDER_BY[sort]}
+        """
+    else:
+        items_sql = _sorted_items_sql(select_from, where, sort_by, sort_dir)
+    items = rows(db, items_sql + " OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY", params)
     for it in items:
         alert_item_fixup(it)
     return build_paged(items, total or 0, page, page_size)
@@ -1113,21 +1179,9 @@ async def delete_alert(alert_id: int, db: Session = Depends(get_db)):
     return EntityActionResponse(id=alert_id)
  
  
-@router.get("/export/csv")
-async def export_alerts_csv(
-    search: Optional[str] = Query(None),
-    severity: Optional[AlertSeverity] = Query(None),
-    alert_type: Optional[AlertType] = Query(None),
-    resolved: Optional[bool] = Query(None),
-    date_from: Optional[date] = Query(None),
-    date_to: Optional[date] = Query(None),
-    db: Session = Depends(get_db),
-):
-    cols = _alerts_extra_cols()
-    bits = _alert_query_bits(cols)
-    where, params = _where(search, severity, alert_type, resolved, date_from, date_to, cols)
- 
-    data = rows(db, f"""
+def _unsorted_csv_rows(db: Session, bits: dict, where: str, params: dict) -> list[dict]:
+    """The export's historical query and order: newest raised first."""
+    return rows(db, f"""
         SELECT
             a.id                     AS [ID],
             a.plate_number           AS [Plate Number],
@@ -1149,6 +1203,38 @@ async def export_alerts_csv(
         WHERE {where}
         ORDER BY a.triggered_at DESC, a.id DESC
     """, params)
+
+
+@router.get("/export/csv")
+async def export_alerts_csv(
+    search: Optional[str] = Query(None),
+    severity: Optional[AlertSeverity] = Query(None),
+    alert_type: Optional[AlertType] = Query(None),
+    resolved: Optional[bool] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    sort_by: Optional[AlertSortBy] = Query(None, description=_SORT_BY_DOC),
+    sort_dir: SortDir = Query(SortDir.desc, description=_SORT_DIR_DOC),
+    db: Session = Depends(get_db),
+):
+    cols = _alerts_extra_cols()
+    bits = _alert_query_bits(cols)
+    where, params = _where(search, severity, alert_type, resolved, date_from, date_to, cols)
+ 
+    if sort_by is not None:
+        # Sorted export: the list's own rows and order, so the file matches the
+        # table (including the floor a Location sort goes by).
+        select_from, _ = alert_items_sql(cols, _floor_schema())
+        data = [{
+            "ID": r["id"], "Plate Number": r["plate_number"], "Owner": r["owner_name"],
+            "Type": r["alert_type"], "Severity": r["severity"], "Slot ID": r["slot_id"],
+            "Slot Name": r["slot_name"], "Location": r["location"], "Camera": r["camera_id"],
+            "Description": r["description"], "Snapshot URL": r["snapshot_url"],
+            "Triggered At": r["triggered_at"], "Resolved": r["is_resolved"],
+            "Resolved At": r["resolved_at"],
+        } for r in rows(db, _sorted_items_sql(select_from, where, sort_by, sort_dir), params)]
+    else:
+        data = _unsorted_csv_rows(db, bits, where, params)
 
     for row in data:
         row["Snapshot URL"] = resolve_snapshot_url(row.get("Snapshot URL"))

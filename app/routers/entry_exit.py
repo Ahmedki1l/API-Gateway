@@ -25,8 +25,14 @@ from app.schemas import (
     VehicleTypeCount,
     VehicleTypeDistribution,
 )
-from app.schemas_enums import EntryExitDirection, ParkingSessionStatus
-from app.shared import build_paged, plate_search_clause, stream_csv
+from app.schemas_enums import EntryExitDirection, EntryExitSort, ParkingSessionStatus, SortDir
+from app.shared import (
+    build_paged,
+    order_by_nulls_last,
+    plate_display_sort_expr,
+    plate_search_clause,
+    stream_csv,
+)
 
 from app.routers.prefix_injection import (get_prefix)
 prefix = get_prefix() + "/entry-exit"
@@ -241,7 +247,7 @@ def overstay_count(
 
     Nothing writes an `overstay` alert (Damanat-DB-Migrator 0010), so this is
     the only overstay count: the Entry/Exit Overstays card and
-    GET /reports/overstay-violations both use it."""
+    GET /alerts/reports/overstay-violations both use it."""
     today = facility_now_naive().date()
     params: dict = {"last_mn": _midnight(min(date_to, today) if date_to else today)}
     next_mn = "DATEADD(DAY, 1, CAST(CAST(entry_time AS DATE) AS DATETIME2))"
@@ -613,6 +619,43 @@ async def vehicle_type_distribution(
     )
 
 
+# Sort keys of the Entry/Exit list, one SQL expression each — only these
+# fixed strings ever reach ORDER BY. `duration` mirrors _live_duration_seconds
+# so a row sorts by the stay it displays: the stored value once closed, live
+# elapsed time while open.
+_ENTRY_EXIT_SORT = {
+    EntryExitSort.time: "COALESCE(ps.exit_time, ps.entry_time)",
+    EntryExitSort.entry_time: "ps.entry_time",
+    EntryExitSort.exit_time: "ps.exit_time",
+    EntryExitSort.type: "CASE WHEN ps.exit_time IS NULL THEN 0 ELSE 1 END",
+    EntryExitSort.plate: plate_display_sort_expr("ps.plate_number"),
+    EntryExitSort.floor: "ps.floor",
+    EntryExitSort.gate: "COALESCE(ps.exit_camera_id, ps.entry_camera_id)",
+    EntryExitSort.duration: (
+        "CASE WHEN COALESCE(ps.entry_time, ps.parked_at) IS NULL THEN NULL "
+        "WHEN ps.exit_time IS NOT NULL AND ps.duration_seconds IS NOT NULL THEN ps.duration_seconds "
+        "ELSE DATEDIFF(SECOND, COALESCE(ps.entry_time, ps.parked_at), COALESCE(ps.exit_time, :sort_now)) END"
+    ),
+}
+
+
+def _entry_exit_order(sort_by: Optional[EntryExitSort], sort_dir: SortDir, params: dict) -> str:
+    """ORDER BY body for the Entry/Exit list and CSV. No `sort_by` keeps the
+    historical newest-entry-first order. ps.id breaks ties so paging is stable."""
+    if sort_by is None:
+        return "ps.entry_time DESC, ps.id DESC"
+    if sort_by is EntryExitSort.duration:
+        params["sort_now"] = facility_now_naive()
+    return order_by_nulls_last(_ENTRY_EXIT_SORT[sort_by], sort_dir.value.upper(), "ps.id")
+
+
+_SORT_BY_DOC = ("Column to sort by, applied before paging: time (exit time, else entry "
+                "time) | entry_time | exit_time | type | plate (as displayed, digits "
+                "first) | floor | gate | duration (open visits: live). Empty values sort "
+                "last either way. Omit for newest entry first.")
+_SORT_DIR_DOC = "asc | desc (default). Ignored without sort_by."
+
+
 @router.get("/", response_model=PagedResponse[VehicleEvent])
 async def get_entry_exit(
     page: int = Query(1, ge=1),
@@ -631,6 +674,8 @@ async def get_entry_exit(
     exit_date_to: Optional[date] = Query(None),
     min_duration_seconds: Optional[int] = Query(None, ge=0),
     max_duration_seconds: Optional[int] = Query(None, ge=0),
+    sort_by: Optional[EntryExitSort] = Query(None, description=_SORT_BY_DOC),
+    sort_dir: SortDir = Query(SortDir.desc, description=_SORT_DIR_DOC),
     db: Session = Depends(get_db),
 ):
     """Flat list of every parking event (one row per entry, expanded with its
@@ -727,7 +772,7 @@ async def get_entry_exit(
         {VEHICLE_JOIN}
         LEFT JOIN parking_slots pk ON pk.slot_id = ps.slot_id
         WHERE {where}
-        ORDER BY ps.entry_time DESC
+        ORDER BY {_entry_exit_order(sort_by, sort_dir, params)}
         OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
     """, params)
 
@@ -751,6 +796,8 @@ async def export_entry_exit_csv(
     exit_date_to: Optional[date] = Query(None),
     min_duration_seconds: Optional[int] = Query(None, ge=0),
     max_duration_seconds: Optional[int] = Query(None, ge=0),
+    sort_by: Optional[EntryExitSort] = Query(None, description=_SORT_BY_DOC),
+    sort_dir: SortDir = Query(SortDir.desc, description=_SORT_DIR_DOC),
     db: Session = Depends(get_db),
 ):
     schema = _floor_schema()
@@ -832,7 +879,7 @@ async def export_entry_exit_csv(
     """ + VEHICLE_JOIN + f"""
         LEFT JOIN parking_slots pk ON pk.slot_id = ps.slot_id
         WHERE {" AND ".join(clauses)}
-        ORDER BY ps.entry_time DESC
+        ORDER BY {_entry_exit_order(sort_by, sort_dir, params)}
     """, params)
 
     # WS-8.E: Floor ID column added next to Floor.
