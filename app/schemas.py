@@ -353,6 +353,18 @@ class AlertSummary(BaseModel):
     by_type: list[AlertTypeCount]
 
 
+class OverstayViolationsReport(BaseModel):
+    """GET /reports/overstay-violations — the Overstay & Violations report
+    headline. Overstay is NOT an alert (nothing writes one); it is counted
+    from parking_sessions and kept out of `by_type`."""
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    total_violations: int           # overstays + alerts_total
+    overstays: int                  # distinct cars inside at a local midnight in the range
+    alerts_total: int               # every alert triggered in the range, resolved or not
+    by_type: list[AlertTypeCount]   # the alerts only, same slices as /alerts/summary
+
+
 class AlertItem(BaseModel):
     """Canonical alert row — denormalized join over vehicles/slots/cameras.
     Same shape used by list rows, stream events, and detail (which extends it)."""

@@ -212,32 +212,65 @@ def _kpi_counts(db: Session, date_from: date, date_to: date) -> EntryExitCounts:
         WHERE entry_time >= :start AND entry_time < :end
     """, {**params, "now": facility_now_naive()})
 
-    # Overstay = inside the garage at a local midnight that falls in the range
-    # (the midnights that START each day of it, up to today's). `first_mn` is
-    # the first such midnight after the car entered; it overstayed if that
-    # midnight is still in the range and the car had not left by then. For
-    # "today" this is every car that was inside at 00:00, whether it has
-    # left since or not.
-    last_mn = _midnight(min(date_to, facility_now_naive().date()))
-    overstays = scalar(db, """
-        SELECT COUNT(DISTINCT plate_number)
-        FROM (
-            SELECT plate_number, exit_time,
-                   CASE WHEN DATEADD(DAY, 1, CAST(CAST(entry_time AS DATE) AS DATETIME2)) > :start
-                        THEN DATEADD(DAY, 1, CAST(CAST(entry_time AS DATE) AS DATETIME2))
-                        ELSE :start END AS first_mn
-            FROM parking_sessions
-            WHERE plate_number IS NOT NULL AND entry_time < :last_mn
-        ) s
-        WHERE s.first_mn <= :last_mn AND (s.exit_time IS NULL OR s.exit_time > s.first_mn)
-    """, {"start": params["start"], "last_mn": last_mn})
-
     return EntryExitCounts(
         total_enter=total_enter or 0,
         total_exit=total_exit or 0,
         avg_stay_minutes=round((avg_stay_sec or 0) / 60, 1),
-        overstays=overstays or 0,
+        overstays=overstay_count(db, date_from, date_to),
     )
+
+
+def overstay_count(
+    db: Session,
+    date_from: Optional[date],
+    date_to: Optional[date],
+    *,
+    floor: Optional[str] = None,
+    floor_id: Optional[int] = None,
+    search: Optional[str] = None,
+) -> int:
+    """Distinct cars that overstayed in [date_from, date_to]: inside the
+    garage at a local midnight that falls in the range (the midnights that
+    START each day of it, up to today's). No date_from = since the first
+    session; no date_to = up to today.
+
+    `first_mn` is the first such midnight after the car entered; it
+    overstayed if that midnight is still in the range and the car had not
+    left by then. For "today" this is every car that was inside at 00:00,
+    whether it has left since or not.
+
+    Nothing writes an `overstay` alert (Damanat-DB-Migrator 0010), so this is
+    the only overstay count: the Entry/Exit Overstays card and
+    GET /reports/overstay-violations both use it."""
+    today = facility_now_naive().date()
+    params: dict = {"last_mn": _midnight(min(date_to, today) if date_to else today)}
+    next_mn = "DATEADD(DAY, 1, CAST(CAST(entry_time AS DATE) AS DATETIME2))"
+    if date_from:
+        params["start"] = _midnight(date_from)
+        first_mn = f"CASE WHEN {next_mn} > :start THEN {next_mn} ELSE :start END"
+    else:
+        first_mn = next_mn
+
+    clauses = ["plate_number IS NOT NULL", "entry_time < :last_mn"]
+    schema = _floor_schema()
+    if floor_id is not None and schema["parking_sessions_floor_id"]:
+        clauses.append("floor_id = :floor_id")
+        params["floor_id"] = floor_id
+    elif floor:
+        clauses.append("floor = :floor")
+        params["floor"] = floor
+    if search:
+        clauses.append(plate_search_clause("plate_number", search, params))
+
+    return scalar(db, f"""
+        SELECT COUNT(DISTINCT plate_number)
+        FROM (
+            SELECT plate_number, exit_time, {first_mn} AS first_mn
+            FROM parking_sessions
+            WHERE {" AND ".join(clauses)}
+        ) s
+        WHERE s.first_mn <= :last_mn AND (s.exit_time IS NULL OR s.exit_time > s.first_mn)
+    """, params) or 0
 
 
 @router.get("/kpis", response_model=EntryExitKPIs)

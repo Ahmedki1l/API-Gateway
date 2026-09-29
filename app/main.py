@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.routers import admin, dashboard, alerts, entry_exit, vehicles, occupancy, camera_feeds, cameras, settings as settings_router
+from app.routers import admin, dashboard, alerts, entry_exit, vehicles, occupancy, camera_feeds, cameras, reports, settings as settings_router
 from app.services import camera_monitor, daily_occupancy_job
 
 from app.routers.prefix_injection import (get_prefix)
@@ -73,6 +73,7 @@ app.include_router(camera_feeds.router)
 app.include_router(cameras.router)
 app.include_router(admin.router)
 app.include_router(settings_router.router)
+app.include_router(reports.router)
 
 log.warning(get_prefix())
 log.warning(dashboard.router)
