@@ -538,30 +538,24 @@ _NO_VEHICLE_TYPE = ("", "unknown", "other")
 
 @router.get("/vehicle-types", response_model=VehicleTypeDistribution)
 async def vehicle_type_distribution(
-    date_from: Optional[date] = Query(None, description="First entry day (inclusive), facility-local. Omit both for all time."),
+    date_from: Optional[date] = Query(None, description="First entry day (inclusive), facility-local. Omit both for today."),
     date_to: Optional[date] = Query(None, description="Last entry day (inclusive), facility-local."),
     db: Session = Depends(get_db),
 ):
     """Vehicle Type Distribution donut: cars that ENTERED in the range, by
     type (registry type first, else the session's). A car with no type
     (NULL, empty or 'unknown') counts as `other`. Types come from the data,
-    lower-case, most first; `other` is always last, `count: 0` included."""
-    if date_from and date_to and date_from > date_to:
-        raise HTTPException(status_code=400, detail="date_from must not be after date_to")
-    clauses = ["1=1"]
-    params: dict = {}
-    if date_from:
-        clauses.append("ps.entry_time >= :date_from")
-        params["date_from"] = datetime.combine(date_from, datetime.min.time())
-    if date_to:
-        clauses.append("ps.entry_time < :date_to_next")
-        params["date_to_next"] = datetime.combine(date_to + timedelta(days=1), datetime.min.time())
+    lower-case, most first; `other` is always last, `count: 0` included.
+    Same date picker as /kpis (no dates = today), so `total` equals
+    /kpis.total_enter for the same range."""
+    date_from, date_to = _page_range(date_from, date_to)
+    params = {"start": _midnight(date_from), "end": _midnight(date_to + timedelta(days=1))}
 
     grouped = rows(db, f"""
         SELECT LOWER(LTRIM(RTRIM({VEHICLE_TYPE_EXPR}))) AS vehicle_type, COUNT(*) AS n
         FROM parking_sessions ps
         {VEHICLE_JOIN}
-        WHERE {" AND ".join(clauses)}
+        WHERE ps.entry_time >= :start AND ps.entry_time < :end
         GROUP BY LOWER(LTRIM(RTRIM({VEHICLE_TYPE_EXPR})))
     """, params)
 

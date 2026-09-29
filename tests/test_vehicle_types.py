@@ -86,10 +86,24 @@ def test_pct(client, url):
     assert pct == {"sedan": 37.5, "pickup": 12.5, "suv": 12.5, "other": 37.5}
 
 
-def test_open_ended_range(client, url):
-    body = client.get(url, params={"date_from": DAY}).json()
+def test_two_day_range(client, url):
+    body = client.get(url, params={"date_from": DAY, "date_to": "2031-01-16"}).json()
     assert body["total"] == 9
     assert _counts(body)["suv"] == 2
+
+
+def test_only_date_from_runs_to_today(client, url):
+    # Same picker as /kpis: date_to = max(date_from, today). DAY is in the
+    # future, so that is DAY itself and the next-day row stays out.
+    body = client.get(url, params={"date_from": DAY}).json()
+    assert (body["date_from"], body["date_to"]) == (DAY, DAY)
+    assert body["total"] == 8
+
+
+def test_only_date_to_is_that_day(client, url):
+    body = client.get(url, params={"date_to": DAY}).json()
+    assert (body["date_from"], body["date_to"]) == (DAY, DAY)
+    assert body["total"] == 8
 
 
 def test_empty_range_keeps_other(client, url):
@@ -103,7 +117,11 @@ def test_reversed_range_is_400(client, url):
     assert r.status_code == 400
 
 
-def test_all_time_adds_up(client, url):
+def test_no_dates_is_today_and_matches_kpis(client, url):
+    from app.routers.entry_exit import prefix
     body = client.get(url).json()
+    kpis = client.get(prefix + "/kpis").json()
+    assert (body["date_from"], body["date_to"]) == (kpis["date_from"], kpis["date_to"])
+    assert body["total"] == kpis["total_enter"]
     assert body["total"] == sum(i["count"] for i in body["items"])
     assert body["items"][-1]["vehicle_type"] == "other"
