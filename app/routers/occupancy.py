@@ -28,6 +28,11 @@ from app.schemas import (
     OccupancyKPIs,
     OccupancyLocationItem,
     OccupancyLocationResponse,
+    OccupancyHourBar,
+    OccupancyPeakByHourResponse,
+    OccupancyPeakFloorItem,
+    OccupancyPeakFloorResponse,
+    OccupancyPeakKpis,
     OccupancyReportKpis,
     OccupancyReportSummary,
     OccupancyTrendPoint,
@@ -2061,18 +2066,15 @@ async def occupancy_report_trend(
 
 # ── Peak Hours heatmap ────────────────────────────────────────────────────────
 
-def _report_heatmap(base: _ReportBase, block_hours: int) -> OccupancyHeatmapResponse:
-    """Weekday x hour-band grid of typical occupancy.
+def _hour_bands(base: _ReportBase, block_hours: int):
+    """Hour-of-day bands of `block_hours`, and hour -> band index (None when
+    the hour is outside every band). Shared by the heatmap rows and the
+    Occupancy by Hour bars so the two always line up.
 
-    Same statistic as the `weekday` trend grain, one level finer: for every
-    (date, band) the range covers, a time-weighted occupancy % over the band's
-    counted seconds; then each cell is the MEAN over the dates that fell on
-    that weekday. Mean-of-daily-values (not a pooled ratio) so a date clipped
-    by the range edge still counts as one observation, exactly like Q5."""
-    # Rows follow the reporting window: with business hours on, the rows are
-    # the operating hours only — bands the garage is closed in would be a
-    # permanent 0% stripe. When the window changed inside the range, the rows
-    # cover every hour that counted on some day.
+    Bands follow the reporting window: with business hours on they cover the
+    operating hours only — bands the garage is closed in would be a permanent
+    0% stripe. When the window changed inside the range, they cover every hour
+    that counted on some day."""
     worked = [r for r in base.day_rules.values() if r.working_day]
     if worked:
         row_from = min(r.hour_from for r in worked)
@@ -2094,13 +2096,23 @@ def _report_heatmap(base: _ReportBase, block_hours: int) -> OccupancyHeatmapResp
             return None
         return (hour - row_from) // block_hours
 
-    # Denominator and numerator per (date, row). An hour counted_span() drops
+    return rows_, _row_of
+
+
+def _band_samples(base: _ReportBase, row_of) -> dict:
+    """(date, band) -> that date's time-weighted occupancy % inside the band,
+    over the band's counted seconds only, unclamped. One entry per (date, band)
+    the range covers with at least one counted hour — a quiet one is 0.0, an
+    uncounted one is absent."""
+    if not base.total_capacity:
+        return {}
+    # Denominator and numerator per (date, band). An hour counted_span() drops
     # (outside business hours / days, outside the range) leaves both.
     offered: dict = {}
     cursor = base.start_time.replace(minute=0, second=0, microsecond=0)
     while cursor < base.end_time:
         span = base.counted_span(cursor)
-        r = _row_of(cursor.hour)
+        r = row_of(cursor.hour)
         if span and r is not None:
             key = (cursor.date(), r)
             offered[key] = offered.get(key, 0.0) + span
@@ -2109,17 +2121,29 @@ def _report_heatmap(base: _ReportBase, block_hours: int) -> OccupancyHeatmapResp
     occupied: dict = {}
     for b in base.buckets:
         hour_start = b["bucket_start"]
-        r = _row_of(hour_start.hour)
+        r = row_of(hour_start.hour)
         if r is not None and base.counted_span(hour_start):
             key = (hour_start.date(), r)
             occupied[key] = occupied.get(key, 0) + int(b["total_occupied_seconds"] or 0)
 
+    return {
+        key: occupied.get(key, 0) / (base.total_capacity * secs) * 100
+        for key, secs in offered.items()
+    }
+
+
+def _report_heatmap(base: _ReportBase, block_hours: int) -> OccupancyHeatmapResponse:
+    """Weekday x hour-band grid of typical occupancy.
+
+    Same statistic as the `weekday` trend grain, one level finer: for every
+    (date, band) the range covers, a time-weighted occupancy % over the band's
+    counted seconds; then each cell is the MEAN over the dates that fell on
+    that weekday. Mean-of-daily-values (not a pooled ratio) so a date clipped
+    by the range edge still counts as one observation, exactly like Q5."""
+    rows_, row_of = _hour_bands(base, block_hours)
     samples: dict = {}
-    if base.total_capacity:
-        for (d, r), secs in offered.items():
-            samples.setdefault((d.weekday(), r), []).append(
-                occupied.get((d, r), 0) / (base.total_capacity * secs) * 100
-            )
+    for (d, r), pct in _band_samples(base, row_of).items():
+        samples.setdefault((d.weekday(), r), []).append(pct)
 
     cells = []
     for wd in range(7):
@@ -2168,6 +2192,233 @@ async def occupancy_report_heatmap(
     Non-operating days come back as NULL cells, not 0%.
     """
     return _report_heatmap(base, block_hours)
+
+
+# ── Reports · Peak Hours Analysis ─────────────────────────────────────────────
+# One endpoint per widget, like Tab 1:
+#   /history/peak-hours/kpis      the KPI row
+#   /history/peak-hours/by-floor  the pie (average occupancy per floor)
+#   /history/peak-hours/by-hour   the Occupancy by Hour bars
+# All three take the same query params as /history/kpis and run the same
+# (floor x hour) pass, so they agree as long as the caller sends identical
+# params to each.
+
+def _hour_label(hour: int) -> str:
+    return f"{hour % 12 or 12}:00 {'AM' if hour < 12 else 'PM'}"
+
+
+def _counted_hours(base: _ReportBase) -> list[tuple[datetime, float, float]]:
+    """(hour_start, occupied slot-seconds, counted seconds) for every counted
+    hour of the range, garage-wide, oldest first. Counted hours nothing was
+    parked in are included with 0 — a quiet hour is a real 0%, unlike an
+    excluded hour, which is not measured at all."""
+    occupied: dict = {}
+    for b in base.buckets:
+        occupied[b["bucket_start"]] = occupied.get(b["bucket_start"], 0) + int(b["total_occupied_seconds"] or 0)
+    out = []
+    cursor = base.start_time.replace(minute=0, second=0, microsecond=0)
+    while cursor < base.end_time:
+        span = base.counted_span(cursor)
+        if span:
+            out.append((cursor, occupied.get(cursor, 0), span))
+        cursor += timedelta(hours=1)
+    return out
+
+
+def _hour_pct(base: _ReportBase, occupied: float, span: float) -> float:
+    # Clamp: slot_status overlap at a transition can nudge an hour past 100.
+    return min(occupied / (base.total_capacity * span) * 100, 100.0)
+
+
+def _peak_days(base: _ReportBase, hours: list) -> list[tuple[date, int, float, float]]:
+    """(day, peak_hour, peak %, day average %) for every day that had parking
+    in its counted hours, oldest first, unrounded. Each day's peak is its
+    busiest counted hour; max() keeps the first of equal values, so a tie
+    inside a day goes to the earlier hour. A day with no parking has no peak."""
+    by_day: dict = {}
+    for hour_start, occupied, span in hours:
+        by_day.setdefault(hour_start.date(), []).append((hour_start, occupied, span))
+    days = []
+    for d in sorted(by_day):
+        day_hours = by_day[d]
+        if not any(occupied for _, occupied, _ in day_hours):
+            continue
+        best_start, best_occ, best_span = max(day_hours, key=lambda h: _hour_pct(base, h[1], h[2]))
+        avg = min(sum(o for _, o, _ in day_hours)
+                  / (base.total_capacity * sum(s for _, _, s in day_hours)) * 100, 100.0)
+        days.append((d, best_start.hour, _hour_pct(base, best_occ, best_span), avg))
+    return days
+
+
+def _peak_vote(days: list) -> list[tuple[int, int, float]]:
+    """(hour, days that peaked at it, their mean peak %), winner first.
+    Most days wins; then the higher mean peak; then the earlier hour."""
+    tally: dict = {}
+    for _, hour, peak, _ in days:
+        tally.setdefault(hour, []).append(peak)
+    return sorted(
+        ((h, len(p), sum(p) / len(p)) for h, p in tally.items()),
+        key=lambda v: (-v[1], -v[2], v[0]),
+    )
+
+
+def _peak_hour_entries(db: Session, base: _ReportBase, hour: int) -> int:
+    """Sessions that entered during `hour` on the days the report counts that
+    hour. With every day counted this is `/entry-exit/peak-hours` ->
+    items[hour].entries for the same days."""
+    per_day = rows(db, """
+        SELECT CAST(entry_time AS DATE) AS d, COUNT(*) AS n
+        FROM parking_sessions
+        WHERE entry_time >= :a AND entry_time < :b AND DATEPART(HOUR, entry_time) = :h
+        GROUP BY CAST(entry_time AS DATE)
+    """, {"a": base.start_time, "b": base.end_time, "h": hour})
+    return sum(
+        int(r["n"]) for r in per_day
+        if r["d"] in base.day_rules and base.day_rules[r["d"]].counts(hour)
+    )
+
+
+def _report_peak_kpis(db: Session, base: _ReportBase) -> OccupancyPeakKpis:
+    if not base.total_capacity:
+        return OccupancyPeakKpis(**base.window_meta())
+    hours = _counted_hours(base)
+    days = _peak_days(base, hours)
+    if not days:
+        return OccupancyPeakKpis(**base.window_meta())
+
+    peak_hour, peak_hour_days, _ = _peak_vote(days)[0]
+
+    # Maximum Occupancy: the busiest counted hour of the whole range (earliest
+    # on a tie), on the same hourly figures the vote used.
+    max_start, max_occ, max_span = max(hours, key=lambda h: _hour_pct(base, h[1], h[2]))
+
+    # Peak Day: highest day average, earliest on a tie. Labelled by weekday for
+    # week-scale ranges, by date beyond (Q10 + Q11).
+    peak_day, _, _, peak_day_avg = max(days, key=lambda d: d[3])
+    if base.end_time - base.start_time <= timedelta(days=7):
+        peak_day_label = peak_day.strftime("%A")
+    else:
+        peak_day_label = f"{peak_day:%B} {peak_day.day}, {peak_day.year}"
+
+    return OccupancyPeakKpis(
+        peak_hour=peak_hour,
+        peak_hour_label=_hour_label(peak_hour),
+        peak_hour_days=peak_hour_days,
+        days_counted=len(days),
+        max_occupancy=round(_hour_pct(base, max_occ, max_span), 1),
+        max_occupancy_at=max_start,
+        peak_day=peak_day,
+        peak_day_label=peak_day_label,
+        peak_day_occupancy=round(peak_day_avg, 1),
+        peak_hour_entries=_peak_hour_entries(db, base, peak_hour),
+        **base.window_meta(),
+    )
+
+
+@router.get("/history/peak-hours/kpis", response_model=OccupancyPeakKpis)
+async def occupancy_peak_kpis(
+    base: _ReportBase = Depends(_report_base_dep),
+    db: Session = Depends(get_db),
+):
+    """Reports · Peak Hours Analysis — the KPI row alone: Peak Hour, Maximum
+    Occupancy, Peak Day, Peak-Hour Entries.
+
+    **Peak Hour** is chosen by vote: every day of the range picks its own
+    busiest hour (garage-wide, time-weighted occupancy, earlier hour on a tie),
+    and the hour picked by the most days wins. Sat/Mon/Tue peaking at 8 and the
+    other four days at 18 gives 18. Ties between hours go to the one whose days
+    peaked higher on average, then to the earlier hour. The same rule applies
+    to any range length — a day is always the voter.
+
+    Only counted hours take part — the reporting window (`business_hours`,
+    `hour_from`, `hour_to`, else each day's saved working hours), so the Peak
+    Hour is always one the page shows. Days with no parking in their counted
+    hours do not vote.
+
+    Without a range: the last 24 hours, which usually spans two calendar days
+    (two voters). The Reports page always sends one."""
+    return _report_peak_kpis(db, base)
+
+
+def _report_peak_by_floor(base: _ReportBase) -> OccupancyPeakFloorResponse:
+    per_floor: dict = {}
+    for b in base.buckets:
+        if base.counted_span(b["bucket_start"]):
+            per_floor[b["floor"]] = per_floor.get(b["floor"], 0) + int(b["total_occupied_seconds"] or 0)
+    total = sum(per_floor.values())
+    return OccupancyPeakFloorResponse(
+        items=[
+            OccupancyPeakFloorItem(
+                floor=bar.floor,
+                label=bar.label,
+                capacity=bar.capacity,
+                avg_occupancy=bar.utilization,
+                occupied_share_pct=round(per_floor.get(bar.floor, 0) / total * 100, 1) if total else 0.0,
+            )
+            for bar in _report_by_location(base)
+        ],
+        **base.window_meta(),
+    )
+
+
+@router.get("/history/peak-hours/by-floor", response_model=OccupancyPeakFloorResponse)
+async def occupancy_peak_by_floor(base: _ReportBase = Depends(_report_base_dep)):
+    """Reports · Peak Hours Analysis — the pie chart that replaced the heatmap:
+    average occupancy per floor over the selected range.
+
+    One item per floor, always, including floors with no parking.
+    `avg_occupancy` is each floor's time-weighted average against its own
+    capacity — the number to print on the slice; it equals
+    `/history/by-location` utilization for the same params. Those percentages
+    do not add up to 100, so size the slices by `occupied_share_pct`: each
+    floor's share of all occupied slot-time in the range (sums to 100, ±0.1
+    rounding)."""
+    return _report_peak_by_floor(base)
+
+
+def _report_peak_by_hour(base: _ReportBase, step_hours: int) -> OccupancyPeakByHourResponse:
+    rows_, row_of = _hour_bands(base, step_hours)
+    samples: dict = {}
+    for (_, r), pct in _band_samples(base, row_of).items():
+        samples.setdefault(r, []).append(pct)
+    bars = []
+    for row in rows_:
+        vals = samples.get(row.index, [])
+        bars.append(OccupancyHourBar(
+            index=row.index, hour_from=row.hour_from, hour_to=row.hour_to,
+            label=_hour_label(row.hour_from),
+            occupancy=round(min(sum(vals) / len(vals), 100.0), 1) if vals else None,
+            days_sampled=len(vals),
+        ))
+    measured = [b for b in bars if b.occupancy is not None]
+    peak = max(measured, key=lambda b: b.occupancy) if measured else None
+    return OccupancyPeakByHourResponse(
+        step_hours=step_hours, bars=bars,
+        peak_index=peak.index if peak else None,
+        **base.window_meta(),
+    )
+
+
+@router.get("/history/peak-hours/by-hour", response_model=OccupancyPeakByHourResponse)
+async def occupancy_peak_by_hour(
+    step_hours: int = Query(
+        2, ge=1, le=12,
+        description="Width of each bar in hours (the design uses 2). Bars start "
+                    "at the reporting window's first hour; the last bar is "
+                    "shorter when the window isn't a multiple of this.",
+    ),
+    base: _ReportBase = Depends(_report_base_dep),
+):
+    """Reports · Peak Hours Analysis — Occupancy by Hour: average occupancy
+    at each time of day across the range.
+
+    Each bar is the mean, over every day of the range, of that day's
+    time-weighted occupancy inside the bar's hours — the heatmap's statistic
+    with the weekdays pooled, on the same bands (`block_hours` = `step_hours`).
+    Bars follow the reporting window; `business_hours=false` gives 00-24.
+    `occupancy` is null for a bar no day measured — draw no bar, not 0.
+    `peak_index` marks the highest bar (the design colours it red)."""
+    return _report_peak_by_hour(base, step_hours)
 
 
 # ── Utilization by Location chart ─────────────────────────────────────────────

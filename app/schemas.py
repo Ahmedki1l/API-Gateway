@@ -1092,6 +1092,61 @@ class OccupancyHeatmapResponse(OccupancyReportWindow):
     peak: Optional[OccupancyHeatmapCell] = None   # busiest cell, None if all NULL
 
 
+class OccupancyPeakKpis(OccupancyReportWindow):
+    """`GET /occupancy/history/peak-hours/kpis` — the Peak Hours Analysis KPI
+    row, nothing else.
+
+    Peak Hour is the MODE of the daily peak hours, not the busiest hour of the
+    range: each day votes for its own busiest hour, the hour with most votes
+    wins. Ties: the hour whose days peaked higher on average, then the earlier
+    hour. "Avg. Peak-Window Occupancy" stays removed (Q7).
+
+    Everything is null / 0 when no counted hour of the range had parking."""
+    peak_hour: Optional[int] = None           # 0-23, facility-local
+    peak_hour_label: Optional[str] = None     # "6:00 PM"
+    peak_hour_days: int = 0                   # days that peaked at peak_hour
+    days_counted: int = 0                     # days that voted (had parking)
+    max_occupancy: float = 0.0                # busiest counted hour of the range, percent
+    max_occupancy_at: Optional[datetime] = None
+    peak_day: Optional[date] = None           # day with the highest average occupancy
+    peak_day_label: Optional[str] = None      # weekday name for ranges up to 7 days, else "May 26, 2026"
+    peak_day_occupancy: Optional[float] = None
+    peak_hour_entries: int = 0                # sessions that entered in the peak hour, whole range
+
+
+class OccupancyPeakFloorItem(BaseModel):
+    """One slice of the Peak Hours pie."""
+    floor: str                   # DB key: 'Ground' | 'B1' | 'B2'
+    label: str                   # display: 'Ground' | 'Basement 1' | 'Basement 2'
+    capacity: int
+    avg_occupancy: float         # percent of this floor's capacity; = /history/by-location utilization
+    occupied_share_pct: float    # this floor's share of all occupied slot-time; slices sum to 100
+
+
+class OccupancyPeakFloorResponse(OccupancyReportWindow):
+    """`GET /occupancy/history/peak-hours/by-floor` — the pie that replaced the
+    heatmap: average occupancy per floor over the range. One item per floor,
+    always."""
+    items: list[OccupancyPeakFloorItem]
+
+
+class OccupancyHourBar(BaseModel):
+    """One bar of Occupancy by Hour: `[hour_from, hour_to)`, facility-local."""
+    index: int
+    hour_from: int                       # inclusive
+    hour_to: int                         # exclusive; 24 = midnight
+    label: str                           # "6:00 AM" — the bar's start
+    occupancy: Optional[float] = None    # mean over days of the day's occupancy in these hours; null = never measured
+    days_sampled: int
+
+
+class OccupancyPeakByHourResponse(OccupancyReportWindow):
+    """`GET /occupancy/history/peak-hours/by-hour` — the Occupancy by Hour bars."""
+    step_hours: int
+    bars: list[OccupancyHourBar]
+    peak_index: Optional[int] = None     # highest bar; None when no bar was measured
+
+
 class OccupancyLocationResponse(OccupancyReportWindow):
     """`GET /occupancy/history/by-location` — the Utilization by Location bars.
 
