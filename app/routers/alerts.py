@@ -465,13 +465,20 @@ async def alert_summary(
     Without dbo.alert_types, the built-in type list and severity map are used
     as before."""
     cols = _alerts_extra_cols()
-    bits = _alert_query_bits(cols)
-    schema = _floor_schema()
     resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=floor)
     where, params = _where(
         search, severity, None, resolved, date_from, date_to, cols,
         floor_id=resolved_floor_id, floor=floor,
     )
+    total, by_type = _summary_by_type(db, where, params, cols)
+    return AlertSummary(total=total, by_type=by_type)
+
+
+def _summary_by_type(db: Session, where: str, params: dict, cols: dict) -> tuple[int, list[AlertTypeCount]]:
+    """`(total, by_type)` for the alerts matching `where` — the Alerts Summary
+    donut. Shared by /summary and GET /reports/overstay-violations."""
+    bits = _alert_query_bits(cols)
+    schema = _floor_schema()
 
     # Same JOINs as the list endpoint's COUNT query — `_where` may reference
     # pk.floor / c.watches_floor, so they have to be in scope even when no
@@ -550,41 +557,15 @@ async def alert_summary(
         WHERE {where}
     """, params) or 0
 
-    return AlertSummary(total=total, by_type=by_type)
+    return total, by_type
 
 
-@router.get("/", response_model=PagedResponse[AlertItem])
-async def get_alerts(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    search: Optional[str] = Query(None),
-    severity: Optional[AlertSeverity] = Query(None),
-    alert_type: Optional[AlertType] = Query(None),
-    resolved: Optional[bool] = Query(None),
-    date_from: Optional[date] = Query(None),
-    date_to: Optional[date] = Query(None),
-    floor: Optional[str] = Query(None),
-    floor_id: Optional[int] = Query(None),
-    sort: AlertSort = Query(
-        AlertSort.triggered_at,
-        description="`triggered_at` (default): newest raised first. `resolved_at`: most "
-                    "recently resolved first — for Recent Resolved Alerts, with resolved=true.",
-    ),
-    db: Session = Depends(get_db),
-):
-    cols = _alerts_extra_cols()
+def alert_items_sql(cols: dict, schema: dict) -> tuple[str, str]:
+    """`(select_from, floors_join)` for AlertItem rows: the caller appends
+    WHERE / ORDER BY and passes each row through `alert_item_fixup`.
+    `floors_join` is for a COUNT that must see the same floor columns.
+    Shared by GET /alerts/ and GET /vehicles/history."""
     bits = _alert_query_bits(cols)
-    # WS-8 schema-compat shim — branch on each probe so SQL is tolerant of pre-migration DB.
-    schema = _floor_schema()
-    # WS-8: resolve either floor_id or floor name once; pass the integer to the WHERE builder.
-    resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=floor)
-    where, params = _where(
-        search, severity, alert_type, resolved, date_from, date_to, cols,
-        floor_id=resolved_floor_id, floor=floor,
-    )
-    params["offset"]    = (page - 1) * page_size
-    params["page_size"] = page_size
- 
     # Audit columns are conditional on the Phase 4A migration. Emit NULL
     # placeholders when missing so the response shape stays stable for the
     # frontend regardless of DB version (G-6 fix). vehicle_id falls back to
@@ -622,16 +603,7 @@ async def get_alerts(
         floors_join = ""
         floor_id_select = "NULL                                AS floor_id"
 
-    # WS-8: total query needs the JOINs that the WHERE may reference (cameras/parking_slots).
-    total = scalar(db, f"""
-        SELECT COUNT(*) FROM alerts a
-        {bits["slot_join"]}
-        LEFT JOIN cameras c ON c.camera_id = a.camera_id
-        {floors_join}
-        WHERE {where}
-    """, params)
-    # WS-8: LEFT JOIN floors on the resolved name so f.id surfaces as floor_id.
-    items = rows(db, f"""
+    select_from = f"""
         SELECT
             a.id,
             a.alert_type,
@@ -662,15 +634,68 @@ async def get_alerts(
         LEFT JOIN cameras c ON c.camera_id = a.camera_id
         -- WS-8: integer floor_id alongside the legacy `floor` name string.
         {floors_join}
+    """
+    return select_from, floors_join
+
+
+def alert_item_fixup(it: dict) -> dict:
+    atype = it.get("alert_type", "")
+    it["snapshot_url"] = resolve_snapshot_url(it.get("snapshot_url"))
+    it["triggered_at"] = _fix_ts(it.get("triggered_at"), atype)
+    it["resolved_at"]  = _fix_ts(it.get("resolved_at"),  atype)
+    return it
+
+
+@router.get("/", response_model=PagedResponse[AlertItem])
+async def get_alerts(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = Query(None),
+    severity: Optional[AlertSeverity] = Query(None),
+    alert_type: Optional[AlertType] = Query(None),
+    resolved: Optional[bool] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    floor: Optional[str] = Query(None),
+    floor_id: Optional[int] = Query(None),
+    sort: AlertSort = Query(
+        AlertSort.triggered_at,
+        description="`triggered_at` (default): newest raised first. `resolved_at`: most "
+                    "recently resolved first — for Recent Resolved Alerts, with resolved=true.",
+    ),
+    db: Session = Depends(get_db),
+):
+    cols = _alerts_extra_cols()
+    bits = _alert_query_bits(cols)
+    # WS-8 schema-compat shim — branch on each probe so SQL is tolerant of pre-migration DB.
+    schema = _floor_schema()
+    # WS-8: resolve either floor_id or floor name once; pass the integer to the WHERE builder.
+    resolved_floor_id = resolve_floor_id(db, floor_id=floor_id, floor_name=floor)
+    where, params = _where(
+        search, severity, alert_type, resolved, date_from, date_to, cols,
+        floor_id=resolved_floor_id, floor=floor,
+    )
+    params["offset"]    = (page - 1) * page_size
+    params["page_size"] = page_size
+ 
+    select_from, floors_join = alert_items_sql(cols, schema)
+
+    # WS-8: total query needs the JOINs that the WHERE may reference (cameras/parking_slots).
+    total = scalar(db, f"""
+        SELECT COUNT(*) FROM alerts a
+        {bits["slot_join"]}
+        LEFT JOIN cameras c ON c.camera_id = a.camera_id
+        {floors_join}
+        WHERE {where}
+    """, params)
+    items = rows(db, f"""
+        {select_from}
         WHERE {where}
         ORDER BY {_ORDER_BY[sort]}
         OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
     """, params)
     for it in items:
-        it["snapshot_url"] = resolve_snapshot_url(it.get("snapshot_url"))
-        atype = it.get("alert_type", "")
-        it["triggered_at"] = _fix_ts(it.get("triggered_at"), atype)
-        it["resolved_at"]  = _fix_ts(it.get("resolved_at"),  atype)
+        alert_item_fixup(it)
     return build_paged(items, total or 0, page, page_size)
  
  
