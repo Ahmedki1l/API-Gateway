@@ -83,6 +83,11 @@ def _alerts_extra_cols() -> dict:
             "resolution_notes":            exists("resolution_notes"),
             # Always present in current schema but probed for completeness
             "event_type":                  exists("event_type"),
+            # dbo.alert_types (migrator 0010): each type's configured severity,
+            # which old-scale values are read as (see _alert_query_bits).
+            "alert_types_table": bool(db.execute(text(
+                "SELECT CASE WHEN OBJECT_ID(N'dbo.alert_types', N'U') IS NULL THEN 0 ELSE 1 END"
+            )).scalar()),
         }
     finally:
         db.close()
@@ -128,6 +133,32 @@ def _alert_type_settings(db: Session) -> Optional[list[dict]]:
         return None
 
 
+def _stored_severity_expr(cols: dict) -> str:
+    """The 4-level severity of a row with a real `alerts.severity` column.
+
+    A value on the 4-level scale (high / medium / low) is the level. PMS-AI and
+    VideoAnalytics still WRITE the old scale (critical / warning / info), so
+    those — and NULL — are read as the type's configured severity in
+    dbo.alert_types, which is what migrator 0013 did to the rows that existed
+    then. 'critical' is on both scales, and every service still writes the old
+    one, so it is translated too. A type with no configured severity, or a DB
+    without dbo.alert_types, falls back to warning -> medium, info -> low
+    (LEGACY_SEVERITY); anything else stays as stored.
+
+    One expression for the badge, the `?severity=` filter, the cards, the
+    donut, the sort and the CSV, so they cannot disagree. It is a scalar
+    subquery on the alert_types primary key, so a query that GROUPs or
+    aggregates on it must do so over a derived table (SQL Server rejects a
+    subquery in GROUP BY or inside MIN())."""
+    fallback = ("CASE a.severity WHEN 'warning' THEN 'medium' WHEN 'info' THEN 'low' "
+                "WHEN 'critical' THEN 'critical' ELSE COALESCE(a.severity, 'critical') END")
+    if not cols.get("alert_types_table"):
+        return f"({fallback})"
+    return ("(CASE WHEN a.severity IN ('high', 'medium', 'low') THEN a.severity "
+            "ELSE COALESCE((SELECT ats.severity FROM dbo.alert_types ats "
+            f"WHERE ats.alert_type = a.alert_type), {fallback}) END)")
+
+
 def _alert_query_bits(cols: dict) -> dict[str, str]:
     """
     Build SQL expression fragments based on which columns exist in the alerts table.
@@ -153,7 +184,7 @@ def _alert_query_bits(cols: dict) -> dict[str, str]:
         zone_name_expr = "a.zone_name"
  
     severity_expr = (
-        "a.severity"
+        _stored_severity_expr(cols)
         if cols["severity"]
         else (
             "CASE "
@@ -213,7 +244,9 @@ def _where(search, severity, alert_type, resolved, date_from, date_to, cols, flo
         level = getattr(severity, "value", severity)
         level = LEGACY_SEVERITY.get(level, level)
         if cols["severity"]:
-            clauses.append("a.severity = :severity")
+            # The same expression the rows display: an old-scale value that
+            # reads as `level` must match too (see _stored_severity_expr).
+            clauses.append(f"{bits['severity_expr']} = :severity")
             params["severity"] = level
         else:
             # No severity column: severity is derived from alert_type in three
@@ -391,10 +424,13 @@ def _range_counts(db: Session, date_from: Optional[date], date_to: Optional[date
     bits = _alert_query_bits(cols)
     where, params = _where(None, None, None, None, date_from, date_to, cols)
     grouped = rows(db, f"""
-        SELECT {bits["severity_expr"]} AS severity, a.is_resolved AS resolved, COUNT(*) AS n
-        FROM alerts a
-        WHERE {where}
-        GROUP BY {bits["severity_expr"]}, a.is_resolved
+        SELECT severity, resolved, COUNT(*) AS n
+        FROM (
+            SELECT {bits["severity_expr"]} AS severity, a.is_resolved AS resolved
+            FROM alerts a
+            WHERE {where}
+        ) t
+        GROUP BY severity, resolved
     """, params)
 
     c = _RangeCounts()
@@ -535,6 +571,9 @@ async def alert_summary(
     return AlertSummary(total=total, by_type=by_type)
 
 
+_RANKED_LEVELS = {1: "critical", 2: "high", 3: "medium", 4: "low"}
+
+
 def _summary_by_type(db: Session, where: str, params: dict, cols: dict) -> tuple[int, list[AlertTypeCount]]:
     """`(total, by_type)` for the alerts matching `where` — the Alerts Summary
     donut. Shared by /summary and GET /alerts/reports/overstay-violations."""
@@ -557,25 +596,27 @@ def _summary_by_type(db: Session, where: str, params: dict, cols: dict) -> tuple
         floors_join = f"LEFT JOIN floors f ON f.name = {floor_expr}"
 
     grouped = rows(db, f"""
-        SELECT a.alert_type            AS alert_type,
-               MIN({bits["severity_expr"]}) AS severity,
-               COUNT(*)                AS count
-        FROM alerts a
-        {bits["slot_join"]}
-        LEFT JOIN cameras c ON c.camera_id = a.camera_id
-        {floors_join}
-        WHERE {where}
-        GROUP BY a.alert_type
+        SELECT alert_type,
+               MIN(CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2
+                                 WHEN 'medium' THEN 3 WHEN 'warning' THEN 3
+                                 WHEN 'low' THEN 4 WHEN 'info' THEN 4 END) AS severity_rank,
+               COUNT(*) AS count
+        FROM (
+            SELECT a.alert_type, {bits["severity_expr"]} AS severity
+            FROM alerts a
+            {bits["slot_join"]}
+            LEFT JOIN cameras c ON c.camera_id = a.camera_id
+            {floors_join}
+            WHERE {where}
+        ) t
+        GROUP BY alert_type
     """, params)
 
-    # MIN() over the severity expression collapses the per-row severity to one
-    # value per type. When `alerts.severity` is a real column a single type can
-    # in principle hold mixed severities; MIN is deterministic and alphabetical
-    # ('critical' < 'info' < 'warning'), which biases the slice colour toward
-    # the most urgent of the three. Without the column the expression is a pure
-    # function of alert_type, so the collapse is exact.
+    # A type's rows can hold mixed levels (e.g. an operator re-levelled it);
+    # the slice takes the most urgent one, by rank rather than alphabetically.
+    # Only used without dbo.alert_types — with it, the configured level wins.
     counts = {
-        (r.get("alert_type") or ""): (r.get("count") or 0, r.get("severity"))
+        (r.get("alert_type") or ""): (r.get("count") or 0, _RANKED_LEVELS.get(r.get("severity_rank")))
         for r in grouped
     }
 

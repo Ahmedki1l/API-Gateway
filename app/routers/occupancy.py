@@ -172,9 +172,11 @@ def _active_violation_join(alias: str = "pk") -> str:
     # Late import to dodge a startup-time circular: occupancy is imported by
     # dashboard, which already imports alerts; the alerts module pulls in
     # SQLAlchemy types that would cycle if loaded eagerly here.
-    from app.routers.alerts import _alerts_extra_cols
+    from app.routers.alerts import _alert_query_bits, _alerts_extra_cols
     p = f"{alias}." if alias else ""
-    sev_expr = "a.severity" if _alerts_extra_cols()["severity"] else "'critical'"
+    cols = _alerts_extra_cols()
+    # The alert's 4-level severity, read exactly as the Alerts page reads it.
+    sev_expr = _alert_query_bits(cols)["severity_expr"] if cols["severity"] else "'critical'"
     return f"""LEFT JOIN (
             SELECT a.slot_id, a.alert_type, {sev_expr} AS severity,
                    ROW_NUMBER() OVER (PARTITION BY a.slot_id

@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from pydantic import field_validator, model_validator
+from pydantic import TypeAdapter, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -121,24 +121,62 @@ class Settings(BaseSettings):
     daily_occupancy_run_minute: int = 10
     daily_occupancy_backfill: bool = True
 
-    @field_validator("report_business_hour_from", "report_business_hour_to")
+    # The REPORT_BUSINESS_* settings feed a reporting add-on, so a bad value
+    # must never stop the Gateway: each check below warns at boot and falls
+    # back to the default, as _run_at() does for the occupancy job. (A raising
+    # validator here would crash-loop every pod — dashboard, alerts, cameras —
+    # over a report caption.) The operator-edited window in dbo.report_settings
+    # overrides these anyway; they only matter before migrator 0010.
+
+    @staticmethod
+    def _fallback(field: str, value, default):
+        print(f"[config] invalid {field.upper()}={value!r} - using {default!r}")
+        return default
+
+    @field_validator("report_business_hours_enabled", mode="before")
     @classmethod
-    def _valid_hour(cls, v: int) -> int:
-        # 24 is legal for `_to` only (means "to end of day"); guard the range so
-        # a typo in .env fails at boot rather than silently zeroing a KPI.
-        if not 0 <= v <= 24:
-            raise ValueError("report business hours must be between 0 and 24")
-        return v
+    def _valid_enabled(cls, v):
+        try:
+            return TypeAdapter(bool).validate_python(v)
+        except ValidationError:
+            return cls._fallback("report_business_hours_enabled", v,
+                                 cls.model_fields["report_business_hours_enabled"].default)
+
+    @field_validator("report_business_hour_from", "report_business_hour_to", mode="before")
+    @classmethod
+    def _valid_hour(cls, v, info: ValidationInfo) -> int:
+        # `_from` is an hour of the day (0-23); `_to` is exclusive, so 24 means
+        # "to the end of the day" and 0 would be an empty window.
+        lo, hi = (0, 23) if info.field_name == "report_business_hour_from" else (1, 24)
+        try:
+            hour = int(str(v).strip())
+        except (TypeError, ValueError):
+            hour = None
+        if hour is None or not lo <= hour <= hi:
+            return cls._fallback(info.field_name, v, cls.model_fields[info.field_name].default)
+        return hour
+
+    @field_validator("report_business_days", mode="after")
+    @classmethod
+    def _valid_days(cls, v: str) -> str:
+        # A typo ("Thur", "Sunday ") would otherwise drop days from every
+        # occupancy denominator without a word.
+        try:
+            parse_business_days(v)
+            return v
+        except ValueError:
+            return cls._fallback("report_business_days", v, cls.model_fields["report_business_days"].default)
 
     @model_validator(mode="after")
     def _valid_business_window(self):
         if self.report_business_hour_from >= self.report_business_hour_to:
-            raise ValueError(
-                "REPORT_BUSINESS_HOUR_FROM must be less than REPORT_BUSINESS_HOUR_TO"
-            )
-        # Parse eagerly so a typo ("Thur", "Sunday ") fails at boot with a clear
-        # message, rather than silently shrinking every occupancy denominator.
-        self.business_weekdays  # noqa: B018 — property raises on bad input
+            default_from = type(self).model_fields["report_business_hour_from"].default
+            default_to = type(self).model_fields["report_business_hour_to"].default
+            self._fallback("report_business_hour_from/_to",
+                           (self.report_business_hour_from, self.report_business_hour_to),
+                           (default_from, default_to))
+            self.report_business_hour_from = default_from
+            self.report_business_hour_to = default_to
         return self
 
     @property
