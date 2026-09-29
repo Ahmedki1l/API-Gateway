@@ -1,28 +1,61 @@
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Path, Query, HTTPException, Response, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.config import facility_today_utc
+from app.config import facility_now_naive, facility_today_utc, localize_naive
 from app.database import get_db, scalar, rows
-from app.routers._helpers import _floor_schema
-from app.routers.entry_exit import _live_duration_seconds
+from app.routers._helpers import _floor_schema, resolve_floor_id
+from app.routers.alerts import (
+    _alert_query_bits,
+    _alerts_extra_cols,
+    _where as _alert_where,
+    alert_item_fixup,
+    alert_items_sql,
+)
+from app.routers.entry_exit import (
+    IS_EMPLOYEE_EXPR,
+    OWNER_NAME_EXPR,
+    VEHICLE_JOIN,
+    VEHICLE_TYPE_EXPR,
+    _event_from_row as _session_event,
+    _live_duration_seconds,
+)
 from app.services.alert_auto_resolve import auto_resolve_alerts_for_vehicle
 from app.services.snapshots import resolve_snapshot_url
 from app.schemas import (
+    AlertItem,
     EntityActionResponse,
     EntryExitEvent,
+    GateRead,
+    HistorySection,
     PagedResponse,
+    SlotSighting,
     VehicleCreate,
     VehicleDetail,
     VehicleEvent,
     VehicleItem,
     VehicleKPIs,
     VehicleListItem,
+    VehicleHistory,
+    VehicleHistoryCurrent,
+    VehicleHistorySummary,
+    VehicleRef,
+    VehicleTimelineItem,
     VehicleUpdate,
 )
-from app.shared import build_paged, plate_search_clause, stream_csv
+from app.schemas_enums import AlertSeverity, EntryExitDirection, ParkingSessionStatus
+from app.shared import (
+    build_paged,
+    normalize_plate_term,
+    plate_exact_forms,
+    plate_in_clause,
+    plate_search_clause,
+    stream_csv,
+)
 
 from app.routers.prefix_injection import (get_prefix)
 prefix = get_prefix() + "/vehicles"
@@ -989,6 +1022,551 @@ def _fetch_vehicle_detail(
         events_total=events_total,
         events=events,
     )
+
+
+# ── GET /vehicles/history ─────────────────────────────────────────────────────
+# Everything the database knows about one plate: registry row, where it is
+# now, and its visits / alerts / gate reads / slot sightings in a date range.
+
+_HISTORY_SECTIONS = ("sessions", "alerts", "gate_reads", "slots")
+_HISTORY_INCLUDE = _HISTORY_SECTIONS + ("timeline",)
+
+
+def _parse_include(include: Optional[str]) -> set[str]:
+    if not include:
+        return set(_HISTORY_SECTIONS)
+    wanted = {p.strip().lower() for p in include.split(",") if p.strip()}
+    unknown = wanted - set(_HISTORY_INCLUDE)
+    if unknown:
+        raise HTTPException(400, f"Unknown include value(s): {', '.join(sorted(unknown))}. "
+                                 f"Allowed: {', '.join(_HISTORY_INCLUDE)}")
+    return wanted
+
+
+def _range_clause(column: str, start, end, clauses: list, params: dict, key: str) -> None:
+    if start is not None:
+        clauses.append(f"{column} >= :{key}_start")
+        params[f"{key}_start"] = start
+    if end is not None:
+        clauses.append(f"{column} < :{key}_end")
+        params[f"{key}_end"] = end
+
+
+def _fmt_duration(seconds: Optional[int]) -> str:
+    if seconds is None:
+        return ""
+    h, m = divmod(int(seconds) // 60, 60)
+    return f"{h}h {m}m" if h else f"{m}m"
+
+
+def _limit_sql(limit: Optional[int], params: dict) -> str:
+    if limit is None:
+        return ""
+    params["lim"] = limit
+    return "OFFSET 0 ROWS FETCH NEXT :lim ROWS ONLY"
+
+
+@dataclass
+class _HistoryQuery:
+    """One request's plate + range + filters, resolved once."""
+    forms: list[str]
+    start: Optional[datetime]
+    end: Optional[datetime]
+    session_status: Optional[ParkingSessionStatus]
+    alert_type: Optional[str]
+    severity: Optional[AlertSeverity]
+    resolved: Optional[bool]
+    gate: Optional[EntryExitDirection]
+    camera_id: Optional[str]
+    floor: Optional[str]
+    floor_id: Optional[int]
+    open_only: bool = False
+
+
+def _history_sessions(db: Session, q: _HistoryQuery, limit: Optional[int]) -> HistorySection:
+    schema = _floor_schema()
+    params: dict = {}
+    clauses = [plate_in_clause("ps.plate_number", q.forms, params)]
+    _range_clause("ps.entry_time", q.start, q.end, clauses, params, "r")
+    if q.open_only:
+        clauses.append("ps.status IN ('open', 'overstay')")
+    if q.session_status == ParkingSessionStatus.overstay:
+        # Same rule as the Entry/Exit list's overstay filter.
+        clauses.append("ps.status IN ('open', 'overstay') AND ps.entry_time < :overstay_cutoff")
+        params["overstay_cutoff"] = facility_today_utc()
+    elif q.session_status:
+        clauses.append("ps.status = :status")
+        params["status"] = q.session_status.value
+    if q.floor_id is not None and schema["parking_sessions_floor_id"]:
+        clauses.append("ps.floor_id = :floor_id")
+        params["floor_id"] = q.floor_id
+    elif q.floor:
+        clauses.append("ps.floor = :floor")
+        params["floor"] = q.floor
+    where = " AND ".join(clauses)
+
+    total = scalar(db, f"SELECT COUNT(*) FROM parking_sessions ps WHERE {where}", params) or 0
+    ps_floor_id = "ps.floor_id" if schema["parking_sessions_floor_id"] else "NULL"
+    found = rows(db, f"""
+        SELECT
+            ps.id, ps.vehicle_id, ps.plate_number, ps.status,
+            ps.entry_time, ps.exit_time, ps.duration_seconds,
+            ps.floor, {ps_floor_id} AS floor_id,
+            ps.slot_id, COALESCE(pk.slot_name, ps.slot_number) AS slot_name, ps.slot_number,
+            ps.parked_at, ps.slot_left_at,
+            ps.entry_camera_id, ps.exit_camera_id, ps.slot_camera_id,
+            ps.entry_snapshot_path, ps.exit_snapshot_path, ps.slot_snapshot_path,
+            {OWNER_NAME_EXPR}   AS owner_name,
+            {VEHICLE_TYPE_EXPR} AS vehicle_type,
+            {IS_EMPLOYEE_EXPR}  AS is_employee
+        FROM parking_sessions ps
+        {VEHICLE_JOIN}
+        LEFT JOIN parking_slots pk ON pk.slot_id = ps.slot_id
+        WHERE {where}
+        ORDER BY ps.entry_time DESC, ps.id DESC
+        {_limit_sql(limit, params)}
+    """, params)
+    return HistorySection[VehicleEvent](
+        total=total, items=[_session_event(r, r["plate_number"]) for r in found],
+    )
+
+
+def _history_alerts(db: Session, q: _HistoryQuery, limit: Optional[int]) -> HistorySection:
+    cols = _alerts_extra_cols()
+    bits = _alert_query_bits(cols)
+    schema = _floor_schema()
+    where, params = _alert_where(
+        None, q.severity, q.alert_type, q.resolved, None, None, cols,
+        floor_id=q.floor_id, floor=q.floor,
+    )
+    clauses = [where, plate_in_clause("a.plate_number", q.forms, params)]
+    _range_clause("a.triggered_at", q.start, q.end, clauses, params, "r")
+    where = " AND ".join(clauses)
+
+    select_from, floors_join = alert_items_sql(cols, schema)
+    total = scalar(db, f"""
+        SELECT COUNT(*) FROM alerts a
+        {bits["slot_join"]}
+        LEFT JOIN cameras c ON c.camera_id = a.camera_id
+        {floors_join}
+        WHERE {where}
+    """, params) or 0
+    found = rows(db, f"""
+        {select_from}
+        WHERE {where}
+        ORDER BY a.triggered_at DESC, a.id DESC
+        {_limit_sql(limit, params)}
+    """, params)
+    return HistorySection[AlertItem](total=total, items=[alert_item_fixup(r) for r in found])
+
+
+def _history_gate_reads(db: Session, q: _HistoryQuery, limit: Optional[int]) -> HistorySection:
+    params: dict = {}
+    clauses = ["g.is_test = 0", plate_in_clause("g.plate_number", q.forms, params)]
+    _range_clause("g.event_time", q.start, q.end, clauses, params, "r")
+    if q.gate:
+        clauses.append("g.gate = :gate")
+        params["gate"] = q.gate.value
+    if q.camera_id:
+        clauses.append("g.camera_id = :camera_id")
+        params["camera_id"] = q.camera_id
+    where = " AND ".join(clauses)
+
+    total = scalar(db, f"SELECT COUNT(*) FROM entry_exit_log g WHERE {where}", params) or 0
+    found = rows(db, f"""
+        SELECT g.id, g.plate_number, g.gate, g.camera_id, g.event_time, g.snapshot_path,
+               g.plate_confidence, g.matched_entry_id, g.parking_duration
+        FROM entry_exit_log g
+        WHERE {where}
+        ORDER BY g.event_time DESC, g.id DESC
+        {_limit_sql(limit, params)}
+    """, params)
+    return HistorySection[GateRead](total=total, items=[
+        GateRead(
+            id=r["id"], plate_number=r["plate_number"], gate=r.get("gate"),
+            camera_id=r.get("camera_id"), event_time=localize_naive(r.get("event_time")),
+            snapshot_url=resolve_snapshot_url(r.get("snapshot_path")),
+            plate_confidence=r.get("plate_confidence"),
+            matched_entry_id=r.get("matched_entry_id"),
+            parking_duration_seconds=r.get("parking_duration"),
+        )
+        for r in found
+    ])
+
+
+def _history_slots(db: Session, q: _HistoryQuery, limit: Optional[int]) -> HistorySection:
+    """slot_status readings that name this plate, merged into sightings.
+
+    Each reading lasts until the NEXT reading of the same slot (whatever it
+    says). When that next reading is this car again, the two are one sighting.
+    slot_status has no plate index; a plate has few readings, so every one is
+    fetched and merged here, then cut to `limit`."""
+    schema = _floor_schema()
+    params: dict = {}
+    clauses = [plate_in_clause("ss.plate_number", q.forms, params)]
+    _range_clause("ss.time", q.start, q.end, clauses, params, "r")
+    if q.floor:
+        clauses.append("pk.floor = :floor")
+        params["floor"] = q.floor
+    elif q.floor_id is not None and schema["floors_table"]:
+        clauses.append("pk.floor = (SELECT name FROM floors WHERE id = :floor_id)")
+        params["floor_id"] = q.floor_id
+
+    found = rows(db, f"""
+        SELECT ss.id, ss.slot_id, ss.status, ss.time,
+               pk.slot_name, pk.floor,
+               nx.id AS next_id, nx.time AS next_time
+        FROM slot_status ss
+        LEFT JOIN parking_slots pk ON pk.slot_id = ss.slot_id
+        OUTER APPLY (
+            SELECT TOP 1 s2.id, s2.time
+            FROM slot_status s2
+            WHERE s2.slot_id = ss.slot_id
+              AND (s2.time > ss.time OR (s2.time = ss.time AND s2.id > ss.id))
+            ORDER BY s2.time, s2.id
+        ) nx
+        WHERE {" AND ".join(clauses)}
+        ORDER BY ss.slot_id, ss.time, ss.id
+    """, params)
+
+    sightings: list[dict] = []
+    by_next: dict[int, dict] = {}     # next reading's id -> the sighting it continues
+    for r in found:
+        s = by_next.pop(r["id"], None)
+        if s is None:
+            s = {"slot_id": r["slot_id"], "slot_name": r.get("slot_name"), "floor": r.get("floor"),
+                 "status": r.get("status"), "seen_from": r["time"], "observations": 0}
+            sightings.append(s)
+        s["observations"] += 1
+        s["seen_until"] = r.get("next_time")
+        if r.get("next_id") is not None:
+            by_next[r["next_id"]] = s
+
+    sightings.sort(key=lambda s: s["seen_from"], reverse=True)
+    shown = sightings if limit is None else sightings[:limit]
+    return HistorySection[SlotSighting](total=len(sightings), items=[
+        SlotSighting(
+            **{k: s[k] for k in ("slot_id", "slot_name", "floor", "status", "observations")},
+            seen_from=localize_naive(s["seen_from"]),
+            seen_until=localize_naive(s["seen_until"]),
+            duration_seconds=(
+                int((s["seen_until"] - s["seen_from"]).total_seconds())
+                if s["seen_until"] is not None else None
+            ),
+        )
+        for s in shown
+    ])
+
+
+def _history_summary(db: Session, q: _HistoryQuery) -> VehicleHistorySummary:
+    """Range only — the section filters are deliberately not applied."""
+    def where(column: str, alias_clauses: list[str], params: dict) -> str:
+        clauses = list(alias_clauses)
+        _range_clause(column, q.start, q.end, clauses, params, "r")
+        return " AND ".join(clauses)
+
+    p: dict = {"now": facility_now_naive(), "midnight": facility_today_utc()}
+    s = rows(db, f"""
+        SELECT COUNT(*) AS visits,
+               SUM(CASE WHEN (exit_time IS NULL AND entry_time < :midnight)
+                          OR exit_time >= DATEADD(DAY, 1, CAST(CAST(entry_time AS DATE) AS DATETIME2))
+                        THEN 1 ELSE 0 END) AS overstays,
+               SUM(CAST(COALESCE(duration_seconds, DATEDIFF(SECOND, entry_time, :now)) AS BIGINT)) AS parked,
+               AVG(CAST(COALESCE(duration_seconds, DATEDIFF(SECOND, entry_time, :now)) AS FLOAT)) AS avg_sec,
+               MIN(entry_time) AS first_at,
+               MAX(COALESCE(exit_time, entry_time)) AS last_at
+        FROM parking_sessions
+        WHERE {where("entry_time", [plate_in_clause("plate_number", q.forms, p)], p)}
+    """, p)[0]
+
+    p = {}
+    a = rows(db, f"""
+        SELECT COUNT(*) AS n, SUM(CASE WHEN is_resolved = 0 THEN 1 ELSE 0 END) AS open_n,
+               MIN(triggered_at) AS first_at, MAX(triggered_at) AS last_at
+        FROM alerts
+        WHERE {where("triggered_at", ["is_test = 0", plate_in_clause("plate_number", q.forms, p)], p)}
+    """, p)[0]
+
+    p = {}
+    g = rows(db, f"""
+        SELECT COUNT(*) AS n, MIN(event_time) AS first_at, MAX(event_time) AS last_at
+        FROM entry_exit_log
+        WHERE {where("event_time", ["is_test = 0", plate_in_clause("plate_number", q.forms, p)], p)}
+    """, p)[0]
+
+    p = {}
+    sl = rows(db, f"""
+        SELECT COUNT(*) AS n, MIN(time) AS first_at, MAX(time) AS last_at
+        FROM slot_status
+        WHERE {where("time", [plate_in_clause("plate_number", q.forms, p)], p)}
+    """, p)[0]
+
+    firsts = [x["first_at"] for x in (s, a, g, sl) if x["first_at"] is not None]
+    lasts = [x["last_at"] for x in (s, a, g, sl) if x["last_at"] is not None]
+    return VehicleHistorySummary(
+        visits=s["visits"] or 0,
+        overstays=s["overstays"] or 0,
+        total_parked_seconds=int(s["parked"] or 0),
+        avg_stay_minutes=round((s["avg_sec"] or 0) / 60, 1),
+        alerts=a["n"] or 0,
+        open_alerts=a["open_n"] or 0,
+        gate_reads=g["n"] or 0,
+        slot_sightings=sl["n"] or 0,
+        first_seen_at=localize_naive(min(firsts)) if firsts else None,
+        last_seen_at=localize_naive(max(lasts)) if lasts else None,
+    )
+
+
+def _history_current(db: Session, q: _HistoryQuery, vehicle: Optional[VehicleRef]) -> VehicleHistoryCurrent:
+    """Now, regardless of the range and filters."""
+    open_q = _HistoryQuery(**{**q.__dict__, "start": None, "end": None, "session_status": None,
+                              "floor": None, "floor_id": None, "open_only": True})
+    params: dict = {}
+    plate_clause = plate_in_clause("ps.plate_number", q.forms, params)
+    open_count = scalar(db, f"""
+        SELECT COUNT(*) FROM parking_sessions ps
+        WHERE {plate_clause} AND ps.status IN ('open', 'overstay')
+    """, params) or 0
+    newest_open = None
+    if open_count:
+        newest_open = _history_sessions(db, open_q, 1).items[0]
+
+    params = {}
+    open_alerts = scalar(db, f"""
+        SELECT COUNT(*) FROM alerts
+        WHERE is_test = 0 AND is_resolved = 0 AND {plate_in_clause("plate_number", q.forms, params)}
+    """, params) or 0
+
+    slot_id = (newest_open.slot_id if newest_open else None) or (vehicle.current_slot_id if vehicle else None)
+    slot_name = (newest_open.slot_name if newest_open and newest_open.slot_id else None) or (
+        vehicle.current_slot_name if vehicle and vehicle.current_slot_id == slot_id else None
+    )
+    return VehicleHistoryCurrent(
+        is_inside=newest_open is not None,
+        open_session=newest_open,
+        open_sessions_count=open_count,
+        current_slot_id=slot_id,
+        current_slot_name=slot_name,
+        open_alerts=open_alerts,
+    )
+
+
+def _history_vehicle(db: Session, forms: list[str]) -> Optional[VehicleRef]:
+    cols = _vehicle_extra_cols(db)
+    extra = (
+        (", v.is_employee" if cols["is_employee"] else ", NULL AS is_employee") +
+        (", v.phone"       if cols["phone"]       else ", NULL AS phone") +
+        (", v.email"       if cols["email"]       else ", NULL AS email")
+    )
+    if cols["current_slot_id"]:
+        slot_join = "LEFT JOIN dbo.parking_slots cs ON cs.slot_id = v.current_slot_id"
+        slot_sel = ", v.current_slot_id, cs.slot_name AS current_slot_name"
+    else:
+        slot_join, slot_sel = "", ", NULL AS current_slot_id, NULL AS current_slot_name"
+    params: dict = {}
+    found = rows(db, f"""
+        SELECT TOP 1 v.id, v.plate_number, v.owner_name, v.vehicle_type, v.employee_id,
+               v.title, v.is_registered, v.registered_at, v.notes {extra} {slot_sel}
+        FROM vehicles v
+        {slot_join}
+        WHERE {plate_in_clause("v.plate_number", forms, params)}
+    """, params)
+    if not found:
+        return None
+    v = found[0]
+    return VehicleRef(**{**v, "is_registered": bool(v.get("is_registered"))})
+
+
+def _history_timeline(sections: dict[str, HistorySection], limit: Optional[int]) -> list[VehicleTimelineItem]:
+    """All sections merged, newest first. Built from the sections' newest
+    `limit` rows, which always hold the newest `limit` events overall (an exit
+    of a visit older than those is the one edge left out)."""
+    out: list[VehicleTimelineItem] = []
+    for e in sections["sessions"].items:
+        out.append(VehicleTimelineItem(
+            at=e.entry.event_time, kind="entry", ref_id=str(e.id), camera_id=e.entry.camera_id,
+            floor=e.floor, text=f"Entered (visit #{e.id})",
+        ))
+        if e.parked_at and e.slot_id:
+            out.append(VehicleTimelineItem(
+                at=e.parked_at, kind="parked", ref_id=str(e.id), slot_id=e.slot_id, floor=e.floor,
+                camera_id=e.slot_camera_id, text=f"Parked in {e.slot_name or e.slot_id}",
+            ))
+        if e.exit:
+            out.append(VehicleTimelineItem(
+                at=e.exit.event_time, kind="exit", ref_id=str(e.id), camera_id=e.exit.camera_id,
+                floor=e.floor, text=f"Exited after {_fmt_duration(e.duration_seconds)} (visit #{e.id})",
+            ))
+    for a in sections["alerts"].items:
+        label = (a.alert_type or "alert").replace("_", " ")
+        out.append(VehicleTimelineItem(
+            at=a.triggered_at, kind="alert", ref_id=str(a.id), camera_id=a.camera_id,
+            slot_id=a.slot_id, floor=a.floor, severity=a.severity,
+            text=f"Alert: {label}" + (f" at {a.location}" if a.location else ""),
+        ))
+        if a.is_resolved and a.resolved_at:
+            out.append(VehicleTimelineItem(
+                at=a.resolved_at, kind="alert_resolved", ref_id=str(a.id),
+                severity=a.severity, text=f"Alert resolved: {label}",
+            ))
+    for g in sections["gate_reads"].items:
+        conf = f", confidence {g.plate_confidence:g}" if g.plate_confidence is not None else ""
+        out.append(VehicleTimelineItem(
+            at=g.event_time, kind="gate_read", ref_id=str(g.id), camera_id=g.camera_id,
+            text=f"Plate read at {g.gate or 'gate'} ({g.camera_id}{conf})",
+        ))
+    for s in sections["slots"].items:
+        out.append(VehicleTimelineItem(
+            at=s.seen_from, kind="slot", ref_id=s.slot_id, slot_id=s.slot_id, floor=s.floor,
+            text=f"Seen in {s.slot_name or s.slot_id}"
+                 + (f" for {_fmt_duration(s.duration_seconds)}" if s.duration_seconds is not None else ""),
+        ))
+    out = [t for t in out if t.at is not None]
+    out.sort(key=lambda t: t.at, reverse=True)
+    return out if limit is None else out[:limit]
+
+
+def _history_query(
+    plate, date_from, date_to, session_status, alert_type, severity, resolved,
+    gate, camera_id, floor, floor_id, db,
+) -> _HistoryQuery:
+    forms = plate_exact_forms(plate)
+    if not forms:
+        raise HTTPException(400, "plate must contain letters or digits")
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(400, "date_from must not be after date_to")
+    return _HistoryQuery(
+        forms=forms,
+        start=datetime.combine(date_from, datetime.min.time()) if date_from else None,
+        end=datetime.combine(date_to + timedelta(days=1), datetime.min.time()) if date_to else None,
+        session_status=session_status, alert_type=alert_type, severity=severity, resolved=resolved,
+        gate=gate, camera_id=camera_id, floor=floor,
+        floor_id=resolve_floor_id(db, floor_id=floor_id, floor_name=floor),
+    )
+
+
+_PLATE_Q = Query(..., min_length=2, max_length=20,
+                 description="One plate, either display order; dashes/spaces ignored. Exact match only.")
+_HIST_DATE_FROM = Query(None, description="First day (inclusive), facility-local. Omit both for all time.")
+_HIST_DATE_TO = Query(None, description="Last day (inclusive), facility-local.")
+_SESSION_STATUS_Q = Query(None, description="Visits only.")
+_ALERT_TYPE_Q = Query(None, description="Alerts only.")
+_SEVERITY_Q = Query(None, description="Alerts only.")
+_RESOLVED_Q = Query(None, description="Alerts only. Omit for both.")
+_GATE_Q = Query(None, description="Gate reads only.")
+_CAMERA_Q = Query(None, description="Gate reads only.")
+_FLOOR_Q = Query(None, description="Visits, alerts and slot history.")
+_FLOOR_ID_Q = Query(None, description="Visits, alerts and slot history; wins over `floor`.")
+
+
+@router.get("/history", response_model=VehicleHistory)
+async def vehicle_history(
+    plate: str = _PLATE_Q,
+    date_from: Optional[date] = _HIST_DATE_FROM,
+    date_to: Optional[date] = _HIST_DATE_TO,
+    include: Optional[str] = Query(
+        None,
+        description="Comma list of sessions, alerts, gate_reads, slots, timeline. "
+                    "Default: the four sections, no timeline.",
+    ),
+    limit: int = Query(50, ge=1, le=500, description="Newest items per section (and in the timeline)."),
+    session_status: Optional[ParkingSessionStatus] = _SESSION_STATUS_Q,
+    alert_type: Optional[str] = _ALERT_TYPE_Q,
+    severity: Optional[AlertSeverity] = _SEVERITY_Q,
+    resolved: Optional[bool] = _RESOLVED_Q,
+    gate: Optional[EntryExitDirection] = _GATE_Q,
+    camera_id: Optional[str] = _CAMERA_Q,
+    floor: Optional[str] = _FLOOR_Q,
+    floor_id: Optional[int] = _FLOOR_ID_Q,
+    db: Session = Depends(get_db),
+):
+    """Everything about one plate, registered or not.
+
+    - `vehicle`: the registry row, or null.
+    - `current`: inside right now? Open visit, slot, open alerts. Ignores the
+      range and the filters.
+    - `summary`: counts for the range. Ignores the filters.
+    - `sessions` / `alerts` / `gate_reads` / `slot_history`: newest `limit`
+      of each, with `total`; range and filters apply. Null when not in `include`.
+    - `timeline`: only with `include=timeline`; the same records merged into
+      one newest-first list, capped at `limit`.
+    """
+    wanted = _parse_include(include)
+    q = _history_query(plate, date_from, date_to, session_status, alert_type, severity,
+                       resolved, gate, camera_id, floor, floor_id, db)
+
+    need = set(_HISTORY_SECTIONS) if "timeline" in wanted else wanted & set(_HISTORY_SECTIONS)
+    fetch = {"sessions": _history_sessions, "alerts": _history_alerts,
+             "gate_reads": _history_gate_reads, "slots": _history_slots}
+    sections = {name: fetch[name](db, q, limit) for name in need}
+
+    vehicle = _history_vehicle(db, q.forms)
+    summary = _history_summary(db, q)
+    current = _history_current(db, q, vehicle)
+
+    matched = set()
+    if vehicle:
+        matched.add(vehicle.plate_number)
+    for sec in sections.values():
+        matched.update(i.plate_number for i in sec.items if getattr(i, "plate_number", None))
+    if current.open_session:
+        matched.add(current.open_session.plate_number)
+
+    found = bool(vehicle or current.is_inside or summary.visits or summary.alerts
+                 or summary.gate_reads or summary.slot_sightings)
+    return VehicleHistory(
+        plate=plate,
+        matched_plates=sorted(matched),
+        found=found,
+        date_from=date_from,
+        date_to=date_to,
+        vehicle=vehicle,
+        current=current,
+        summary=summary,
+        sessions=sections["sessions"] if "sessions" in wanted else None,
+        alerts=sections["alerts"] if "alerts" in wanted else None,
+        gate_reads=sections["gate_reads"] if "gate_reads" in wanted else None,
+        slot_history=sections["slots"] if "slots" in wanted else None,
+        timeline=_history_timeline(sections, limit) if "timeline" in wanted else None,
+    )
+
+
+@router.get("/history/export/csv")
+async def export_vehicle_history_csv(
+    plate: str = _PLATE_Q,
+    date_from: Optional[date] = _HIST_DATE_FROM,
+    date_to: Optional[date] = _HIST_DATE_TO,
+    session_status: Optional[ParkingSessionStatus] = _SESSION_STATUS_Q,
+    alert_type: Optional[str] = _ALERT_TYPE_Q,
+    severity: Optional[AlertSeverity] = _SEVERITY_Q,
+    resolved: Optional[bool] = _RESOLVED_Q,
+    gate: Optional[EntryExitDirection] = _GATE_Q,
+    camera_id: Optional[str] = _CAMERA_Q,
+    floor: Optional[str] = _FLOOR_Q,
+    floor_id: Optional[int] = _FLOOR_ID_Q,
+    db: Session = Depends(get_db),
+):
+    """The full timeline (no `limit`) for the same plate, range and filters
+    as GET /vehicles/history, one row per event."""
+    q = _history_query(plate, date_from, date_to, session_status, alert_type, severity,
+                       resolved, gate, camera_id, floor, floor_id, db)
+    sections = {
+        "sessions": _history_sessions(db, q, None),
+        "alerts": _history_alerts(db, q, None),
+        "gate_reads": _history_gate_reads(db, q, None),
+        "slots": _history_slots(db, q, None),
+    }
+    data = [
+        {
+            "Time": t.at.strftime("%Y-%m-%d %H:%M:%S") if t.at else "",
+            "Event": t.kind, "Reference": t.ref_id, "Details": t.text,
+            "Camera": t.camera_id, "Slot": t.slot_id, "Floor": t.floor, "Severity": t.severity,
+        }
+        for t in _history_timeline(sections, None)
+    ]
+    headers = ["Time", "Event", "Reference", "Details", "Camera", "Slot", "Floor", "Severity"]
+    safe = normalize_plate_term(plate) or "plate"
+    return stream_csv(data, headers, filename=f"vehicle-history-{safe}.csv")
 
 
 # ── GET /vehicles/by-plate/{plate_number} ─────────────────────────────────────

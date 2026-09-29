@@ -649,6 +649,92 @@ class VehicleDetail(VehicleListItem):
     stats: Optional[VehicleStats] = None
 
 
+# ── Vehicle history (GET /vehicles/history) ──────────────────────────────────
+class VehicleHistoryCurrent(BaseModel):
+    """Where the car is RIGHT NOW. Ignores the date range and every filter."""
+    is_inside: bool = False
+    open_session: Optional[VehicleEvent] = None     # newest open session
+    open_sessions_count: int = 0                    # >1 = stale sessions never closed
+    current_slot_id: Optional[str] = None
+    current_slot_name: Optional[str] = None
+    open_alerts: int = 0                            # unresolved, all time
+
+
+class VehicleHistorySummary(BaseModel):
+    """Header numbers for the date range. Filters do not apply here."""
+    visits: int = 0
+    overstays: int = 0               # visits still inside at a local midnight
+    total_parked_seconds: int = 0
+    avg_stay_minutes: float = 0.0    # an open visit counts its live elapsed time
+    alerts: int = 0
+    open_alerts: int = 0
+    gate_reads: int = 0
+    slot_sightings: int = 0
+    first_seen_at: Optional[datetime] = None
+    last_seen_at: Optional[datetime] = None
+
+
+class GateRead(BaseModel):
+    """One ANPR read at a gate (entry_exit_log)."""
+    id: int
+    plate_number: str
+    gate: Optional[str] = None       # "entry" | "exit"; str, not Literal — never 500 on a new value
+    camera_id: Optional[str] = None
+    event_time: Optional[datetime] = None
+    snapshot_url: Optional[str] = None
+    plate_confidence: Optional[float] = None
+    matched_entry_id: Optional[int] = None
+    parking_duration_seconds: Optional[int] = None
+
+
+class SlotSighting(BaseModel):
+    """VA saw the car in a slot from `seen_from` until `seen_until`
+    (null = no later reading for that slot yet). Back-to-back readings of the
+    same car in the same slot are merged; `observations` counts them."""
+    slot_id: str
+    slot_name: Optional[str] = None
+    floor: Optional[str] = None
+    status: Optional[str] = None
+    seen_from: Optional[datetime] = None
+    seen_until: Optional[datetime] = None
+    duration_seconds: Optional[int] = None
+    observations: int = 1
+
+
+class HistorySection(BaseModel, Generic[T]):
+    """The newest `limit` items of a section; `total` counts all of them."""
+    total: int = 0
+    items: list[T] = []
+
+
+class VehicleTimelineItem(BaseModel):
+    at: Optional[datetime] = None
+    kind: str        # entry | parked | exit | alert | alert_resolved | gate_read | slot
+    ref_id: Optional[str] = None     # session / alert / gate-read id, or slot_id
+    text: str
+    camera_id: Optional[str] = None
+    slot_id: Optional[str] = None
+    floor: Optional[str] = None
+    severity: Optional[str] = None
+
+
+class VehicleHistory(BaseModel):
+    plate: str                       # as sent
+    matched_plates: list[str] = []   # stored spellings actually found
+    found: bool = False
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    vehicle: Optional[VehicleRef] = None     # null = not in the registry
+    current: VehicleHistoryCurrent
+    summary: VehicleHistorySummary
+    # A section is null when left out of `include`.
+    sessions: Optional[HistorySection[VehicleEvent]] = None
+    alerts: Optional[HistorySection[AlertItem]] = None
+    gate_reads: Optional[HistorySection[GateRead]] = None
+    slot_history: Optional[HistorySection[SlotSighting]] = None
+    timeline: Optional[list[VehicleTimelineItem]] = None
+
+
 # ── Occupancy — floor + slot ─────────────────────────────────────────────────
 class OccupancyKPIs(BaseModel):
     # Naming: was `*_spots` pre-QA-round-2. Renamed to `*_slots` so the

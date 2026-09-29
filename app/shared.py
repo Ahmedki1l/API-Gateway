@@ -57,6 +57,36 @@ def plate_search_clause(column: str, term: str, params: dict, prefix: str = "pla
     return "(" + " OR ".join(ors) + ")"
 
 
+def plate_exact_forms(term: str) -> list[str]:
+    """Every stored spelling of ONE plate: both digit/letter orders, each with
+    no separator, a dash, or a space ("4918-AVD" -> AVD4918, AVD-4918,
+    AVD 4918, 4918AVD, 4918-AVD, 4918 AVD). Stored values mix these
+    (vehicles has "15111AD", parking_sessions "HGD-2926").
+
+    Unlike `plate_search_clause` this never matches a different plate, and it
+    lets a `plate_number IN (...)` use the plate index instead of scanning."""
+    core = normalize_plate_term(term)
+    if not core:
+        return []
+    forms = set()
+    for c in filter(None, (core, _swap_plate_order(core))):
+        forms.add(c)
+        m = re.match(r"^(\d+|[A-Z]+)(\d+|[A-Z]+)$", c)
+        if m:
+            forms.add(f"{m.group(1)}-{m.group(2)}")
+            forms.add(f"{m.group(1)} {m.group(2)}")
+    return sorted(forms)
+
+
+def plate_in_clause(column: str, forms: list[str], params: dict, prefix: str = "pf") -> str:
+    """`column IN (:pf0, :pf1, ...)` over `plate_exact_forms`, binding each."""
+    names = []
+    for i, form in enumerate(forms):
+        params[f"{prefix}{i}"] = form
+        names.append(f":{prefix}{i}")
+    return f"{column} IN ({', '.join(names)})"
+
+
 def build_paged(items: list[Any], total: int, page: int, page_size: int) -> dict:
     return {
         "total_count": total,
