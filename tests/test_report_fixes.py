@@ -174,10 +174,12 @@ class TestStatsPrevious:
 
 class TestOverstayReportPath:
     def test_new_path(self, client):
-        r = client.get("/alerts/reports/overstay-violations", params=RANGE)
+        r = client.get("/alerts/reports/overstay-violations/kpis", params=RANGE)
         assert r.status_code == 200
         j = r.json()
-        assert j["total_violations"] == j["overstays"] + j["alerts_total"]
+        assert j["total_violations"] == j["overstays"] + j["no_parking"] + j["other"]
+        rows = client.get("/alerts/reports/overstay-violations", params=RANGE).json()
+        assert rows["total_count"] == j["total_violations"]
 
     def test_old_path_gone(self, client):
         assert client.get("/reports/overstay-violations", params=RANGE).status_code == 404
@@ -185,3 +187,4 @@ class TestOverstayReportPath:
     def test_not_swallowed_by_alert_id_route(self, client):
         # /alerts/{alert_id} must not catch it (it would 422 on a non-int id).
         assert client.get("/alerts/reports/overstay-violations").status_code == 200
+        assert client.get("/alerts/reports/overstay-violations/kpis").status_code == 200

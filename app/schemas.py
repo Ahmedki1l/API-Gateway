@@ -368,16 +368,39 @@ class AlertSummary(BaseModel):
     by_type: list[AlertTypeCount]
 
 
-class OverstayViolationsReport(BaseModel):
-    """GET /alerts/reports/overstay-violations — the Overstay & Violations report
-    headline. Overstay is NOT an alert (nothing writes one); it is counted
-    from parking_sessions and kept out of `by_type`."""
+class ViolationRow(BaseModel):
+    """One row of the Violation Details table: a violation alert, or one
+    overnight stay from parking_sessions."""
+    source: Literal["alert", "overstay"]
+    id: int                             # alerts.id or parking_sessions.id, per `source`
+    violation_type: str                 # raw alerts.alert_type, or "overstay"
+    display_name: str                   # label for the Violation Type badge
+    category: Literal["overstay", "no_parking", "other"]   # the card it counts under
+    plate_number: Optional[str] = None
+    location: Optional[str] = None      # zone / slot (Violation-B1, G1), else floor, else camera
+    floor: Optional[str] = None
+    slot_name: Optional[str] = None
+    # Duration Over. overstay: from the first local midnight after entry to
+    # the exit (or now, still inside). alert: resolved_at - triggered_at;
+    # null while unresolved, or when the stored times are out of order.
+    duration_seconds: Optional[int] = None
+    occurred_at: Optional[datetime] = None   # alert: triggered_at; overstay: the midnight it began
+    snapshot_url: Optional[str] = None
+
+
+class OverstayViolationsKPIs(BaseModel):
+    """GET /alerts/reports/overstay-violations/kpis — the Overstay &
+    Violations cards. A violation is an alert whose type is a violation, or
+    an overnight stay. Overstay is NOT an alert (nothing writes one); it
+    comes from parking_sessions. `total_violations` = `total_count` of
+    GET /alerts/reports/overstay-violations with the same filters."""
     date_from: Optional[date] = None
     date_to: Optional[date] = None
-    total_violations: int           # overstays + alerts_total
-    overstays: int                  # distinct cars inside at a local midnight in the range
-    alerts_total: int               # every alert triggered in the range, resolved or not
-    by_type: list[AlertTypeCount]   # the alerts only, same slices as /alerts/summary
+    total_violations: int           # overstays + no_parking + other
+    overstays: int                  # stays inside at a local midnight in the range (not distinct cars)
+    no_parking: int                 # vehicle_violation alerts
+    other: int                      # special_needs_violation + vehicle_intrusion (+ legacy named_slot_violation)
+    by_type: list[AlertTypeCount]   # the violation alert types, one slice each
 
 
 class AlertItem(BaseModel):

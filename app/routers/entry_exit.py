@@ -226,28 +226,30 @@ def _kpi_counts(db: Session, date_from: date, date_to: date) -> EntryExitCounts:
     )
 
 
-def overstay_count(
-    db: Session,
+def overstay_sessions_sql(
     date_from: Optional[date],
     date_to: Optional[date],
     *,
     floor: Optional[str] = None,
     floor_id: Optional[int] = None,
     search: Optional[str] = None,
-) -> int:
-    """Distinct cars that overstayed in [date_from, date_to]: inside the
-    garage at a local midnight that falls in the range (the midnights that
-    START each day of it, up to today's). No date_from = since the first
-    session; no date_to = up to today.
+) -> tuple[str, dict]:
+    """`(sql, params)`: a SELECT of every parking_sessions row that
+    overstayed in [date_from, date_to] — one row per stay. A stay overstayed
+    if the car was inside the garage at a local midnight that falls in the
+    range (the midnights that START each day of it, up to today's). No
+    date_from = since the first session; no date_to = up to today.
 
     `first_mn` is the first such midnight after the car entered; it
     overstayed if that midnight is still in the range and the car had not
     left by then. For "today" this is every car that was inside at 00:00,
-    whether it has left since or not.
+    whether it has left since or not. `over_from` is the first midnight after
+    entry, NOT clipped to the range: when the overstay began.
 
     Nothing writes an `overstay` alert (Damanat-DB-Migrator 0010), so this is
-    the only overstay count: the Entry/Exit Overstays card and
-    GET /alerts/reports/overstay-violations both use it."""
+    the only overstay source: the Entry/Exit Overstays card (distinct cars,
+    `overstay_count`) and GET /alerts/reports/overstay-violations (stays)
+    both read it."""
     today = facility_now_naive().date()
     params: dict = {"last_mn": _midnight(min(date_to, today) if date_to else today)}
     next_mn = "DATEADD(DAY, 1, CAST(CAST(entry_time AS DATE) AS DATETIME2))"
@@ -266,17 +268,33 @@ def overstay_count(
         clauses.append("floor = :floor")
         params["floor"] = floor
     if search:
-        clauses.append(plate_search_clause("plate_number", search, params))
+        clauses.append(plate_search_clause("plate_number", search, params, prefix="ovplate"))
 
-    return scalar(db, f"""
-        SELECT COUNT(DISTINCT plate_number)
-        FROM (
-            SELECT plate_number, exit_time, {first_mn} AS first_mn
+    return f"""
+        SELECT s.* FROM (
+            SELECT id, plate_number, floor, slot_id, slot_number, exit_time,
+                   slot_snapshot_path, entry_snapshot_path,
+                   {next_mn} AS over_from, {first_mn} AS first_mn
             FROM parking_sessions
             WHERE {" AND ".join(clauses)}
         ) s
         WHERE s.first_mn <= :last_mn AND (s.exit_time IS NULL OR s.exit_time > s.first_mn)
-    """, params) or 0
+    """, params
+
+
+def overstay_count(
+    db: Session,
+    date_from: Optional[date],
+    date_to: Optional[date],
+    *,
+    floor: Optional[str] = None,
+    floor_id: Optional[int] = None,
+    search: Optional[str] = None,
+) -> int:
+    """Distinct CARS that overstayed in [date_from, date_to] — the Entry/Exit
+    Overstays card. See `overstay_sessions_sql` for the rule."""
+    sql, params = overstay_sessions_sql(date_from, date_to, floor=floor, floor_id=floor_id, search=search)
+    return scalar(db, f"SELECT COUNT(DISTINCT o.plate_number) FROM ({sql}) o", params) or 0
 
 
 @router.get("/kpis", response_model=EntryExitKPIs)

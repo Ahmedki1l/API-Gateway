@@ -111,6 +111,15 @@ class AlertSortBy(str, Enum):
     status = "status"               # asc: active before resolved
 
 
+class ViolationSortBy(str, Enum):
+    """Sortable columns of the Violation Details table on
+    GET /alerts/reports/overstay-violations (`sort_by`). Empty values sort
+    last in either direction."""
+    plate = "plate"                 # as displayed, digits first; no plate last
+    location = "location"           # floor, else slot / camera
+    duration = "duration"           # Duration Over, in seconds
+
+
 class SortDir(str, Enum):
     """Direction for `sort_by` on the list endpoints."""
     asc = "asc"
