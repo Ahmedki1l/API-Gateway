@@ -98,8 +98,7 @@ async def entry_exit_report_kpis(
 
     - `total_entries`: matching visits = `total_count` of the table.
     - `total_exits`: those that have an exit. Counted on the ENTRY day, unlike
-      /entry-exit/kpis, so `net_vehicles` = entries - exits holds.
-    - `net_vehicles`: entries - exits = matching visits with no exit yet.
+      /entry-exit/kpis, so both cards describe the same visits.
     - `avg_stay_minutes`: mean stay of visits with a positive stay, in whole
       minutes; a car still inside counts up to now.
     - `overstays`: visits still inside at a local midnight after entry, left
@@ -118,7 +117,6 @@ async def entry_exit_report_kpis(
         date_to=date_to,
         total_entries=entries,
         total_exits=exits,
-        net_vehicles=entries - exits,
         avg_stay_minutes=round((k["avg_stay_seconds"] or 0) / 60),
         overstays=k["overstays"] or 0,
     )

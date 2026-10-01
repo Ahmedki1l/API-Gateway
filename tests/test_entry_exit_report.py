@@ -104,7 +104,7 @@ def test_kpis(client, base):
     k = _kpis(client, base)
     assert k["total_entries"] == 5          # 005 entered the day before
     assert k["total_exits"] == 4            # 003 never left
-    assert k["net_vehicles"] == 1
+    assert "net_vehicles" not in k
     assert k["overstays"] == 2              # 002 (left the next morning) + 003 (never left)
 
 
@@ -115,7 +115,7 @@ def test_kpis_match_the_table(client, base):
 def test_avg_stay_whole_minutes_positive_only(client, base):
     # B2: 002 = 39600s, 006 = 3600s (exit - entry: no stored duration).
     k = _kpis(client, base, location="b2")
-    assert (k["total_entries"], k["total_exits"], k["net_vehicles"]) == (2, 2, 0)
+    assert (k["total_entries"], k["total_exits"]) == (2, 2)
     assert k["avg_stay_minutes"] == 360
     assert isinstance(k["avg_stay_minutes"], int)
 

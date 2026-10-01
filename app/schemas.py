@@ -510,12 +510,11 @@ class EntryExitKPIs(EntryExitCounts):
 class EntryExitReportKPIs(BaseModel):
     """GET /entry-exit/reports/activity/kpis — the Custom Reports Entry/Exit
     cards, over every visit matching the filters. Exits count on the ENTRY
-    day (unlike EntryExitKPIs), so net_vehicles = total_entries - total_exits."""
+    day (unlike EntryExitKPIs), so both cards describe the same visits."""
     date_from: Optional[date] = None
     date_to: Optional[date] = None
     total_entries: int              # matching visits = the table's total_count
     total_exits: int                # matching visits that have an exit
-    net_vehicles: int               # total_entries - total_exits (visits with no exit yet)
     avg_stay_minutes: int           # whole minutes; positive stays only, still-inside up to now
     overstays: int                  # matching visits inside at a local midnight after entry
 
