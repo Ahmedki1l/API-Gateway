@@ -120,6 +120,15 @@ class ViolationSortBy(str, Enum):
     duration = "duration"           # Duration Over, in seconds
 
 
+class EntryExitReportSort(str, Enum):
+    """Sortable columns of the Custom Reports Entry/Exit table (`sort_by`).
+    Empty values sort last in either direction."""
+    time = "time"                   # entry time
+    plate = "plate"                 # as displayed, digits first (7894-NJS)
+    location = "location"           # floor - slot as displayed
+    duration = "duration"           # stay; a car still inside counts up to now
+
+
 class SortDir(str, Enum):
     """Direction for `sort_by` on the list endpoints."""
     asc = "asc"

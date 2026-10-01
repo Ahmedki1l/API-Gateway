@@ -19,6 +19,7 @@ PLATE = "TSTH-7741"         # stored letters-first; not a real plate format
 OTHER = "TSTH-774"           # a different plate that a substring match would catch
 # Temporary slot, flagged as a violation zone so no occupancy count includes it.
 SLOT = "TSTH-TEST-SLOT"
+SNAP = "https://snapshots.test/tsth-7741.jpg"   # absolute, so it is served unchanged
 
 SESSIONS = [
     # plate, entry_time, exit_time, duration, status
@@ -99,16 +100,17 @@ def data():
         for plate, entry, exit_, dur, status in SESSIONS:
             _insert(db, "parking_sessions", """
                 INSERT INTO parking_sessions (plate_number, is_employee, entry_time, exit_time,
-                    duration_seconds, entry_camera_id, status, floor, created_at, updated_at)
+                    duration_seconds, entry_camera_id, entry_snapshot_path, status, floor,
+                    created_at, updated_at)
                 OUTPUT INSERTED.id
-                VALUES (:p, 0, :e, :x, :d, 'CAM-ENTRY', :s, 'B1', :e, :e)
-            """, {"p": plate, "e": entry, "x": exit_, "d": dur, "s": status})
+                VALUES (:p, 0, :e, :x, :d, 'CAM-ENTRY', :snap, :s, 'B1', :e, :e)
+            """, {"p": plate, "e": entry, "x": exit_, "d": dur, "s": status, "snap": SNAP})
         for plate, gate, cam, at in GATE_READS:
             _insert(db, "entry_exit_log", """
-                INSERT INTO entry_exit_log (plate_number, gate, camera_id, event_time, is_test)
+                INSERT INTO entry_exit_log (plate_number, gate, camera_id, event_time, snapshot_path, is_test)
                 OUTPUT INSERTED.id
-                VALUES (:p, :g, :c, :t, 0)
-            """, {"p": plate, "g": gate, "c": cam, "t": at})
+                VALUES (:p, :g, :c, :t, :snap, 0)
+            """, {"p": plate, "g": gate, "c": cam, "t": at, "snap": SNAP})
         for atype, at, res in ALERTS:
             _insert(db, "alerts", """
                 INSERT INTO alerts (alert_type, camera_id, plate_number, triggered_at, is_resolved,
@@ -209,6 +211,18 @@ def test_timeline_newest_first_and_capped(client, url):
     assert len(tl) == 4
     assert [t["at"] for t in tl] == sorted((t["at"] for t in tl), reverse=True)
     assert tl[0]["kind"] in ("entry", "gate_read") and tl[0]["at"].startswith("2031-01-17T09:00:00")
+
+
+def test_timeline_carries_each_events_image(client, url):
+    tl = client.get(url, params={"plate": PLATE, **RANGE, "include": "timeline", "limit": 500}).json()["timeline"]
+    by_kind: dict[str, set] = {}
+    for t in tl:
+        by_kind.setdefault(t["kind"], set()).add(t["snapshot_url"])
+    assert by_kind["entry"] == {SNAP}
+    assert by_kind["gate_read"] == {SNAP}
+    assert by_kind["exit"] == {None}              # the fixture stores no exit image
+    assert by_kind["alert_resolved"] == {None}
+    assert by_kind["slot"] == {None}
 
 
 def test_limit_caps_items_not_total(client, url):

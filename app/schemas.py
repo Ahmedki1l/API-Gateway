@@ -507,6 +507,39 @@ class EntryExitKPIs(EntryExitCounts):
     previous_to: Optional[date] = None
 
 
+class EntryExitReportKPIs(BaseModel):
+    """GET /entry-exit/reports/activity/kpis — the Custom Reports Entry/Exit
+    cards, over every visit matching the filters. Exits count on the ENTRY
+    day (unlike EntryExitKPIs), so net_vehicles = total_entries - total_exits."""
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    total_entries: int              # matching visits = the table's total_count
+    total_exits: int                # matching visits that have an exit
+    net_vehicles: int               # total_entries - total_exits (visits with no exit yet)
+    avg_stay_minutes: int           # whole minutes; positive stays only, still-inside up to now
+    overstays: int                  # matching visits inside at a local midnight after entry
+
+
+class ReportCrossing(BaseModel):
+    """One gate crossing of a visit on the Entry/Exit Report."""
+    event_time: Optional[datetime] = None
+
+
+class EntryExitReportRow(BaseModel):
+    """One visit on the Custom Reports Entry/Exit table."""
+    id: int                                         # parking_sessions.id
+    plate_number: Optional[str] = None
+    entry: ReportCrossing                           # Time column = entry.event_time
+    exit: Optional[ReportCrossing] = None           # null while the car is inside
+    type: Literal["entry", "exit"]                  # exit once the car has left
+    floor: Optional[str] = None
+    slot_name: Optional[str] = None
+    location: Optional[str] = None                  # "B1 - B10 CTO", or whichever half exists
+    duration_seconds: Optional[int] = None          # positive stay; still inside = up to now
+    is_overstay: bool = False                       # inside at a local midnight after entry, left since or not
+    status: Literal["overstay", "completed", "parking"]
+
+
 class PeakHourBucket(BaseModel):
     hour: int                       # 0-23, facility-local
     entries: int
@@ -766,6 +799,7 @@ class VehicleTimelineItem(BaseModel):
     slot_id: Optional[str] = None
     floor: Optional[str] = None
     severity: Optional[str] = None
+    snapshot_url: Optional[str] = None   # the event's own image; null for alert_resolved and slot
 
 
 class VehicleHistory(BaseModel):

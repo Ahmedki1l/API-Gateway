@@ -1429,23 +1429,25 @@ def _history_timeline(sections: dict[str, HistorySection], limit: Optional[int])
     for e in sections["sessions"].items:
         out.append(VehicleTimelineItem(
             at=e.entry.event_time, kind="entry", ref_id=str(e.id), camera_id=e.entry.camera_id,
-            floor=e.floor, text=f"Entered (visit #{e.id})",
+            floor=e.floor, text=f"Entered (visit #{e.id})", snapshot_url=e.entry.snapshot_url,
         ))
         if e.parked_at and e.slot_id:
             out.append(VehicleTimelineItem(
                 at=e.parked_at, kind="parked", ref_id=str(e.id), slot_id=e.slot_id, floor=e.floor,
                 camera_id=e.slot_camera_id, text=f"Parked in {e.slot_name or e.slot_id}",
+                snapshot_url=e.slot_snapshot_url,
             ))
         if e.exit:
             out.append(VehicleTimelineItem(
                 at=e.exit.event_time, kind="exit", ref_id=str(e.id), camera_id=e.exit.camera_id,
                 floor=e.floor, text=f"Exited after {_fmt_duration(e.duration_seconds)} (visit #{e.id})",
+                snapshot_url=e.exit.snapshot_url,
             ))
     for a in sections["alerts"].items:
         label = (a.alert_type or "alert").replace("_", " ")
         out.append(VehicleTimelineItem(
             at=a.triggered_at, kind="alert", ref_id=str(a.id), camera_id=a.camera_id,
-            slot_id=a.slot_id, floor=a.floor, severity=a.severity,
+            slot_id=a.slot_id, floor=a.floor, severity=a.severity, snapshot_url=a.snapshot_url,
             text=f"Alert: {label}" + (f" at {a.location}" if a.location else ""),
         ))
         if a.is_resolved and a.resolved_at:
@@ -1457,6 +1459,7 @@ def _history_timeline(sections: dict[str, HistorySection], limit: Optional[int])
         conf = f", confidence {g.plate_confidence:g}" if g.plate_confidence is not None else ""
         out.append(VehicleTimelineItem(
             at=g.event_time, kind="gate_read", ref_id=str(g.id), camera_id=g.camera_id,
+            snapshot_url=g.snapshot_url,
             text=f"Plate read at {g.gate or 'gate'} ({g.camera_id}{conf})",
         ))
     for s in sections["slots"].items:
