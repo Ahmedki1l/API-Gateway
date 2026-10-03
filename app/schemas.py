@@ -193,15 +193,18 @@ class DashboardKPIs(BaseModel):
     # Available monitored bays: max(monitored_slots - occupied_slots, 0).
     # `total_slots` deliberately remains the physical inventory figure.
     free_slots: int
-    # Slots whose latest VA `slot_status` row reads non-vacant. Restricted to
-    # `is_monitored = 1` rows — a slot VA can't observe can't be reported as
-    # occupied. Pair with `parked_vehicles` to surface the blind-spot gap.
+    # Monitored slots whose `parking_slots.is_available` is 0 — the flag the
+    # slot grid renders. A slot VA can't observe can't be reported as occupied.
     occupied_slots: int
-    # Cars physically in the garage right now: count of open `parking_sessions`
-    # rows (line-crossing source of truth). `parked_vehicles - occupied_slots`
-    # is the count of cars VA can't place in a monitored slot — i.e. parked in
-    # a blind spot, parked in an unmarked area, or still driving.
+    # Cars physically in the garage right now: open `parking_sessions` (basement
+    # ramp line-crossing) + occupied Ground slots (Ground has no crossing line).
     parked_vehicles: int
+    # Same value as `occupied_slots`, named to pair with `off_slot`.
+    on_slot: int
+    # Basement cars VA can't place in a monitored slot: open sessions minus
+    # occupied B1 + B2 slots, floored at 0 — blind spot, unmarked area, or
+    # still driving.
+    off_slot: int
     critical_alerts: int
 
 

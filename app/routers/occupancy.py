@@ -89,9 +89,12 @@ def _monitored_slot_availability(
 
     Physical inventory remains the first value.  Availability is deliberately
     calculated over the monitored inventory only, so every caller exposes the
-    same ``max(monitored - occupied, 0)`` value.  The correlated EXISTS makes
-    an occupied bay count once even if a legacy status table contains multiple
-    rows at the latest timestamp.
+    same ``max(monitored - occupied, 0)`` value.
+
+    Occupancy is ``parking_slots.is_available = 0`` — the current-state flag VA
+    writes and the /occupancy/slots/by-floor grid renders — not the latest
+    ``slot_status`` row, which can stay "occupied" after the flag was cleared
+    and made the counts disagree with the grid.
     """
     schema = _floor_schema()
     filters = ["pk.is_violation_zone = 0"]
@@ -127,10 +130,6 @@ def _monitored_slot_availability(
         params["availability_floor"] = floor
 
     monitored = "pk.is_monitored = 1" if schema["parking_slots_is_monitored"] else "1 = 1"
-    status_is_occupied = (
-        "UPPER(COALESCE(ss.status, '')) NOT IN "
-        "('', 'VACANT', 'EMPTY', 'AVAILABLE', 'FREE')"
-    )
     result = rows(db, f"""
         SELECT
             COUNT(*) AS total_slots,
@@ -142,16 +141,7 @@ def _monitored_slot_availability(
         FROM (
             SELECT
                 CASE WHEN {monitored} THEN 1 ELSE 0 END AS is_monitored,
-                CASE WHEN EXISTS (
-                SELECT 1 FROM slot_status ss
-                WHERE ss.slot_id = pk.slot_id
-                  AND ss.time = (
-                      SELECT MAX(latest_ss.time)
-                      FROM slot_status latest_ss
-                      WHERE latest_ss.slot_id = pk.slot_id
-                  )
-                  AND {status_is_occupied}
-                ) THEN 1 ELSE 0 END AS is_occupied
+                CASE WHEN pk.is_available = 0 THEN 1 ELSE 0 END AS is_occupied
             FROM parking_slots pk
             WHERE {' AND '.join(filters)}
         ) counted
