@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -9,7 +10,7 @@ from app.database import get_db, scalar, rows
 from app.routers._helpers import _floor_schema
 from app.routers.alerts import _alerts_extra_cols
 from app.routers.entry_exit import _kpi_counts
-from app.routers.occupancy import _monitored_only, _slot_type_excl
+from app.routers.occupancy import _monitored_slot_availability, currently_parked_count
 from app.services.snapshots import resolve_snapshot_url
 from app.schemas import (
     ActiveVehicle,
@@ -81,7 +82,7 @@ def _derive_health(raw_status: Optional[str]) -> str:
 
 @router.get("/ai-status", response_model=AIStatusResponse)
 async def ai_status():
-    s1, s2 = await get_system1_health(), await get_system2_health()
+    s1, s2 = await asyncio.gather(get_system1_health(), get_system2_health())
 
     systems = [
         SystemStatus(
@@ -123,49 +124,31 @@ async def ai_status():
 async def dashboard_kpis(db: Session = Depends(get_db)):
     """Dashboard headline counters.
 
-    `occupied_slots` is sourced from VA's `slot_status` table and restricted to
-    monitored slots — it's the count of slot polygons VA currently sees a car in.
-    `parked_vehicles` is sourced from open `parking_sessions` (line-crossing at
-    entry/exit cameras) — the count of cars physically in the garage. The two
-    differ when cars park in blind spots or unmarked areas; the gap pairs with
-    `OccupancyKPIs.unmonitored_slots` to render blind-spot hints.
+    `occupied_slots` / `on_slot` count monitored slots whose
+    `parking_slots.is_available` is 0 — the flag the slot grid renders.
+    `parked_vehicles` is open `parking_sessions` (line-crossing at the basement
+    ramp) plus occupied Ground slots — Ground cars never cross the ramp line, so
+    they only exist as VA slot occupancy. `off_slot` is open sessions minus the
+    occupied B1 + B2 slots: basement cars VA can't place in a monitored slot
+    (blind spot, unmarked area, or still driving).
     """
-    slot_excl = _slot_type_excl()
-    slot_excl_pk = _slot_type_excl("pk")
-    monitored_pk = _monitored_only("pk")
-
-    total_slots = scalar(db, f"""
-        SELECT COUNT(*) FROM parking_slots
-        WHERE is_violation_zone = 0 {slot_excl}
-    """)
+    # Coverage-aware, same as /occupancy/kpis and /occupancy/floors: a slot VA
+    # can't see can't be offered as free, so free is monitored − occupied.
+    total_slots, _monitored_slots, occupied_slots, free_slots = _monitored_slot_availability(db)
+    occupancy_pct = round(occupied_slots / (total_slots or 1) * 100, 1)
     # Active floors only — the same set /occupancy/floors renders as bars, so
     # "Across N parkings" always matches the number of rows under it.
     floors_count = scalar(db, "SELECT COUNT(*) FROM floors WHERE is_active = 1")
-    occupied_slots = scalar(db, f"""
-        SELECT COUNT(*) FROM parking_slots pk
-        LEFT JOIN slot_status ss
-          ON ss.slot_id = pk.slot_id
-          AND ss.time = (SELECT MAX(time) FROM slot_status WHERE slot_id = pk.slot_id)
-        WHERE pk.is_violation_zone = 0
-          {slot_excl_pk}
-          {monitored_pk}
-          AND ss.status IS NOT NULL
-          AND UPPER(ss.status) NOT IN ('EMPTY', 'AVAILABLE', 'FREE', 'VACANT')
-    """)
-    occupancy_pct = round((occupied_slots or 0) / (total_slots or 1) * 100, 1)
 
-    occupied_slots = occupied_slots or 0
-    # Coverage-aware, same as /occupancy/kpis and /occupancy/floors: a slot VA
-    # can't see can't be offered as free, so this is monitored − occupied.
-    monitored_slots = scalar(db, f"""
-        SELECT COUNT(*) FROM parking_slots
-        WHERE is_violation_zone = 0 {slot_excl} {_monitored_only()}
-    """) or 0
-    free_slots = max(monitored_slots - occupied_slots, 0)
-
-    parked_vehicles = scalar(
+    basement_occupied = (
+        _monitored_slot_availability(db, floor="B1")[2]
+        + _monitored_slot_availability(db, floor="B2")[2]
+    )
+    open_sessions = scalar(
         db, "SELECT COUNT(DISTINCT plate_number) FROM parking_sessions WHERE status = 'open'"
     ) or 0
+    parked_vehicles = currently_parked_count(db)
+    off_slot = max(open_sessions - basement_occupied, 0)
 
     # Entries / Exits / Overstays come from the very function behind
     # /entry-exit/kpis (default range = today), so the dashboard cards and the
@@ -207,6 +190,8 @@ async def dashboard_kpis(db: Session = Depends(get_db)):
         occupied_slots=occupied_slots,
         occupancy_pct=occupancy_pct,
         parked_vehicles=parked_vehicles,
+        on_slot=occupied_slots,
+        off_slot=off_slot,
         critical_alerts=critical_alerts or 0,
         entries_today=entries_today,
         exits_today=exits_today,

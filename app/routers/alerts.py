@@ -234,7 +234,11 @@ def _where(search, severity, alert_type, resolved, date_from, date_to, cols, flo
             f"{bits['slot_id_expr']} LIKE :search OR "
             f"{bits['slot_name_expr']} LIKE :search OR "
             f"{bits['zone_name_expr']} LIKE :search OR "
-            "a.description LIKE :search"
+            "a.description LIKE :search OR "
+            # Vehicle title (e.g. CEO). A subquery, not v.title, so every
+            # caller's FROM works whether or not it joins vehicles.
+            "EXISTS (SELECT 1 FROM vehicles vt WHERE vt.plate_number = a.plate_number "
+            "AND vt.title LIKE :search)"
             ")"
         )
         params["search"] = f"%{search}%"

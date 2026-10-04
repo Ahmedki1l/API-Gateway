@@ -177,6 +177,9 @@ class AlertType(str, Enum):
     vehicle_violation = "vehicle_violation"
     named_slot_violation = "named_slot_violation"
     special_needs_violation = "special_needs_violation"
+    # Disabled in dbo.alert_types and not raised today; kept so the historical
+    # rows can still be filtered.
+    reserved_slot_unidentified = "reserved_slot_unidentified"
     unknown_vehicle = "unknown_vehicle"
     overstay = "overstay"
     capacity_exceeded = "capacity_exceeded"

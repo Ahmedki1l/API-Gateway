@@ -24,6 +24,7 @@ from app.routers.entry_exit import (
     _event_from_row as _session_event,
     _live_duration_seconds,
 )
+from app.routers.occupancy import currently_parked_count
 from app.services.alert_auto_resolve import auto_resolve_alerts_for_vehicle
 from app.services.snapshots import resolve_snapshot_url
 from app.schemas import (
@@ -371,10 +372,8 @@ async def vehicle_kpis(db: Session = Depends(get_db)):
 
     total = registered + unregistered + employee
 
-    # Same queries as /dashboard/kpis, so the two screens never disagree.
-    currently_parked = scalar(
-        db, "SELECT COUNT(DISTINCT plate_number) FROM parking_sessions WHERE status = 'open'"
-    ) or 0
+    # Same helper as /dashboard/kpis, so the two screens never disagree.
+    currently_parked = currently_parked_count(db)
     floors_count = scalar(db, "SELECT COUNT(*) FROM floors WHERE is_active = 1") or 0
 
     return VehicleKPIs(

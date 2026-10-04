@@ -141,7 +141,7 @@ python run.py
 |--------|------------------------|-------------------------------------------------------|
 | GET    | `/alerts/stats`        | —                                                     |
 | GET    | `/alerts/stream`       | — (Server-Sent Events)                                |
-| GET    | `/alerts/`             | page, page_size, search, severity, alert_type, resolved, date_from, date_to |
+| GET    | `/alerts/`             | page, page_size, search (plate, slot, zone, description, or vehicle title), severity, alert_type, resolved, date_from, date_to |
 | PATCH  | `/alerts/{id}/resolve` | —                                                     |
 | DELETE | `/alerts/{id}`         | —                                                     |
 | GET    | `/alerts/export/csv`   | same filters as list                                  |
@@ -157,7 +157,7 @@ python run.py
 |--------|---------------------------|-------------------------------------------------------|
 | GET    | `/entry-exit/kpis`        | target_date (ISO, optional — for yesterday compare)   |
 | GET    | `/entry-exit/traffic`     | period = daily \| weekly \| monthly                   |
-| GET    | `/entry-exit/`            | page, page_size, search, floor, is_employee, date_from, date_to |
+| GET    | `/entry-exit/`            | page, page_size, search (plate, owner, or vehicle title), floor, is_employee, date_from, date_to |
 | GET    | `/entry-exit/export/csv`  | same filters as list                                  |
 
 ### Vehicles
@@ -184,6 +184,7 @@ python run.py
 | GET    | `/occupancy/zones`            | page, page_size, search, floor (**deprecated** — use `/floors`) |
 
 > Violation-zone slots (`is_violation_zone = 1`) are excluded from every count and list.  
+> Occupied = monitored slots with `parking_slots.is_available = 0` (the flag the slot grid renders). Availability (`free_slots` / `available_slots`) is `max(monitored slots - occupied monitored slots, 0)`; physical totals remain the full inventory.
 > Reserved slots can be filtered with `?reservation_type=SPECIAL`.  
 > Each slot row now includes `reservation_type` and `reserved_for` fields.
 
@@ -313,3 +314,7 @@ API Gateway/
 
 4. **Typed return annotations** — wire `schemas.py` into each router's  
    `response_model=` parameter for automatic OpenAPI docs generation.
+
+### Session duration
+
+Entry/Exit duration filters, duration sorting and CSV exports use the same elapsed-duration rule as the list: closed visits use their stored final duration, or calculate it from entry (falling back to parking time) to exit when absent. Open visits calculate duration through the facility-local current time. Missing starts remain unknown; calculated negative durations are clamped to zero.

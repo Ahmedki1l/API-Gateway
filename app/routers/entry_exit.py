@@ -79,6 +79,23 @@ def _live_duration_seconds(
     return max(int((end - start).total_seconds()), 0)
 
 
+def _duration_sql(alias: str = "ps", now_param: str = "now_naive") -> str:
+    """SQL equivalent of _live_duration_seconds, so filters, sorting and the CSV
+    use the stay the list displays: the stored value once closed, live elapsed
+    time while open, NULL with no start signal, never negative. The caller binds
+    `:<now_param>` to facility_now_naive(). Aliases are internal constants."""
+    prefix = f"{alias}." if alias else ""
+    start = f"COALESCE({prefix}entry_time, {prefix}parked_at)"
+    end = f"COALESCE({prefix}exit_time, :{now_param})"
+    return f"""CASE
+        WHEN {start} IS NULL THEN NULL
+        WHEN {prefix}exit_time IS NOT NULL AND {prefix}duration_seconds IS NOT NULL
+            THEN {prefix}duration_seconds
+        WHEN {end} < {start} THEN 0
+        ELSE DATEDIFF(SECOND, {start}, {end})
+    END"""
+
+
 def _event_from_row(r: dict, plate_number: str) -> VehicleEvent:
     """Build a VehicleEvent with nested entry + optional exit from a parking_sessions row.
     The row should include the joined `owner_name`, `vehicle_type`, `is_employee`
@@ -146,6 +163,7 @@ VEHICLE_JOIN = """
     LEFT JOIN vehicles v_plate ON ps.vehicle_id IS NULL AND v_plate.plate_number = ps.plate_number
 """
 OWNER_NAME_EXPR = "COALESCE(v_id.owner_name, v_plate.owner_name)"
+VEHICLE_TITLE_EXPR = "COALESCE(v_id.title, v_plate.title)"
 VEHICLE_TYPE_EXPR = "COALESCE(v_id.vehicle_type, v_plate.vehicle_type, ps.vehicle_type)"
 # Prefer the registry's CURRENT is_employee over the parking_sessions snapshot
 # (which is frozen at session creation). Keeps the list filter + list display +
@@ -649,11 +667,7 @@ _ENTRY_EXIT_SORT = {
     EntryExitSort.plate: plate_display_sort_expr("ps.plate_number"),
     EntryExitSort.floor: "ps.floor",
     EntryExitSort.gate: "COALESCE(ps.exit_camera_id, ps.entry_camera_id)",
-    EntryExitSort.duration: (
-        "CASE WHEN COALESCE(ps.entry_time, ps.parked_at) IS NULL THEN NULL "
-        "WHEN ps.exit_time IS NOT NULL AND ps.duration_seconds IS NOT NULL THEN ps.duration_seconds "
-        "ELSE DATEDIFF(SECOND, COALESCE(ps.entry_time, ps.parked_at), COALESCE(ps.exit_time, :sort_now)) END"
-    ),
+    EntryExitSort.duration: _duration_sql(now_param="sort_now"),
 }
 
 
@@ -678,7 +692,7 @@ _SORT_DIR_DOC = "asc | desc (default). Ignored without sort_by."
 async def get_entry_exit(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    search: Optional[str] = Query(None, description="plate number or owner name"),
+    search: Optional[str] = Query(None, description="plate number, owner name, or vehicle title"),
     floor: Optional[str] = Query(None),
     # WS-8.E: integer-id sibling filter; wins over `?floor=` when both are sent.
     floor_id: Optional[int] = Query(None),
@@ -707,7 +721,10 @@ async def get_entry_exit(
 
     if search:
         plate_clause = plate_search_clause("ps.plate_number", search, params)
-        clauses.append(f"({plate_clause} OR {OWNER_NAME_EXPR} LIKE :search)")
+        clauses.append(
+            f"({plate_clause} OR {OWNER_NAME_EXPR} LIKE :search "
+            f"OR {VEHICLE_TITLE_EXPR} LIKE :search)"
+        )
         params["search"] = f"%{search}%"
     # WS-8.E: integer-id filter wins; fall back to legacy string filter for back-compat.
     # Schema-compat: when the floor_id column doesn't exist yet, fall through to the string filter.
@@ -743,11 +760,14 @@ async def get_entry_exit(
     if exit_date_to:
         clauses.append("CAST(ps.exit_time AS DATE) <= :exit_date_to")
         params["exit_date_to"] = str(exit_date_to)
+    # Live duration, so an open visit matches on its elapsed stay.
+    if min_duration_seconds is not None or max_duration_seconds is not None:
+        params["now_naive"] = facility_now_naive()
     if min_duration_seconds is not None:
-        clauses.append("ps.duration_seconds >= :min_dur")
+        clauses.append(f"({_duration_sql()}) >= :min_dur")
         params["min_dur"] = min_duration_seconds
     if max_duration_seconds is not None:
-        clauses.append("ps.duration_seconds <= :max_dur")
+        clauses.append(f"({_duration_sql()}) <= :max_dur")
         params["max_dur"] = max_duration_seconds
 
     where = " AND ".join(clauses)
@@ -824,7 +844,10 @@ async def export_entry_exit_csv(
     params: dict = {}
     if search:
         plate_clause = plate_search_clause("ps.plate_number", search, params)
-        clauses.append(f"({plate_clause} OR {OWNER_NAME_EXPR} LIKE :search)")
+        clauses.append(
+            f"({plate_clause} OR {OWNER_NAME_EXPR} LIKE :search "
+            f"OR {VEHICLE_TITLE_EXPR} LIKE :search)"
+        )
         params["search"] = f"%{search}%"
     # WS-8.E: same dual-key floor filter pattern as the list endpoint.
     # Schema-compat: when ps.floor_id column missing, fall through to legacy string filter.
@@ -858,11 +881,14 @@ async def export_entry_exit_csv(
     if exit_date_to:
         clauses.append("CAST(ps.exit_time AS DATE) <= :exit_date_to")
         params["exit_date_to"] = str(exit_date_to)
+    # Live duration, so an open visit matches on its elapsed stay.
+    if min_duration_seconds is not None or max_duration_seconds is not None:
+        params["now_naive"] = facility_now_naive()
     if min_duration_seconds is not None:
-        clauses.append("ps.duration_seconds >= :min_dur")
+        clauses.append(f"({_duration_sql()}) >= :min_dur")
         params["min_dur"] = min_duration_seconds
     if max_duration_seconds is not None:
-        clauses.append("ps.duration_seconds <= :max_dur")
+        clauses.append(f"({_duration_sql()}) <= :max_dur")
         params["max_dur"] = max_duration_seconds
 
     # Open sessions have no duration_seconds yet. Report elapsed-so-far instead of a
@@ -880,11 +906,7 @@ async def export_entry_exit_csv(
             ps.status                                        AS [Status],
             ps.entry_time                                    AS [Entry Time],
             ps.exit_time                                     AS [Exit Time],
-            CASE
-                WHEN ps.duration_seconds IS NOT NULL THEN ps.duration_seconds
-                WHEN ps.entry_time IS NOT NULL THEN DATEDIFF(SECOND, ps.entry_time, :now_naive)
-                ELSE NULL
-            END / 60                                         AS [Duration (min)],
+            ({_duration_sql()}) / 60                         AS [Duration (min)],
             ps.floor                                         AS [Floor],
             {ps_floor_id}                                    AS [Floor ID],
             ps.slot_id                                       AS [Slot ID],
@@ -979,11 +1001,14 @@ async def get_events_by_vehicle(
     if exit_date_to:
         clauses.append("CAST(ps.exit_time AS DATE) <= :exit_date_to")
         params["exit_date_to"] = str(exit_date_to)
+    # Live duration, so an open visit matches on its elapsed stay.
+    if min_duration_seconds is not None or max_duration_seconds is not None:
+        params["now_naive"] = facility_now_naive()
     if min_duration_seconds is not None:
-        clauses.append("ps.duration_seconds >= :min_dur")
+        clauses.append(f"({_duration_sql()}) >= :min_dur")
         params["min_dur"] = min_duration_seconds
     if max_duration_seconds is not None:
-        clauses.append("ps.duration_seconds <= :max_dur")
+        clauses.append(f"({_duration_sql()}) <= :max_dur")
         params["max_dur"] = max_duration_seconds
 
     where = " AND ".join(clauses)

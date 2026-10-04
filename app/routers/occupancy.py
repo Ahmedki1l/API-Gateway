@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Annotated, Optional
+from typing import Annotated, Collection, Optional
 
 from app.config import facility_now_naive
 from io import StringIO
@@ -105,6 +105,96 @@ def _monitored_col(alias: str = "") -> str:
         return "1 AS is_monitored"
     p = f"{alias}." if alias else ""
     return f"{p}is_monitored"
+
+
+def _monitored_slot_availability(
+    db: Session,
+    *,
+    floor: Optional[str] = None,
+    floor_id: Optional[int] = None,
+    slot_ids: Optional[Collection[str]] = None,
+) -> tuple[int, int, int, int]:
+    """Return physical, monitored, occupied-monitored and available slot counts.
+
+    Physical inventory remains the first value.  Availability is deliberately
+    calculated over the monitored inventory only, so every caller exposes the
+    same ``max(monitored - occupied, 0)`` value.
+
+    Occupancy is ``parking_slots.is_available = 0`` — the current-state flag VA
+    writes and the /occupancy/slots/by-floor grid renders — not the latest
+    ``slot_status`` row, which can stay "occupied" after the flag was cleared
+    and made the counts disagree with the grid.
+    """
+    schema = _floor_schema()
+    filters = ["pk.is_violation_zone = 0"]
+    slot_type_filter = _slot_type_excl("pk").removeprefix("AND ").strip()
+    if slot_type_filter:
+        filters.append(slot_type_filter)
+
+    params: dict = {}
+    if slot_ids is not None:
+        normalized_slot_ids = sorted({str(slot_id) for slot_id in slot_ids if slot_id})
+        if not normalized_slot_ids:
+            return (0, 0, 0, 0)
+        # Keep membership queries below SQL Server's parameter ceiling.
+        if len(normalized_slot_ids) > 1000:
+            totals = [0, 0, 0, 0]
+            for offset in range(0, len(normalized_slot_ids), 1000):
+                counts = _monitored_slot_availability(
+                    db, slot_ids=normalized_slot_ids[offset:offset + 1000]
+                )
+                totals = [total + count for total, count in zip(totals, counts)]
+            return tuple(totals)
+        placeholders = []
+        for index, slot_id in enumerate(normalized_slot_ids):
+            key = f"availability_slot_{index}"
+            placeholders.append(f":{key}")
+            params[key] = slot_id
+        filters.append(f"pk.slot_id IN ({', '.join(placeholders)})")
+    elif floor_id is not None and schema["parking_slots_floor_id"]:
+        filters.append("pk.floor_id = :availability_floor_id")
+        params["availability_floor_id"] = floor_id
+    elif floor is not None:
+        filters.append("pk.floor = :availability_floor")
+        params["availability_floor"] = floor
+
+    monitored = "pk.is_monitored = 1" if schema["parking_slots_is_monitored"] else "1 = 1"
+    result = rows(db, f"""
+        SELECT
+            COUNT(*) AS total_slots,
+            COALESCE(SUM(counted.is_monitored), 0) AS monitored_slots,
+            COALESCE(SUM(CASE
+                WHEN counted.is_monitored = 1 AND counted.is_occupied = 1 THEN 1
+                ELSE 0
+            END), 0) AS occupied_slots
+        FROM (
+            SELECT
+                CASE WHEN {monitored} THEN 1 ELSE 0 END AS is_monitored,
+                CASE WHEN pk.is_available = 0 THEN 1 ELSE 0 END AS is_occupied
+            FROM parking_slots pk
+            WHERE {' AND '.join(filters)}
+        ) counted
+    """, params)[0]
+    total_slots = int(result["total_slots"] or 0)
+    monitored_slots = int(result["monitored_slots"] or 0)
+    occupied_slots = int(result["occupied_slots"] or 0)
+    return (
+        total_slots,
+        monitored_slots,
+        occupied_slots,
+        max(monitored_slots - occupied_slots, 0),
+    )
+
+
+def currently_parked_count(db: Session) -> int:
+    """Cars in the garage right now: open `parking_sessions` (basement ramp
+    line-crossing) + occupied Ground slots — Ground has no crossing line, so a
+    car parked there only exists as VA slot occupancy. Shared by /dashboard/kpis
+    and /vehicles/kpis so the two screens never disagree."""
+    open_sessions = scalar(
+        db, "SELECT COUNT(DISTINCT plate_number) FROM parking_sessions WHERE status = 'open'"
+    ) or 0
+    return open_sessions + _monitored_slot_availability(db, floor="Ground")[2]
 
 
 def _current_plate_col(slots_alias: str = "pk", status_alias: str = "ss") -> str:
@@ -219,34 +309,14 @@ async def occupancy_kpis(db: Session = Depends(get_db)):
     actually fill, not the inventory gap. The shared `coverage_note`
     string explains this distinction to operators.
     """
-    total_slots = scalar(
-        db,
-        f"SELECT COUNT(*) FROM parking_slots WHERE is_violation_zone = 0 {_slot_type_excl()}",
-    ) or 0
-    
+    # Occupied = monitored slots with is_available = 0 (what the slot grid
+    # renders). Coverage-aware: "available" is monitored − occupied, not
+    # total − occupied.
+    total_slots, monitored_slots, occupied_slots, available_slots = _monitored_slot_availability(db)
+
     # Active floors only — same set /occupancy/floors renders.
     floors_count = scalar(db, "SELECT COUNT(*) FROM floors WHERE is_active = 1") or 0
-
-    monitored_slots = scalar(
-        db,
-        f"SELECT COUNT(*) FROM parking_slots WHERE is_violation_zone = 0 {_slot_type_excl()} {_monitored_only()}",
-    ) or 0
     unmonitored_slots = max(total_slots - monitored_slots, 0)
-
-    # Slot-status latest row per slot, restricted to monitored rows. VA can't
-    # observe an unmonitored slot, so it can't show as occupied here.
-    occupied_slots = scalar(db, f"""
-        SELECT COUNT(*) FROM parking_slots pk
-        {_LATEST_STATUS_JOIN}
-        WHERE pk.is_violation_zone = 0
-          {_slot_type_excl('pk')}
-          {_monitored_only('pk')}
-          AND ss.status IS NOT NULL
-          AND ss.status NOT IN ('empty', 'available', 'free', 'VACANT')
-    """) or 0
-
-    # Coverage-aware: "available" is monitored − occupied, not total − occupied.
-    available_slots = max(monitored_slots - occupied_slots, 0)
     # All three percentages share the total_slots denominator, so occupied +
     # available + uncovered always add up to ~100 (±0.1 from rounding).
     # Computed from the counts, never as `100 - occupied%`: that would
@@ -575,35 +645,8 @@ async def export_occupancy_csv(
     # =========================
     # 1. KPI Section
     # =========================
-    total_spots = scalar(
-        db,
-        f"SELECT COUNT(*) FROM parking_slots WHERE is_violation_zone = 0 {_slot_type_excl()}",
-    )
-
-    monitored_spots = scalar(
-        db,
-        f"SELECT COUNT(*) FROM parking_slots WHERE is_violation_zone = 0 {_slot_type_excl()} {_monitored_only()}",
-    ) or 0
-    unmonitored_spots = max((total_spots or 0) - monitored_spots, 0)
-
-    occupied = scalar(db, f"""
-        SELECT COUNT(DISTINCT ss.slot_id)
-        FROM slot_status ss
-        INNER JOIN (
-            SELECT slot_id, MAX(time) AS latest
-            FROM slot_status
-            GROUP BY slot_id
-        ) latest_ss
-        ON latest_ss.slot_id = ss.slot_id
-        AND latest_ss.latest = ss.time
-        INNER JOIN parking_slots pk ON pk.slot_id = ss.slot_id
-        WHERE pk.is_violation_zone = 0
-          {_slot_type_excl('pk')}
-          {_monitored_only('pk')}
-          AND ss.status NOT IN ('empty', 'available', 'free')
-    """) or 0
-
-    available = max((total_spots or 0) - occupied, 0)
+    total_spots, monitored_spots, occupied, available = _monitored_slot_availability(db)
+    unmonitored_spots = max(total_spots - monitored_spots, 0)
     utilization = round((occupied / total_spots) * 100, 1) if total_spots else 0
 
     writer.writerow(["=== OCCUPANCY KPIs ==="])
@@ -781,55 +824,14 @@ def _build_floor_occupancy(
     # else fall back to the legacy string `floor` column.
     # max_capacity counts BOTH monitored and unmonitored rows — that's the
     # true floor size. monitored_capacity is the slice VA can observe.
-    if schema["parking_slots_floor_id"] and resolved_floor_id is not None:
-        max_capacity = scalar(
-            db,
-            f"SELECT COUNT(*) FROM parking_slots WHERE floor_id = :fid AND is_violation_zone = 0 {_slot_type_excl()}",
-            {"fid": resolved_floor_id},
-        ) or 0
-        monitored_capacity = scalar(
-            db,
-            f"SELECT COUNT(*) FROM parking_slots WHERE floor_id = :fid AND is_violation_zone = 0 {_slot_type_excl()} {_monitored_only()}",
-            {"fid": resolved_floor_id},
-        ) or 0
-    else:
-        max_capacity = scalar(
-            db,
-            f"SELECT COUNT(*) FROM parking_slots WHERE floor = :f AND is_violation_zone = 0 {_slot_type_excl()}",
-            {"f": floor},
-        ) or 0
-        monitored_capacity = scalar(
-            db,
-            f"SELECT COUNT(*) FROM parking_slots WHERE floor = :f AND is_violation_zone = 0 {_slot_type_excl()} {_monitored_only()}",
-            {"f": floor},
-        ) or 0
+    # slot_occupancy_count = monitored slots with is_available = 0, the flag
+    # the slot grid renders.
+    max_capacity, monitored_capacity, slot_occupancy_count, _available = _monitored_slot_availability(
+        db,
+        floor=floor,
+        floor_id=resolved_floor_id,
+    )
     unmonitored_count = max(max_capacity - monitored_capacity, 0)
-
-    # slot_occupancy_count = monitored slots whose latest status is non-vacant.
-    # Unmonitored slots have no slot_status rows so they could only contribute
-    # NULL — filtering on `is_monitored = 1` makes the intent explicit and the
-    # SQL stable as more shims accumulate.
-    if schema["parking_slots_floor_id"] and resolved_floor_id is not None:
-        slot_rows = rows(db, f"""
-            SELECT pk.slot_id, ss.status
-            FROM parking_slots pk
-            {_LATEST_STATUS_JOIN}
-            WHERE pk.floor_id = :fid
-              AND pk.is_violation_zone = 0
-              {_slot_type_excl('pk')}
-              {_monitored_only('pk')}
-        """, {"fid": resolved_floor_id})
-    else:
-        slot_rows = rows(db, f"""
-            SELECT pk.slot_id, ss.status
-            FROM parking_slots pk
-            {_LATEST_STATUS_JOIN}
-            WHERE pk.floor = :f
-              AND pk.is_violation_zone = 0
-              {_slot_type_excl('pk')}
-              {_monitored_only('pk')}
-        """, {"f": floor})
-    slot_occupancy_count = sum(1 for r in slot_rows if _is_occupied(r.get("status")))
 
     # Line-crossing source (zone_occupancy is still the table of record until
     # Phase 4A migrates to floor_occupancy). `line_crossing_count` is exposed
@@ -961,28 +963,9 @@ async def get_occupancy_totals(db: Session = Depends(get_db)):
     `available_slots = monitored_slots - occupied_slots`, not `total_slots -
     occupied_slots`, so "available" reflects what VA can actually fill.
     """
-    total_slots = scalar(
-        db,
-        f"SELECT COUNT(*) FROM parking_slots WHERE is_violation_zone = 0 {_slot_type_excl()}",
-    ) or 0
-
-    # Monitored-only inventory for the available-slots denominator.
-    monitored_total = scalar(
-        db,
-        f"SELECT COUNT(*) FROM parking_slots WHERE is_violation_zone = 0 {_slot_type_excl()} {_monitored_only()}",
-    ) or 0
-
-    # occupied_slots = distinct monitored slots with a non-vacant latest status.
-    # Unmonitored rows have no slot_status events and must not count here.
-    occupied_slots = scalar(db, f"""
-        SELECT COUNT(*) FROM parking_slots pk
-        {_LATEST_STATUS_JOIN}
-        WHERE pk.is_violation_zone = 0
-          {_slot_type_excl('pk')}
-          {_monitored_only('pk')}
-          AND ss.status IS NOT NULL
-          AND ss.status NOT IN ('empty', 'available', 'free', 'VACANT')
-    """) or 0
+    # occupied_slots = monitored slots with is_available = 0. Unmonitored rows
+    # cannot be observed by VA and never count as occupied.
+    total_slots, monitored_total, occupied_slots, _available = _monitored_slot_availability(db)
 
     total_vehicles = scalar(
         db, "SELECT COUNT(DISTINCT plate_number) FROM parking_sessions WHERE status = 'open'"
