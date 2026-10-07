@@ -211,6 +211,48 @@ def test_search_by_plate(client, url):
     assert [i["plate_number"] for i in _items(client, url, search="TSTR-001")] == ["TSTR-001"]
 
 
+@pytest.mark.parametrize("plate", ["TSTR-002", "002-TSTR", "TSTR 002"])
+def test_plate_number_filter_any_order(client, url, plate):
+    kpis = _kpis(client, url, plate_number=plate)
+    assert (kpis["overstays"], kpis["no_parking"], kpis["other"]) == (1, 0, 0)
+    assert [i["plate_number"] for i in _items(client, url, plate_number=plate)] == ["TSTR-002"]
+
+
+def test_plate_number_filter_hits_alerts(client, url):
+    kpis = _kpis(client, url, plate_number="TSTR-A2")
+    assert (kpis["overstays"], kpis["no_parking"], kpis["other"]) == (0, 0, 1)
+    assert _list(client, url, plate_number="TSTR-A2")["total_count"] == 1
+
+
+def test_plate_number_combines_with_search(client, url):
+    # search matches only TSTR-001's row; plate_number only TSTR-002's: nothing.
+    assert _kpis(client, url, search="TSTR-001", plate_number="TSTR-002")["total_violations"] == 0
+
+
+@pytest.mark.parametrize("types, expected", [
+    (["overstay"], (2, 0, 0)),
+    (["vehicle_violation"], (0, 2, 0)),
+    (["vehicle_intrusion"], (0, 0, 1)),
+    (["special_needs_violation", "overstay"], (2, 0, 1)),
+])
+def test_alert_type_filter(client, url, types, expected):
+    kpis = _kpis(client, url, alert_type=types)
+    assert (kpis["overstays"], kpis["no_parking"], kpis["other"]) == expected
+    page = _list(client, url, alert_type=types)
+    assert page["total_count"] == kpis["total_violations"] == sum(expected)
+    assert {i["violation_type"] for i in page["items"]} == set(types)
+
+
+def test_alert_type_and_plate_together(client, url):
+    assert _list(client, url, alert_type="overstay", plate_number="TSTR-A0")["total_count"] == 0
+    assert _list(client, url, alert_type="vehicle_violation", plate_number="TSTR-A0")["total_count"] == 1
+
+
+@pytest.mark.parametrize("bad", ["unknown_vehicle", "capacity_exceeded", "nope"])
+def test_alert_type_rejects_non_violations(client, url, bad):
+    assert client.get(url, params={**RANGE, "alert_type": bad}).status_code == 422
+
+
 @pytest.mark.parametrize("suffix", ["", "/kpis"])
 def test_reversed_range_is_400(client, url, suffix):
     assert client.get(url + suffix, params={"date_from": "2025-03-12", "date_to": DAY}).status_code == 400

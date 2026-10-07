@@ -14,9 +14,11 @@ from app.routers.alerts import (
 )
 from app.routers.entry_exit import overstay_sessions_sql
 from app.schemas import OverstayViolationsKPIs, PagedResponse, ViolationRow
-from app.schemas_enums import SortDir, ViolationSortBy
+from app.schemas_enums import SortDir, ViolationSortBy, ViolationType
 from app.services.snapshots import resolve_snapshot_url
-from app.shared import build_paged, order_by_nulls_last, plate_display_sort_expr
+from app.shared import (
+    build_paged, order_by_nulls_last, plate_display_sort_expr, plate_search_clause,
+)
 
 from app.routers.prefix_injection import (get_prefix)
 # Lives under /alerts: the report is an alerts view (plus derived overstays).
@@ -43,9 +45,24 @@ _SORT_BY = {
 _DATE_FROM_DOC = "First day (inclusive), facility-local. Omit both for all time."
 _DATE_TO_DOC = "Last day (inclusive), facility-local."
 _SEARCH_DOC = "Alerts: plate / slot / zone / description. Overstays: plate."
+_PLATE_DOC = ("Plate only, either order (7894-NJS or NJS-7894), dashes / spaces "
+              "ignored; a partial plate matches as a substring. Combines with search.")
+_ALERT_TYPE_DOC = ("The row's violation_type; repeat for several "
+                   "(?alert_type=overstay&alert_type=vehicle_violation). "
+                   "vehicle_intrusion also matches legacy named_slot_violation. Omit for all.")
+
+# A selected type -> the alert_type values it matches. Overstays are not
+# alerts: they come from parking_sessions, so they map to nothing here.
+_TYPE_ALERTS = {
+    ViolationType.vehicle_violation: ("vehicle_violation",),
+    ViolationType.special_needs_violation: ("special_needs_violation",),
+    ViolationType.vehicle_intrusion: ("vehicle_intrusion", "named_slot_violation"),
+    ViolationType.overstay: (),
+}
 
 
-def _sources(db: Session, date_from, date_to, floor, floor_id, search):
+def _sources(db: Session, date_from, date_to, floor, floor_id, search,
+             plate_number=None, alert_type=None):
     """`(cols, where, params, overstay_sql)`: the violation alerts (`where`
     over `alerts a`) and the overstay stays (`overstay_sql`) that both
     endpoints count, for the same filters — so the cards always add up to
@@ -58,10 +75,20 @@ def _sources(db: Session, date_from, date_to, floor, floor_id, search):
         search, None, None, None, date_from, date_to, cols,
         floor_id=resolved_floor_id, floor=floor,
     )
-    where += f" AND a.alert_type IN ({', '.join(repr(t) for t in VIOLATION_TYPES)})"
+    types = VIOLATION_TYPES
+    if alert_type:
+        types = tuple(t for sel in alert_type for t in _TYPE_ALERTS[sel])
+    # `types` holds fixed strings from this module only, never caller input.
+    where += (f" AND a.alert_type IN ({', '.join(repr(t) for t in types)})"
+              if types else " AND 1 = 0")
+    if plate_number:
+        where += " AND " + plate_search_clause("a.plate_number", plate_number, params, prefix="vpn")
     overstay_sql, overstay_params = overstay_sessions_sql(
         date_from, date_to, floor=floor, floor_id=resolved_floor_id, search=search,
+        plate=plate_number,
     )
+    if alert_type and ViolationType.overstay not in alert_type:
+        overstay_sql = f"SELECT ov.* FROM ({overstay_sql}) ov WHERE 1 = 0"
     # Both builders bind floor / floor_id to the same values; nothing else overlaps.
     params.update(overstay_params)
     return cols, where, params, overstay_sql
@@ -74,6 +101,8 @@ async def overstay_violations_kpis(
     floor: Optional[str] = Query(None),
     floor_id: Optional[int] = Query(None),
     search: Optional[str] = Query(None, description=_SEARCH_DOC),
+    plate_number: Optional[str] = Query(None, description=_PLATE_DOC),
+    alert_type: Optional[list[ViolationType]] = Query(None, description=_ALERT_TYPE_DOC),
     db: Session = Depends(get_db),
 ):
     """Overstay & Violations report — the cards.
@@ -90,7 +119,8 @@ async def overstay_violations_kpis(
     - `total_violations` = the three above = `total_count` of
       GET /alerts/reports/overstay-violations with the same filters.
     """
-    cols, where, params, overstay_sql = _sources(db, date_from, date_to, floor, floor_id, search)
+    cols, where, params, overstay_sql = _sources(
+        db, date_from, date_to, floor, floor_id, search, plate_number, alert_type)
     _, by_type = _summary_by_type(db, where, params, cols)
     by_type = [t for t in by_type if t.alert_type in VIOLATION_TYPES]
     no_parking = sum(t.count for t in by_type if t.alert_type in NO_PARKING_TYPES)
@@ -114,6 +144,8 @@ async def overstay_violations_list(
     floor: Optional[str] = Query(None),
     floor_id: Optional[int] = Query(None),
     search: Optional[str] = Query(None, description=_SEARCH_DOC),
+    plate_number: Optional[str] = Query(None, description=_PLATE_DOC),
+    alert_type: Optional[list[ViolationType]] = Query(None, description=_ALERT_TYPE_DOC),
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     sort_by: Optional[ViolationSortBy] = Query(
@@ -129,7 +161,8 @@ async def overstay_violations_list(
     `location` is the zone / slot the violation happened in (Violation-B1,
     G1, B10 CTO), else the floor, else the camera; `floor` is also returned
     on its own."""
-    cols, where, params, overstay_sql = _sources(db, date_from, date_to, floor, floor_id, search)
+    cols, where, params, overstay_sql = _sources(
+        db, date_from, date_to, floor, floor_id, search, plate_number, alert_type)
     alert_select, _ = alert_items_sql(cols, _floor_schema())
     union = f"""
         SELECT 'alert' AS source, t.id, t.alert_type AS violation_type,

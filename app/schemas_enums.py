@@ -120,6 +120,16 @@ class ViolationSortBy(str, Enum):
     duration = "duration"           # Duration Over, in seconds
 
 
+class ViolationType(str, Enum):
+    """`alert_type` filter on GET /alerts/reports/overstay-violations and its
+    /kpis: the row's `violation_type`. Only violation types — the report never
+    returns the others, so they are a 422, not an empty page."""
+    overstay = "overstay"                                   # overnight stay (parking_sessions)
+    vehicle_violation = "vehicle_violation"                 # No-Parking
+    special_needs_violation = "special_needs_violation"
+    vehicle_intrusion = "vehicle_intrusion"                 # also matches legacy named_slot_violation
+
+
 class EntryExitReportSort(str, Enum):
     """Sortable columns of the Custom Reports Entry/Exit table (`sort_by`).
     Empty values sort last in either direction."""

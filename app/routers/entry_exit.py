@@ -251,6 +251,7 @@ def overstay_sessions_sql(
     floor: Optional[str] = None,
     floor_id: Optional[int] = None,
     search: Optional[str] = None,
+    plate: Optional[str] = None,
 ) -> tuple[str, dict]:
     """`(sql, params)`: a SELECT of every parking_sessions row that
     overstayed in [date_from, date_to] — one row per stay. A stay overstayed
@@ -287,6 +288,8 @@ def overstay_sessions_sql(
         params["floor"] = floor
     if search:
         clauses.append(plate_search_clause("plate_number", search, params, prefix="ovplate"))
+    if plate:
+        clauses.append(plate_search_clause("plate_number", plate, params, prefix="ovpn"))
 
     return f"""
         SELECT s.* FROM (
