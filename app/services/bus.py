@@ -1,7 +1,8 @@
 import asyncio
 import random
 import string
-from typing import Set, List, Optional
+from itertools import cycle
+from typing import Set, List, Optional, Sequence
 
 from app.config import facility_now_naive
 from app.database import SessionLocal, rows
@@ -44,8 +45,12 @@ class Broadcaster:
                 self.unsubscribe(queue)
 
 
-    def start_test_stream(self, templates: List[dict], interval: float = 1.0):
-        """Starts a background task that broadcasts random test alerts."""
+    def start_test_stream(self, templates: List[dict], interval: float = 1.0,
+                          severities: Sequence[str] = ()):
+        """Starts a background task that broadcasts random test alerts.
+        `severities`, when given, are stamped on the alerts in turn, round
+        and round, instead of each template's own severity."""
+        levels = cycle(severities) if severities else None
         
         if self._test_task and not self._test_task.done():
             return  # Already running
@@ -66,14 +71,22 @@ class Broadcaster:
             try:
                 print(f"Bus: Starting continuous test stream ({interval}s) with {len(slots)} slots and {len(plates)} plates")
 
+                # The dbo.alert_types types that carry a plate; the rest
+                # (capacity_exceeded, silent_entry) are raised without one.
                 vehicle_alert_types = (
-                    "unknown_vehicle", "overstay", "vehicle_intrusion",
-                    "vehicle_violation",
-                    "unauthorized_parking", "parking_expired"
+                    "unknown_vehicle", "vehicle_intrusion", "vehicle_violation",
+                    "special_needs_violation", "reserved_slot_unidentified",
                 )
 
                 while True:
+                    # Wait first: a restart (/test/start while running) would
+                    # otherwise fire right after the old stream's last alert,
+                    # two alerts in the same second.
+                    await asyncio.sleep(interval)
+
                     template = random.choice(templates).copy()
+                    if levels:
+                        template["severity"] = next(levels)
 
                     # Basic fields
                     template["id"] = random.randint(100000, 999999)
@@ -98,8 +111,6 @@ class Broadcaster:
 
                     # Broadcast
                     await self.broadcast(template)
-
-                    await asyncio.sleep(interval)
 
             except asyncio.CancelledError:
                 print("Bus: Continuous test stream stopped")

@@ -810,17 +810,19 @@ async def get_alerts(
     return build_paged(items, total or 0, page, page_size)
  
  
-ALERT_TEMPLATES = [
-    {"alert_type": "violence", "severity": "critical", "description": "Suspicious activity detected in Zone A"},
-    {"alert_type": "intrusion", "severity": "critical", "description": "Unauthorized person in restricted area"},
-    {"alert_type": "vehicle_intrusion", "severity": "critical", "description": "Unknown vehicle entered restricted zone"},
-    {"alert_type": "vehicle_violation", "severity": "critical", "description": "Illegal parking maneuver detected"},
-    {"alert_type": "unknown_vehicle", "severity": "warning", "description": "Unregistered plate detected: ABC-123", "plate_number": "ABC-123"},
-    {"alert_type": "vehicle_intrusion", "severity": "critical", "description": "Visitor parked in CEO reserved slot", "slot_id": "CEO-01", "slot_name": "CEO Reserved"},
-    {"alert_type": "special_needs_violation", "severity": "critical", "description": "Unauthorized vehicle in special needs slot"},
-    {"alert_type": "overstay", "severity": "warning", "description": "Vehicle exceeded 24h limit", "plate_number": "XYZ-999"},
-    {"alert_type": "capacity_exceeded", "severity": "info", "description": "Floor 1 is at 95% capacity", "floor": "1"},
-]
+# /test/start: fake data for exercising the UI, not the real config. A random
+# alert type from dbo.alert_types, at the priorities in turn (critical, high,
+# medium, low, critical, ...), so each badge, card and filter gets traffic.
+TEST_ALERT_TYPES = (
+    "unknown_vehicle",
+    "capacity_exceeded",
+    "silent_entry",
+    "vehicle_intrusion",
+    "vehicle_violation",
+    "special_needs_violation",
+    "reserved_slot_unidentified",
+)
+ALERT_TEMPLATES = [{"alert_type": alert_type} for alert_type in TEST_ALERT_TYPES]
 
 
 @router.get("/stream")
@@ -904,11 +906,20 @@ async def stream_alerts(request: Request):
 
 @router.get("/test/start", dependencies=[Depends(require_internal_token)])
 async def start_continuous_test(interval: float = Query(1.0, ge=0.5, le=60.0)):
-    """Start an infinite loop of random test alerts every {interval} seconds.
+    """Start an infinite loop of test alerts every {interval} seconds: a
+    random alert type, with the priority cycling critical -> high -> medium
+    -> low -> critical ... Calling it again while a stream runs restarts it
+    (from critical) with the new interval.
     Gated behind `X-Internal-Token` so anyone who finds /docs in production
     can't flood the dashboard."""
-    alerts_bus.start_test_stream(ALERT_TEMPLATES, interval=interval)
-    return {"status": "continuous_stream_started", "interval": interval}
+    alerts_bus.stop_test_stream()
+    alerts_bus.start_test_stream(ALERT_TEMPLATES, interval=interval, severities=PRIORITY_LEVELS)
+    return {
+        "status": "continuous_stream_started",
+        "interval": interval,
+        "alert_types": list(TEST_ALERT_TYPES),
+        "severities": list(PRIORITY_LEVELS),
+    }
 
 
 @router.get("/test/stop", dependencies=[Depends(require_internal_token)])
