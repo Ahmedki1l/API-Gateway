@@ -7,9 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.routers import admin, dashboard, alerts, entry_exit, entry_exit_report, vehicles, occupancy, camera_feeds, cameras, reports, settings as settings_router
+from app.routers import admin, dashboard, alerts, entry_exit, entry_exit_report, vehicles, occupancy, camera_feeds, cameras, reports, settings as settings_router, test_snapshots
 from app.services import camera_monitor, daily_occupancy_job
-from app.services.bus import TEST_ALERT_IMAGES_DIR
 
 from app.routers.prefix_injection import (get_prefix)
 
@@ -65,14 +64,6 @@ else:
         "snapshots_local_dir not found at %s; /snapshots disabled", _snapshots_dir
     )
 
-# Sample snapshots for /alerts/test/start; any image dropped in here is used.
-if TEST_ALERT_IMAGES_DIR.is_dir():
-    app.mount(
-        "/test-alert-images",
-        StaticFiles(directory=TEST_ALERT_IMAGES_DIR),
-        name="test_alert_images",
-    )
-
 app.include_router(dashboard.router)
 app.include_router(alerts.router)
 app.include_router(entry_exit.router)
@@ -84,6 +75,7 @@ app.include_router(admin.router)
 app.include_router(settings_router.router)
 app.include_router(reports.router)
 app.include_router(entry_exit_report.router)
+app.include_router(test_snapshots.router)
 
 log.warning(get_prefix())
 log.warning(dashboard.router)

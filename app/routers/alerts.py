@@ -910,25 +910,22 @@ async def start_continuous_test(request: Request,
     """Start an infinite loop of test alerts every {interval} seconds: a
     random alert type, with the priority cycling critical -> high -> medium
     -> low -> critical ... Calling it again while a stream runs restarts it
-    (from critical) with the new interval. Each alert carries a random
-    snapshot_url from the images in static/test_alerts.
+    (from critical) with the new interval. Each alert carries a snapshot_url
+    shaped like the deployed PMS-AI / VideoAnalytics ones, on this gateway's
+    origin, which answers it with an image from static/test_alerts.
     Gated behind `X-Internal-Token` so anyone who finds /docs in production
     can't flood the dashboard."""
     # Absolute, so resolve_snapshot_url leaves them alone and the frontend
     # (on another origin) loads them from the gateway.
-    snapshot_urls = [
-        str(request.url_for("test_alert_images", path=name))
-        for name in list_test_alert_images()
-    ]
+    snapshot_base = str(request.base_url).rstrip("/") if list_test_alert_images() else ""
     alerts_bus.stop_test_stream()
     alerts_bus.start_test_stream(ALERT_TEMPLATES, interval=interval, severities=PRIORITY_LEVELS,
-                                 snapshot_urls=snapshot_urls)
+                                 snapshot_base=snapshot_base)
     return {
         "status": "continuous_stream_started",
         "interval": interval,
         "alert_types": list(TEST_ALERT_TYPES),
         "severities": list(PRIORITY_LEVELS),
-        "snapshot_urls": snapshot_urls,
     }
 
 
