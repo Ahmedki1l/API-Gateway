@@ -2,10 +2,25 @@ import asyncio
 import random
 import string
 from itertools import cycle
+from pathlib import Path
 from typing import Set, List, Optional, Sequence
 
 from app.config import facility_now_naive
 from app.database import SessionLocal, rows
+
+# Images the test stream picks its snapshot_url from, served by main.py at
+# /test-alert-images. Drop more files in to widen the pool.
+TEST_ALERT_IMAGES_DIR = Path(__file__).resolve().parents[2] / "static" / "test_alerts"
+TEST_ALERT_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+
+def list_test_alert_images() -> List[str]:
+    if not TEST_ALERT_IMAGES_DIR.is_dir():
+        return []
+    return sorted(
+        p.name for p in TEST_ALERT_IMAGES_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() in TEST_ALERT_IMAGE_SUFFIXES
+    )
 
 def generate_plate():
     letters = ''.join(random.choices(string.ascii_uppercase, k=3))
@@ -46,10 +61,12 @@ class Broadcaster:
 
 
     def start_test_stream(self, templates: List[dict], interval: float = 1.0,
-                          severities: Sequence[str] = ()):
+                          severities: Sequence[str] = (),
+                          snapshot_urls: Sequence[str] = ()):
         """Starts a background task that broadcasts random test alerts.
         `severities`, when given, are stamped on the alerts in turn, round
-        and round, instead of each template's own severity."""
+        and round, instead of each template's own severity. Each alert gets
+        a random one of `snapshot_urls` (absolute URLs) as its snapshot."""
         levels = cycle(severities) if severities else None
         
         if self._test_task and not self._test_task.done():
@@ -94,6 +111,10 @@ class Broadcaster:
 
                     # Always assign camera_id
                     template["camera_id"] = generate_camera_id()
+
+                    template["snapshot_url"] = (
+                        random.choice(snapshot_urls) if snapshot_urls else None
+                    )
 
                     # Inject slot data if available
                     if slots:

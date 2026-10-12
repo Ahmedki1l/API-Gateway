@@ -35,7 +35,7 @@ from app.schemas_enums import (
 )
 from app.services.auth import require_internal_token
 from app.services.upstream import iter_system1_alert_events, iter_system2_alert_events
-from app.services.bus import alerts_bus
+from app.services.bus import alerts_bus, list_test_alert_images
 from app.shared import build_paged, order_by_nulls_last, plate_display_sort_expr, stream_csv
 
 from app.routers.prefix_injection import (get_prefix)
@@ -905,20 +905,30 @@ async def stream_alerts(request: Request):
     )
 
 @router.get("/test/start", dependencies=[Depends(require_internal_token)])
-async def start_continuous_test(interval: float = Query(1.0, ge=0.5, le=60.0)):
+async def start_continuous_test(request: Request,
+                                interval: float = Query(1.0, ge=0.5, le=60.0)):
     """Start an infinite loop of test alerts every {interval} seconds: a
     random alert type, with the priority cycling critical -> high -> medium
     -> low -> critical ... Calling it again while a stream runs restarts it
-    (from critical) with the new interval.
+    (from critical) with the new interval. Each alert carries a random
+    snapshot_url from the images in static/test_alerts.
     Gated behind `X-Internal-Token` so anyone who finds /docs in production
     can't flood the dashboard."""
+    # Absolute, so resolve_snapshot_url leaves them alone and the frontend
+    # (on another origin) loads them from the gateway.
+    snapshot_urls = [
+        str(request.url_for("test_alert_images", path=name))
+        for name in list_test_alert_images()
+    ]
     alerts_bus.stop_test_stream()
-    alerts_bus.start_test_stream(ALERT_TEMPLATES, interval=interval, severities=PRIORITY_LEVELS)
+    alerts_bus.start_test_stream(ALERT_TEMPLATES, interval=interval, severities=PRIORITY_LEVELS,
+                                 snapshot_urls=snapshot_urls)
     return {
         "status": "continuous_stream_started",
         "interval": interval,
         "alert_types": list(TEST_ALERT_TYPES),
         "severities": list(PRIORITY_LEVELS),
+        "snapshot_urls": snapshot_urls,
     }
 
 
