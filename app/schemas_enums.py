@@ -170,6 +170,27 @@ class VehicleSort(str, Enum):
     parked_at = "parked_at"         # cars not parked last
 
 
+class HistorySessionSort(str, Enum):
+    """Sort of the `sessions` section of GET /vehicles/history
+    (`sessions_sort_by`). Empty values sort last in either direction."""
+    entry_time = "entry_time"       # default
+    exit_time = "exit_time"         # still-inside visits last
+    duration = "duration"           # stay; an open visit counts live elapsed time
+    floor = "floor"
+    slot = "slot"                   # slot name as displayed; never-parked visits last
+    status = "status"               # asc: open, overstay, closed, unknown_exit
+
+
+class HistorySlotSort(str, Enum):
+    """Sort of the `slot_history` section of GET /vehicles/history
+    (`slots_sort_by`). Empty values sort last in either direction."""
+    seen_from = "seen_from"         # default
+    seen_until = "seen_until"       # still in the slot (no later reading) last
+    duration = "duration"
+    slot = "slot"                   # slot name as displayed
+    observations = "observations"
+
+
 # Old-scale value -> the level it filters as.
 LEGACY_SEVERITY = {"warning": "medium", "info": "low"}
 

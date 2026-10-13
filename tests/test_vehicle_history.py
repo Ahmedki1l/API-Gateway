@@ -28,10 +28,9 @@ SESSIONS = [
     (PLATE, "2031-01-17 09:00:00", None, None, "open"),
     (OTHER, "2031-01-15 09:00:00", "2031-01-15 10:00:00", 3600, "closed"),
 ]
+# Raw gate reads are not part of the history; one is stored to prove it.
 GATE_READS = [
     (PLATE, "entry", "CAM-ENTRY", "2031-01-14 08:00:00"),
-    (PLATE, "exit", "CAM-EXIT", "2031-01-14 17:00:00"),
-    (PLATE, "entry", "CAM-ENTRY", "2031-01-17 09:00:00"),
 ]
 ALERTS = [
     # alert_type, triggered_at, is_resolved
@@ -158,15 +157,15 @@ def test_sections_and_summary(client, url):
     assert body["found"] is True
     assert body["vehicle"]["owner_name"] == "History Test"
     assert body["sessions"]["total"] == 3
-    assert body["gate_reads"]["total"] == 3
     assert body["alerts"]["total"] == 2
+    assert "gate_reads" not in body
     s = body["summary"]
     assert s["visits"] == 3
     # Only the visit that crossed midnight. The open one entered in 2031, after
     # today's midnight, so it hasn't been inside at a midnight yet.
     assert s["overstays"] == 1
     assert s["alerts"] == 2 and s["open_alerts"] == 1
-    assert s["gate_reads"] == 3
+    assert "gate_reads" not in s
     assert body["timeline"] is None       # only on request
 
 
@@ -182,12 +181,11 @@ def test_current_ignores_the_range(client, url):
 
 def test_filters_apply_to_their_section_only(client, url):
     body = client.get(url, params={
-        "plate": PLATE, **RANGE, "session_status": "closed", "resolved": "false", "gate": "exit",
+        "plate": PLATE, **RANGE, "session_status": "closed", "resolved": "false",
     }).json()
     assert body["sessions"]["total"] == 2
     assert body["alerts"]["total"] == 1
     assert body["alerts"]["items"][0]["alert_type"] == "overstay"
-    assert body["gate_reads"]["total"] == 1
     assert body["summary"]["visits"] == 3          # summary ignores filters
 
 
@@ -210,7 +208,8 @@ def test_timeline_newest_first_and_capped(client, url):
     tl = body["timeline"]
     assert len(tl) == 4
     assert [t["at"] for t in tl] == sorted((t["at"] for t in tl), reverse=True)
-    assert tl[0]["kind"] in ("entry", "gate_read") and tl[0]["at"].startswith("2031-01-17T09:00:00")
+    assert tl[0]["kind"] == "entry" and tl[0]["at"].startswith("2031-01-17T09:00:00")
+    assert all(t["kind"] != "gate_read" for t in tl)
 
 
 def test_timeline_carries_each_events_image(client, url):
@@ -219,7 +218,6 @@ def test_timeline_carries_each_events_image(client, url):
     for t in tl:
         by_kind.setdefault(t["kind"], set()).add(t["snapshot_url"])
     assert by_kind["entry"] == {SNAP}
-    assert by_kind["gate_read"] == {SNAP}
     assert by_kind["exit"] == {None}              # the fixture stores no exit image
     assert by_kind["alert_resolved"] == {None}
     assert by_kind["slot"] == {None}
@@ -251,5 +249,74 @@ def test_csv_is_the_full_timeline(client, url):
     assert r.status_code == 200
     lines = r.text.strip().splitlines()
     assert lines[0] == "Time,Event,Reference,Details,Camera,Slot,Floor,Severity"
-    # 3 entries + 2 exits + 3 gate reads + 2 alerts + 1 resolution + 1 slot sighting
-    assert len(lines) - 1 == 12
+    # 3 entries + 2 exits + 2 alerts + 1 resolution + 1 slot sighting
+    assert len(lines) - 1 == 9
+    times = [line.split(",")[0] for line in lines[1:]]
+    assert times == sorted(times, reverse=True)
+
+
+def test_csv_oldest_first(client, url):
+    r = client.get(url + "/export/csv", params={"plate": PLATE, **RANGE, "timeline_sort_dir": "asc"})
+    times = [line.split(",")[0] for line in r.text.strip().splitlines()[1:]]
+    assert times == sorted(times)
+    assert times[0] == "2031-01-14 08:00:00"
+
+
+def test_gate_reads_include_is_ignored(client, url):
+    r = client.get(url, params={"plate": PLATE, **RANGE, "include": "sessions,gate_reads"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["sessions"]["total"] == 3
+    assert body["alerts"] is None
+
+
+def _session_entries(client, url, **params):
+    body = client.get(url, params={"plate": PLATE, **RANGE, "include": "sessions", **params}).json()
+    return [s["entry"]["event_time"][:10] for s in body["sessions"]["items"]]
+
+
+def test_sessions_sort(client, url):
+    assert _session_entries(client, url) == ["2031-01-17", "2031-01-15", "2031-01-14"]
+    assert _session_entries(client, url, sessions_sort_dir="asc") == ["2031-01-14", "2031-01-15", "2031-01-17"]
+    # Still-inside visit (no exit) last in both directions.
+    assert _session_entries(client, url, sessions_sort_by="exit_time") == ["2031-01-15", "2031-01-14", "2031-01-17"]
+    assert _session_entries(client, url, sessions_sort_by="exit_time",
+                            sessions_sort_dir="asc") == ["2031-01-14", "2031-01-15", "2031-01-17"]
+    assert _session_entries(client, url, sessions_sort_by="status", sessions_sort_dir="asc")[0] == "2031-01-17"
+
+
+def test_sessions_sort_applies_before_limit(client, url):
+    # The open visit entered in 2031 (after now), so its live duration is 0:
+    # the shortest of the range even though it is the newest.
+    assert _session_entries(client, url, sessions_sort_by="duration",
+                            sessions_sort_dir="asc", limit=1) == ["2031-01-17"]
+    assert _session_entries(client, url, sessions_sort_by="duration", limit=1) != ["2031-01-17"]
+
+
+def test_alerts_sort(client, url):
+    def types(**params):
+        body = client.get(url, params={"plate": PLATE, **RANGE, "include": "alerts", **params}).json()
+        return [a["alert_type"] for a in body["alerts"]["items"]]
+    assert types() == ["overstay", "vehicle_intrusion"]
+    assert types(alerts_sort_dir="asc") == ["vehicle_intrusion", "overstay"]
+    assert types(alerts_sort_by="status", alerts_sort_dir="asc") == ["overstay", "vehicle_intrusion"]
+
+
+def test_section_sort_does_not_change_the_timeline(client, url):
+    base = {"plate": PLATE, **RANGE, "include": "sessions,timeline"}
+    plain = client.get(url, params=base).json()["timeline"]
+    sorted_ = client.get(url, params={**base, "sessions_sort_dir": "asc"}).json()
+    assert sorted_["timeline"] == plain
+    assert sorted_["sessions"]["items"][0]["entry"]["event_time"].startswith("2031-01-14")
+
+
+def test_timeline_oldest_first(client, url):
+    tl = client.get(url, params={"plate": PLATE, **RANGE, "include": "timeline",
+                                 "timeline_sort_dir": "asc", "limit": 3}).json()["timeline"]
+    assert [t["at"] for t in tl] == sorted(t["at"] for t in tl)
+    assert tl[0]["kind"] == "entry" and tl[0]["at"].startswith("2031-01-14T08:00:00")
+
+
+def test_bad_sort_values(client, url):
+    assert client.get(url, params={"plate": PLATE, "sessions_sort_by": "nope"}).status_code == 422
+    assert client.get(url, params={"plate": PLATE, "alerts_sort_dir": "up"}).status_code == 422

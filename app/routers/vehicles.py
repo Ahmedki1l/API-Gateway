@@ -12,6 +12,7 @@ from app.routers._helpers import _floor_schema, resolve_floor_id
 from app.routers.alerts import (
     _alert_query_bits,
     _alerts_extra_cols,
+    _sorted_items_sql as _sorted_alerts_sql,
     _where as _alert_where,
     alert_item_fixup,
     alert_items_sql,
@@ -21,6 +22,7 @@ from app.routers.entry_exit import (
     OWNER_NAME_EXPR,
     VEHICLE_JOIN,
     VEHICLE_TYPE_EXPR,
+    _duration_sql,
     _event_from_row as _session_event,
     _live_duration_seconds,
 )
@@ -31,7 +33,6 @@ from app.schemas import (
     AlertItem,
     EntityActionResponse,
     EntryExitEvent,
-    GateRead,
     HistorySection,
     PagedResponse,
     SlotSighting,
@@ -48,7 +49,15 @@ from app.schemas import (
     VehicleTimelineItem,
     VehicleUpdate,
 )
-from app.schemas_enums import AlertSeverity, EntryExitDirection, ParkingSessionStatus, SortDir, VehicleSort
+from app.schemas_enums import (
+    AlertSeverity,
+    AlertSortBy,
+    HistorySessionSort,
+    HistorySlotSort,
+    ParkingSessionStatus,
+    SortDir,
+    VehicleSort,
+)
 from app.shared import (
     build_paged,
     normalize_plate_term,
@@ -1069,21 +1078,26 @@ def _fetch_vehicle_detail(
 
 # ── GET /vehicles/history ─────────────────────────────────────────────────────
 # Everything the database knows about one plate: registry row, where it is
-# now, and its visits / alerts / gate reads / slot sightings in a date range.
+# now, and its visits / alerts / slot sightings in a date range. Raw gate
+# reads (entry_exit_log) are not a section: the visits already carry each
+# entry and exit.
 
-_HISTORY_SECTIONS = ("sessions", "alerts", "gate_reads", "slots")
+_HISTORY_SECTIONS = ("sessions", "alerts", "slots")
 _HISTORY_INCLUDE = _HISTORY_SECTIONS + ("timeline",)
+# The removed gate-reads section, still accepted so an older frontend that
+# asks for it gets the rest instead of a 400.
+_HISTORY_INCLUDE_IGNORED = {"gate_reads"}
 
 
 def _parse_include(include: Optional[str]) -> set[str]:
     if not include:
         return set(_HISTORY_SECTIONS)
     wanted = {p.strip().lower() for p in include.split(",") if p.strip()}
-    unknown = wanted - set(_HISTORY_INCLUDE)
+    unknown = wanted - set(_HISTORY_INCLUDE) - _HISTORY_INCLUDE_IGNORED
     if unknown:
         raise HTTPException(400, f"Unknown include value(s): {', '.join(sorted(unknown))}. "
                                  f"Allowed: {', '.join(_HISTORY_INCLUDE)}")
-    return wanted
+    return wanted - _HISTORY_INCLUDE_IGNORED
 
 
 def _range_clause(column: str, start, end, clauses: list, params: dict, key: str) -> None:
@@ -1119,14 +1133,28 @@ class _HistoryQuery:
     alert_type: Optional[str]
     severity: Optional[AlertSeverity]
     resolved: Optional[bool]
-    gate: Optional[EntryExitDirection]
-    camera_id: Optional[str]
     floor: Optional[str]
     floor_id: Optional[int]
     open_only: bool = False
 
 
-def _history_sessions(db: Session, q: _HistoryQuery, limit: Optional[int]) -> HistorySection:
+# Sort keys of the sessions section — only these fixed strings reach ORDER BY.
+# `duration` is the stay each item displays (live while the car is inside).
+_SESSION_SORT = {
+    HistorySessionSort.entry_time: "ps.entry_time",
+    HistorySessionSort.exit_time: "ps.exit_time",
+    HistorySessionSort.duration: _duration_sql(now_param="sort_now"),
+    HistorySessionSort.floor: "ps.floor",
+    HistorySessionSort.slot: "COALESCE(pk.slot_name, ps.slot_number)",
+    HistorySessionSort.status: "CASE ps.status WHEN 'open' THEN 1 WHEN 'overstay' THEN 2 "
+                               "WHEN 'closed' THEN 3 WHEN 'unknown_exit' THEN 4 END",
+}
+
+
+def _history_sessions(
+    db: Session, q: _HistoryQuery, limit: Optional[int],
+    sort_by: HistorySessionSort = HistorySessionSort.entry_time, sort_dir: SortDir = SortDir.desc,
+) -> HistorySection:
     schema = _floor_schema()
     params: dict = {}
     clauses = [plate_in_clause("ps.plate_number", q.forms, params)]
@@ -1149,6 +1177,9 @@ def _history_sessions(db: Session, q: _HistoryQuery, limit: Optional[int]) -> Hi
     where = " AND ".join(clauses)
 
     total = scalar(db, f"SELECT COUNT(*) FROM parking_sessions ps WHERE {where}", params) or 0
+    if sort_by is HistorySessionSort.duration:
+        params["sort_now"] = facility_now_naive()
+    order = order_by_nulls_last(_SESSION_SORT[sort_by], sort_dir.value.upper(), "ps.id")
     ps_floor_id = "ps.floor_id" if schema["parking_sessions_floor_id"] else "NULL"
     found = rows(db, f"""
         SELECT
@@ -1166,7 +1197,7 @@ def _history_sessions(db: Session, q: _HistoryQuery, limit: Optional[int]) -> Hi
         {VEHICLE_JOIN}
         LEFT JOIN parking_slots pk ON pk.slot_id = ps.slot_id
         WHERE {where}
-        ORDER BY ps.entry_time DESC, ps.id DESC
+        ORDER BY {order}
         {_limit_sql(limit, params)}
     """, params)
     return HistorySection[VehicleEvent](
@@ -1174,7 +1205,10 @@ def _history_sessions(db: Session, q: _HistoryQuery, limit: Optional[int]) -> Hi
     )
 
 
-def _history_alerts(db: Session, q: _HistoryQuery, limit: Optional[int]) -> HistorySection:
+def _history_alerts(
+    db: Session, q: _HistoryQuery, limit: Optional[int],
+    sort_by: AlertSortBy = AlertSortBy.triggered_at, sort_dir: SortDir = SortDir.desc,
+) -> HistorySection:
     cols = _alerts_extra_cols()
     bits = _alert_query_bits(cols)
     schema = _floor_schema()
@@ -1195,55 +1229,32 @@ def _history_alerts(db: Session, q: _HistoryQuery, limit: Optional[int]) -> Hist
         WHERE {where}
     """, params) or 0
     found = rows(db, f"""
-        {select_from}
-        WHERE {where}
-        ORDER BY a.triggered_at DESC, a.id DESC
+        {_sorted_alerts_sql(select_from, where, sort_by, sort_dir)}
         {_limit_sql(limit, params)}
     """, params)
     return HistorySection[AlertItem](total=total, items=[alert_item_fixup(r) for r in found])
 
 
-def _history_gate_reads(db: Session, q: _HistoryQuery, limit: Optional[int]) -> HistorySection:
-    params: dict = {}
-    clauses = ["g.is_test = 0", plate_in_clause("g.plate_number", q.forms, params)]
-    _range_clause("g.event_time", q.start, q.end, clauses, params, "r")
-    if q.gate:
-        clauses.append("g.gate = :gate")
-        params["gate"] = q.gate.value
-    if q.camera_id:
-        clauses.append("g.camera_id = :camera_id")
-        params["camera_id"] = q.camera_id
-    where = " AND ".join(clauses)
-
-    total = scalar(db, f"SELECT COUNT(*) FROM entry_exit_log g WHERE {where}", params) or 0
-    found = rows(db, f"""
-        SELECT g.id, g.plate_number, g.gate, g.camera_id, g.event_time, g.snapshot_path,
-               g.plate_confidence, g.matched_entry_id, g.parking_duration
-        FROM entry_exit_log g
-        WHERE {where}
-        ORDER BY g.event_time DESC, g.id DESC
-        {_limit_sql(limit, params)}
-    """, params)
-    return HistorySection[GateRead](total=total, items=[
-        GateRead(
-            id=r["id"], plate_number=r["plate_number"], gate=r.get("gate"),
-            camera_id=r.get("camera_id"), event_time=localize_naive(r.get("event_time")),
-            snapshot_url=resolve_snapshot_url(r.get("snapshot_path")),
-            plate_confidence=r.get("plate_confidence"),
-            matched_entry_id=r.get("matched_entry_id"),
-            parking_duration_seconds=r.get("parking_duration"),
-        )
-        for r in found
-    ])
+# Sort keys of the slot-history section, over the merged sightings.
+_SLOT_SORT = {
+    HistorySlotSort.seen_from: lambda s: s["seen_from"],
+    HistorySlotSort.seen_until: lambda s: s["seen_until"],
+    HistorySlotSort.duration: lambda s: s["duration_seconds"],
+    HistorySlotSort.slot: lambda s: s["slot_name"] or s["slot_id"],
+    HistorySlotSort.observations: lambda s: s["observations"],
+}
 
 
-def _history_slots(db: Session, q: _HistoryQuery, limit: Optional[int]) -> HistorySection:
+def _history_slots(
+    db: Session, q: _HistoryQuery, limit: Optional[int],
+    sort_by: HistorySlotSort = HistorySlotSort.seen_from, sort_dir: SortDir = SortDir.desc,
+) -> HistorySection:
     """slot_status readings that name this plate, merged into sightings.
 
     Each reading lasts until the NEXT reading of the same slot (whatever it
     says). When that next reading is this car again, the two are one sighting.
     slot_status has no plate index; a plate has few readings, so every one is
-    fetched and merged here, then cut to `limit`."""
+    fetched, merged and sorted here, then cut to `limit`."""
     schema = _floor_schema()
     params: dict = {}
     clauses = [plate_in_clause("ss.plate_number", q.forms, params)]
@@ -1285,17 +1296,26 @@ def _history_slots(db: Session, q: _HistoryQuery, limit: Optional[int]) -> Histo
         if r.get("next_id") is not None:
             by_next[r["next_id"]] = s
 
-    sightings.sort(key=lambda s: s["seen_from"], reverse=True)
+    for s in sightings:
+        s["duration_seconds"] = (
+            int((s["seen_until"] - s["seen_from"]).total_seconds())
+            if s["seen_until"] is not None else None
+        )
+
+    # seen_from first so equal keys keep time order (the sorts are stable),
+    # then the key itself with empty values last in either direction.
+    desc = sort_dir is SortDir.desc
+    key = _SLOT_SORT[sort_by]
+    sightings.sort(key=lambda s: s["seen_from"] or datetime.min, reverse=desc)
+    sightings = (sorted((s for s in sightings if key(s) is not None), key=key, reverse=desc)
+                 + [s for s in sightings if key(s) is None])
     shown = sightings if limit is None else sightings[:limit]
     return HistorySection[SlotSighting](total=len(sightings), items=[
         SlotSighting(
-            **{k: s[k] for k in ("slot_id", "slot_name", "floor", "status", "observations")},
+            **{k: s[k] for k in ("slot_id", "slot_name", "floor", "status", "observations",
+                                 "duration_seconds")},
             seen_from=localize_naive(s["seen_from"]),
             seen_until=localize_naive(s["seen_until"]),
-            duration_seconds=(
-                int((s["seen_until"] - s["seen_from"]).total_seconds())
-                if s["seen_until"] is not None else None
-            ),
         )
         for s in shown
     ])
@@ -1331,21 +1351,14 @@ def _history_summary(db: Session, q: _HistoryQuery) -> VehicleHistorySummary:
     """, p)[0]
 
     p = {}
-    g = rows(db, f"""
-        SELECT COUNT(*) AS n, MIN(event_time) AS first_at, MAX(event_time) AS last_at
-        FROM entry_exit_log
-        WHERE {where("event_time", ["is_test = 0", plate_in_clause("plate_number", q.forms, p)], p)}
-    """, p)[0]
-
-    p = {}
     sl = rows(db, f"""
         SELECT COUNT(*) AS n, MIN(time) AS first_at, MAX(time) AS last_at
         FROM slot_status
         WHERE {where("time", [plate_in_clause("plate_number", q.forms, p)], p)}
     """, p)[0]
 
-    firsts = [x["first_at"] for x in (s, a, g, sl) if x["first_at"] is not None]
-    lasts = [x["last_at"] for x in (s, a, g, sl) if x["last_at"] is not None]
+    firsts = [x["first_at"] for x in (s, a, sl) if x["first_at"] is not None]
+    lasts = [x["last_at"] for x in (s, a, sl) if x["last_at"] is not None]
     return VehicleHistorySummary(
         visits=s["visits"] or 0,
         overstays=s["overstays"] or 0,
@@ -1353,7 +1366,6 @@ def _history_summary(db: Session, q: _HistoryQuery) -> VehicleHistorySummary:
         avg_stay_minutes=round((s["avg_sec"] or 0) / 60, 1),
         alerts=a["n"] or 0,
         open_alerts=a["open_n"] or 0,
-        gate_reads=g["n"] or 0,
         slot_sightings=sl["n"] or 0,
         first_seen_at=localize_naive(min(firsts)) if firsts else None,
         last_seen_at=localize_naive(max(lasts)) if lasts else None,
@@ -1420,10 +1432,13 @@ def _history_vehicle(db: Session, forms: list[str]) -> Optional[VehicleRef]:
     return VehicleRef(**{**v, "is_registered": bool(v.get("is_registered"))})
 
 
-def _history_timeline(sections: dict[str, HistorySection], limit: Optional[int]) -> list[VehicleTimelineItem]:
-    """All sections merged, newest first. Built from the sections' newest
-    `limit` rows, which always hold the newest `limit` events overall (an exit
-    of a visit older than those is the one edge left out)."""
+def _history_timeline(
+    sections: dict[str, HistorySection], limit: Optional[int], sort_dir: SortDir = SortDir.desc,
+) -> list[VehicleTimelineItem]:
+    """All sections merged in time order, newest first by default. Built from
+    each section's first `limit` rows in that same time order, which hold the
+    first `limit` events overall (newest first, an exit or resolution of an
+    older visit / alert is the one edge left out)."""
     out: list[VehicleTimelineItem] = []
     for e in sections["sessions"].items:
         out.append(VehicleTimelineItem(
@@ -1454,13 +1469,6 @@ def _history_timeline(sections: dict[str, HistorySection], limit: Optional[int])
                 at=a.resolved_at, kind="alert_resolved", ref_id=str(a.id),
                 severity=a.severity, text=f"Alert resolved: {label}",
             ))
-    for g in sections["gate_reads"].items:
-        conf = f", confidence {g.plate_confidence:g}" if g.plate_confidence is not None else ""
-        out.append(VehicleTimelineItem(
-            at=g.event_time, kind="gate_read", ref_id=str(g.id), camera_id=g.camera_id,
-            snapshot_url=g.snapshot_url,
-            text=f"Plate read at {g.gate or 'gate'} ({g.camera_id}{conf})",
-        ))
     for s in sections["slots"].items:
         out.append(VehicleTimelineItem(
             at=s.seen_from, kind="slot", ref_id=s.slot_id, slot_id=s.slot_id, floor=s.floor,
@@ -1468,13 +1476,13 @@ def _history_timeline(sections: dict[str, HistorySection], limit: Optional[int])
                  + (f" for {_fmt_duration(s.duration_seconds)}" if s.duration_seconds is not None else ""),
         ))
     out = [t for t in out if t.at is not None]
-    out.sort(key=lambda t: t.at, reverse=True)
+    out.sort(key=lambda t: t.at, reverse=sort_dir is SortDir.desc)
     return out if limit is None else out[:limit]
 
 
 def _history_query(
     plate, date_from, date_to, session_status, alert_type, severity, resolved,
-    gate, camera_id, floor, floor_id, db,
+    floor, floor_id, db,
 ) -> _HistoryQuery:
     forms = plate_exact_forms(plate)
     if not forms:
@@ -1486,7 +1494,7 @@ def _history_query(
         start=datetime.combine(date_from, datetime.min.time()) if date_from else None,
         end=datetime.combine(date_to + timedelta(days=1), datetime.min.time()) if date_to else None,
         session_status=session_status, alert_type=alert_type, severity=severity, resolved=resolved,
-        gate=gate, camera_id=camera_id, floor=floor,
+        floor=floor,
         floor_id=resolve_floor_id(db, floor_id=floor_id, floor_name=floor),
     )
 
@@ -1499,10 +1507,17 @@ _SESSION_STATUS_Q = Query(None, description="Visits only.")
 _ALERT_TYPE_Q = Query(None, description="Alerts only.")
 _SEVERITY_Q = Query(None, description="Alerts only.")
 _RESOLVED_Q = Query(None, description="Alerts only. Omit for both.")
-_GATE_Q = Query(None, description="Gate reads only.")
-_CAMERA_Q = Query(None, description="Gate reads only.")
 _FLOOR_Q = Query(None, description="Visits, alerts and slot history.")
 _FLOOR_ID_Q = Query(None, description="Visits, alerts and slot history; wins over `floor`.")
+_SORT_DIR_Q = "asc | desc (default)."
+_TIMELINE_DIR_Q = Query(SortDir.desc, description="Timeline order by time: asc (oldest first) | desc (default).")
+
+# The time key of each section: what the timeline is merged from.
+_TIME_SORT = {
+    "sessions": (HistorySessionSort.entry_time, _history_sessions),
+    "alerts": (AlertSortBy.triggered_at, _history_alerts),
+    "slots": (HistorySlotSort.seen_from, _history_slots),
+}
 
 
 @router.get("/history", response_model=VehicleHistory)
@@ -1512,18 +1527,35 @@ async def vehicle_history(
     date_to: Optional[date] = _HIST_DATE_TO,
     include: Optional[str] = Query(
         None,
-        description="Comma list of sessions, alerts, gate_reads, slots, timeline. "
-                    "Default: the four sections, no timeline.",
+        description="Comma list of sessions, alerts, slots, timeline. "
+                    "Default: the three sections, no timeline.",
     ),
-    limit: int = Query(50, ge=1, le=500, description="Newest items per section (and in the timeline)."),
+    limit: int = Query(50, ge=1, le=500,
+                       description="Items per section (and in the timeline), the first in its sort order."),
     session_status: Optional[ParkingSessionStatus] = _SESSION_STATUS_Q,
     alert_type: Optional[str] = _ALERT_TYPE_Q,
     severity: Optional[AlertSeverity] = _SEVERITY_Q,
     resolved: Optional[bool] = _RESOLVED_Q,
-    gate: Optional[EntryExitDirection] = _GATE_Q,
-    camera_id: Optional[str] = _CAMERA_Q,
     floor: Optional[str] = _FLOOR_Q,
     floor_id: Optional[int] = _FLOOR_ID_Q,
+    sessions_sort_by: HistorySessionSort = Query(
+        HistorySessionSort.entry_time,
+        description="Visits: entry_time (default) | exit_time (still inside last) | duration "
+                    "(live while inside) | floor | slot | status (asc: open, overstay, closed, "
+                    "unknown_exit). Empty values sort last either way."),
+    sessions_sort_dir: SortDir = Query(SortDir.desc, description=_SORT_DIR_Q),
+    alerts_sort_by: AlertSortBy = Query(
+        AlertSortBy.triggered_at,
+        description="Alerts: triggered_at (default) | resolved_at | type | plate | location "
+                    "(floor, else location) | severity (desc = critical first) | status "
+                    "(asc = active first). Empty values sort last either way."),
+    alerts_sort_dir: SortDir = Query(SortDir.desc, description=_SORT_DIR_Q),
+    slots_sort_by: HistorySlotSort = Query(
+        HistorySlotSort.seen_from,
+        description="Slot history: seen_from (default) | seen_until (still there last) | "
+                    "duration | slot | observations. Empty values sort last either way."),
+    slots_sort_dir: SortDir = Query(SortDir.desc, description=_SORT_DIR_Q),
+    timeline_sort_dir: SortDir = _TIMELINE_DIR_Q,
     db: Session = Depends(get_db),
 ):
     """Everything about one plate, registered or not.
@@ -1532,19 +1564,37 @@ async def vehicle_history(
     - `current`: inside right now? Open visit, slot, open alerts. Ignores the
       range and the filters.
     - `summary`: counts for the range. Ignores the filters.
-    - `sessions` / `alerts` / `gate_reads` / `slot_history`: newest `limit`
-      of each, with `total`; range and filters apply. Null when not in `include`.
+    - `sessions` / `alerts` / `slot_history`: the first `limit` of each in its
+      own `*_sort_by` / `*_sort_dir` order (newest first by default), with
+      `total`; range and filters apply. Sorting happens before the cut, so
+      `duration` desc is the longest stays of the whole range. Null when not
+      in `include`.
     - `timeline`: only with `include=timeline`; the same records merged into
-      one newest-first list, capped at `limit`.
+      one list by time (`timeline_sort_dir`), capped at `limit`. The section
+      sorts do not change it.
     """
     wanted = _parse_include(include)
     q = _history_query(plate, date_from, date_to, session_status, alert_type, severity,
-                       resolved, gate, camera_id, floor, floor_id, db)
+                       resolved, floor, floor_id, db)
 
-    need = set(_HISTORY_SECTIONS) if "timeline" in wanted else wanted & set(_HISTORY_SECTIONS)
-    fetch = {"sessions": _history_sessions, "alerts": _history_alerts,
-             "gate_reads": _history_gate_reads, "slots": _history_slots}
-    sections = {name: fetch[name](db, q, limit) for name in need}
+    fetched: dict[tuple, HistorySection] = {}
+
+    def section(name: str, sort_by, sort_dir: SortDir) -> HistorySection:
+        # A section sorted by time in the timeline's direction is fetched once.
+        if (name, sort_by, sort_dir) not in fetched:
+            fetched[(name, sort_by, sort_dir)] = _TIME_SORT[name][1](db, q, limit, sort_by, sort_dir)
+        return fetched[(name, sort_by, sort_dir)]
+
+    sorts = {"sessions": (sessions_sort_by, sessions_sort_dir),
+             "alerts": (alerts_sort_by, alerts_sort_dir),
+             "slots": (slots_sort_by, slots_sort_dir)}
+    sections = {name: section(name, *sorts[name]) for name in wanted & set(_HISTORY_SECTIONS)}
+    timeline = None
+    if "timeline" in wanted:
+        timeline = _history_timeline(
+            {name: section(name, key, timeline_sort_dir) for name, (key, _) in _TIME_SORT.items()},
+            limit, timeline_sort_dir,
+        )
 
     vehicle = _history_vehicle(db, q.forms)
     summary = _history_summary(db, q)
@@ -1553,13 +1603,13 @@ async def vehicle_history(
     matched = set()
     if vehicle:
         matched.add(vehicle.plate_number)
-    for sec in sections.values():
+    for sec in fetched.values():
         matched.update(i.plate_number for i in sec.items if getattr(i, "plate_number", None))
     if current.open_session:
         matched.add(current.open_session.plate_number)
 
     found = bool(vehicle or current.is_inside or summary.visits or summary.alerts
-                 or summary.gate_reads or summary.slot_sightings)
+                 or summary.slot_sightings)
     return VehicleHistory(
         plate=plate,
         matched_plates=sorted(matched),
@@ -1569,11 +1619,10 @@ async def vehicle_history(
         vehicle=vehicle,
         current=current,
         summary=summary,
-        sessions=sections["sessions"] if "sessions" in wanted else None,
-        alerts=sections["alerts"] if "alerts" in wanted else None,
-        gate_reads=sections["gate_reads"] if "gate_reads" in wanted else None,
-        slot_history=sections["slots"] if "slots" in wanted else None,
-        timeline=_history_timeline(sections, limit) if "timeline" in wanted else None,
+        sessions=sections.get("sessions"),
+        alerts=sections.get("alerts"),
+        slot_history=sections.get("slots"),
+        timeline=timeline,
     )
 
 
@@ -1586,29 +1635,23 @@ async def export_vehicle_history_csv(
     alert_type: Optional[str] = _ALERT_TYPE_Q,
     severity: Optional[AlertSeverity] = _SEVERITY_Q,
     resolved: Optional[bool] = _RESOLVED_Q,
-    gate: Optional[EntryExitDirection] = _GATE_Q,
-    camera_id: Optional[str] = _CAMERA_Q,
     floor: Optional[str] = _FLOOR_Q,
     floor_id: Optional[int] = _FLOOR_ID_Q,
+    timeline_sort_dir: SortDir = _TIMELINE_DIR_Q,
     db: Session = Depends(get_db),
 ):
     """The full timeline (no `limit`) for the same plate, range and filters
-    as GET /vehicles/history, one row per event."""
+    as GET /vehicles/history, one row per event, in `timeline_sort_dir` order."""
     q = _history_query(plate, date_from, date_to, session_status, alert_type, severity,
-                       resolved, gate, camera_id, floor, floor_id, db)
-    sections = {
-        "sessions": _history_sessions(db, q, None),
-        "alerts": _history_alerts(db, q, None),
-        "gate_reads": _history_gate_reads(db, q, None),
-        "slots": _history_slots(db, q, None),
-    }
+                       resolved, floor, floor_id, db)
+    sections = {name: fetch(db, q, None) for name, (_, fetch) in _TIME_SORT.items()}
     data = [
         {
             "Time": t.at.strftime("%Y-%m-%d %H:%M:%S") if t.at else "",
             "Event": t.kind, "Reference": t.ref_id, "Details": t.text,
             "Camera": t.camera_id, "Slot": t.slot_id, "Floor": t.floor, "Severity": t.severity,
         }
-        for t in _history_timeline(sections, None)
+        for t in _history_timeline(sections, None, timeline_sort_dir)
     ]
     headers = ["Time", "Event", "Reference", "Details", "Camera", "Slot", "Floor", "Severity"]
     safe = normalize_plate_term(plate) or "plate"

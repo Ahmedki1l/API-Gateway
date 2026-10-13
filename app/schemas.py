@@ -754,23 +754,9 @@ class VehicleHistorySummary(BaseModel):
     avg_stay_minutes: float = 0.0    # an open visit counts its live elapsed time
     alerts: int = 0
     open_alerts: int = 0
-    gate_reads: int = 0
     slot_sightings: int = 0
     first_seen_at: Optional[datetime] = None
     last_seen_at: Optional[datetime] = None
-
-
-class GateRead(BaseModel):
-    """One ANPR read at a gate (entry_exit_log)."""
-    id: int
-    plate_number: str
-    gate: Optional[str] = None       # "entry" | "exit"; str, not Literal — never 500 on a new value
-    camera_id: Optional[str] = None
-    event_time: Optional[datetime] = None
-    snapshot_url: Optional[str] = None
-    plate_confidence: Optional[float] = None
-    matched_entry_id: Optional[int] = None
-    parking_duration_seconds: Optional[int] = None
 
 
 class SlotSighting(BaseModel):
@@ -788,15 +774,16 @@ class SlotSighting(BaseModel):
 
 
 class HistorySection(BaseModel, Generic[T]):
-    """The newest `limit` items of a section; `total` counts all of them."""
+    """The first `limit` items of a section in its sort order (newest first
+    by default); `total` counts all of them."""
     total: int = 0
     items: list[T] = []
 
 
 class VehicleTimelineItem(BaseModel):
     at: Optional[datetime] = None
-    kind: str        # entry | parked | exit | alert | alert_resolved | gate_read | slot
-    ref_id: Optional[str] = None     # session / alert / gate-read id, or slot_id
+    kind: str        # entry | parked | exit | alert | alert_resolved | slot
+    ref_id: Optional[str] = None     # session / alert id, or slot_id
     text: str
     camera_id: Optional[str] = None
     slot_id: Optional[str] = None
@@ -817,7 +804,6 @@ class VehicleHistory(BaseModel):
     # A section is null when left out of `include`.
     sessions: Optional[HistorySection[VehicleEvent]] = None
     alerts: Optional[HistorySection[AlertItem]] = None
-    gate_reads: Optional[HistorySection[GateRead]] = None
     slot_history: Optional[HistorySection[SlotSighting]] = None
     timeline: Optional[list[VehicleTimelineItem]] = None
 
