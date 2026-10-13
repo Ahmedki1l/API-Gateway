@@ -220,17 +220,29 @@ def _entry_exit_filters(
     return " AND ".join(clauses), params
 
 
+EntryExitSortBy = Literal["time", "entry_time", "exit_time"]
+
+
 def _entry_exit_order(
-    sort_by: Literal["entry_time", "exit_time"],
+    sort_by: EntryExitSortBy,
     sort_direction: Literal["asc", "desc"],
 ) -> str:
     """Return the only supported, deterministic session ordering.
+
+    ``time`` (the default) is the row's latest gate activity: exit time once
+    the car has left, entry time while it is still inside. Sorting by entry
+    time alone kept a car that entered early and exited just now below
+    later entries, so the dashboard's top rows hid the newest exits.
 
     A NULL timestamp always follows dated sessions. Rows with the same
     timestamp (including NULL timestamps) use ``ps.id`` in the requested
     direction, so pagination cannot shuffle them between requests.
     """
-    columns = {"entry_time": "ps.entry_time", "exit_time": "ps.exit_time"}
+    columns = {
+        "time": "COALESCE(ps.exit_time, ps.entry_time)",
+        "entry_time": "ps.entry_time",
+        "exit_time": "ps.exit_time",
+    }
     directions = {"asc": "ASC", "desc": "DESC"}
     column = columns[sort_by]
     direction = directions[sort_direction]
@@ -430,7 +442,7 @@ async def get_entry_exit(
     date_to: Optional[date] = Query(None),
     min_duration_seconds: Optional[int] = Query(None, ge=0),
     max_duration_seconds: Optional[int] = Query(None, ge=0),
-    sort_by: Literal["entry_time", "exit_time"] = Query("entry_time"),
+    sort_by: EntryExitSortBy = Query("time"),
     sort_direction: Literal["asc", "desc"] = Query("desc"),
     db: Session = Depends(get_db),
 ):
@@ -506,7 +518,7 @@ async def export_entry_exit_csv(
     date_to: Optional[date] = Query(None),
     min_duration_seconds: Optional[int] = Query(None, ge=0),
     max_duration_seconds: Optional[int] = Query(None, ge=0),
-    sort_by: Literal["entry_time", "exit_time"] = Query("entry_time"),
+    sort_by: EntryExitSortBy = Query("time"),
     sort_direction: Literal["asc", "desc"] = Query("desc"),
     db: Session = Depends(get_db),
 ):

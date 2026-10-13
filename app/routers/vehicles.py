@@ -525,6 +525,11 @@ async def get_vehicles(
         if cols["v_floor_id"] else f"{ps_outer_floor_id}"
     )
 
+    # `parked_at` here is when the open session started (gate entry), not
+    # when a slot camera matched the car. The slot time is rewritten on every
+    # re-bind and stays NULL until a slot camera places the car, so showing,
+    # sorting, and counting duration from it lagged the real entry. Sessions
+    # with no gate entry fall back to the slot time.
     items = rows(db, f"""
         {all_plates_cte}
         SELECT
@@ -538,7 +543,7 @@ async def get_vehicles(
             v.registered_at,
             v.notes
             {extra},
-            ps.parked_at,
+            COALESCE(ps.entry_time, ps.parked_at) AS parked_at,
             ps.status      AS parking_status,
             {floor_expr}   AS floor,
             {floor_id_expr} AS floor_id,
@@ -560,8 +565,8 @@ async def get_vehicles(
         {base_from}
         WHERE {where}
         ORDER BY
-            CASE WHEN ps.parked_at IS NOT NULL THEN 0 ELSE 1 END,
-            ps.parked_at DESC,
+            CASE WHEN COALESCE(ps.entry_time, ps.parked_at) IS NOT NULL THEN 0 ELSE 1 END,
+            COALESCE(ps.entry_time, ps.parked_at) DESC,
             v.registered_at DESC,
             ap.plate_number
         OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY

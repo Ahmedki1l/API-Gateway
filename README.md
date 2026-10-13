@@ -157,8 +157,8 @@ python run.py
 |--------|---------------------------|-------------------------------------------------------|
 | GET    | `/entry-exit/kpis`        | target_date (ISO, optional — for yesterday compare)   |
 | GET    | `/entry-exit/traffic`     | period = daily \| weekly \| monthly                   |
-| GET    | `/entry-exit/`            | page, page_size, search (plate, owner, or vehicle title), floor, is_employee, date_from, date_to, sort_by (entry_time or exit_time), sort_direction (asc or desc) |
-| GET    | `/entry-exit/export/csv`  | same filters and sorting as list; defaults to entry_time descending, timestamps with NULL sort last, then id |
+| GET    | `/entry-exit/`            | page, page_size, search (plate, owner, or vehicle title), floor, is_employee, date_from, date_to, sort_by (time = exit time, else entry time [default]; entry_time; exit_time), sort_direction (asc or desc) |
+| GET    | `/entry-exit/export/csv`  | same filters and sorting as list; defaults to time (exit, else entry) descending, timestamps with NULL sort last, then id |
 
 ### Vehicles
 | Method | Path                    | Query Params                                  |

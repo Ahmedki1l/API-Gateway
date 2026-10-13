@@ -216,7 +216,7 @@ class TitleSearchAndSessionSortingTests(unittest.IsolatedAsyncioTestCase):
         exported = await self.client.get("/entry-exit/export/csv", params=params)
         default = await self.client.get("/entry-exit/", params={"page_size": 100})
         explicit_default = await self.client.get("/entry-exit/", params={
-            "page_size": 100, "sort_by": "entry_time", "sort_direction": "desc",
+            "page_size": 100, "sort_by": "time", "sort_direction": "desc",
         })
 
         for response in (first, second, third, exported, default, explicit_default):
@@ -228,6 +228,19 @@ class TitleSearchAndSessionSortingTests(unittest.IsolatedAsyncioTestCase):
         records = list(csv.DictReader(io.StringIO(exported.text.lstrip("\ufeff"))))
         self.assertEqual([record["Plate Number"] for record in records],
                          ["D-400", "A-100", "B-200", "C-300", "E-500"])
+
+    async def test_default_sort_is_latest_activity(self):
+        # Exit time once the car left, entry time while it is still inside:
+        # D-400 left 15:00, B-200 14:00, C-300 13:00, A-100 entered 09:00 and
+        # is still inside, E-500 has neither and goes last.
+        default = await self.client.get("/entry-exit/", params={"page_size": 100})
+        ascending = await self.client.get("/entry-exit/", params={
+            "page_size": 100, "sort_direction": "asc",
+        })
+
+        self.assertEqual(default.status_code, 200, default.text)
+        self.assertEqual([item["id"] for item in default.json()["items"]], [4, 2, 3, 1, 5])
+        self.assertEqual([item["id"] for item in ascending.json()["items"]], [1, 3, 2, 4, 5])
 
     async def test_exit_sort_keeps_nulls_last_in_both_directions(self):
         ascending = await self.client.get("/entry-exit/", params={
