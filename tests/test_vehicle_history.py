@@ -317,6 +317,40 @@ def test_timeline_oldest_first(client, url):
     assert tl[0]["kind"] == "entry" and tl[0]["at"].startswith("2031-01-14T08:00:00")
 
 
+def _timeline(client, url, **params):
+    return client.get(url, params={"plate": PLATE, **RANGE, "include": "timeline",
+                                   "limit": 500, **params}).json()["timeline"]
+
+
+def test_timeline_sort_by_column(client, url):
+    kinds = [t["kind"] for t in _timeline(client, url, timeline_sort_by="event", timeline_sort_dir="asc")]
+    assert kinds == sorted(kinds)
+    cams = [t["camera_id"] for t in _timeline(client, url, timeline_sort_by="camera", timeline_sort_dir="asc")]
+    named = [c for c in cams if c]
+    assert cams == named + [None] * (len(cams) - len(named))     # empty last
+    assert named == sorted(named)
+    for d in ("asc", "desc"):                                    # non-alerts last either way
+        sev = [t["severity"] for t in _timeline(client, url, timeline_sort_by="severity", timeline_sort_dir=d)]
+        assert sev[:3] == ["high"] * 3 and set(sev[3:]) == {None}
+    details = [t["text"].lower() for t in _timeline(client, url, timeline_sort_by="details", timeline_sort_dir="asc")]
+    assert details == sorted(details)
+
+
+def test_timeline_column_sort_applies_before_limit(client, url):
+    # The newest event is the 2031-01-17 entry, but severity sorts the whole
+    # range before the cut, so the one row kept is an alert.
+    tl = _timeline(client, url, timeline_sort_by="severity", limit=1)
+    assert len(tl) == 1 and tl[0]["kind"] in ("alert", "alert_resolved")
+
+
+def test_csv_follows_the_timeline_sort(client, url):
+    r = client.get(url + "/export/csv", params={"plate": PLATE, **RANGE,
+                                                "timeline_sort_by": "event", "timeline_sort_dir": "asc"})
+    events = [line.split(",")[1] for line in r.text.strip().splitlines()[1:]]
+    assert events == sorted(events)
+
+
 def test_bad_sort_values(client, url):
     assert client.get(url, params={"plate": PLATE, "sessions_sort_by": "nope"}).status_code == 422
     assert client.get(url, params={"plate": PLATE, "alerts_sort_dir": "up"}).status_code == 422
+    assert client.get(url, params={"plate": PLATE, "timeline_sort_by": "nope"}).status_code == 422

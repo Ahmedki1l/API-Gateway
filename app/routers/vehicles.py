@@ -54,6 +54,7 @@ from app.schemas_enums import (
     AlertSortBy,
     HistorySessionSort,
     HistorySlotSort,
+    HistoryTimelineSort,
     ParkingSessionStatus,
     SortDir,
     VehicleSort,
@@ -1235,6 +1236,15 @@ def _history_alerts(
     return HistorySection[AlertItem](total=total, items=[alert_item_fixup(r) for r in found])
 
 
+def _sort_nulls_last(items: list, key, desc: bool, time_key) -> list:
+    """`items` by `key` with empty (None) keys last in either direction, the
+    in-Python twin of shared.order_by_nulls_last. Sorted by `time_key` first,
+    so equal keys keep time order in the same direction (the sorts are stable)."""
+    items = sorted(items, key=time_key, reverse=desc)
+    return (sorted((i for i in items if key(i) is not None), key=key, reverse=desc)
+            + [i for i in items if key(i) is None])
+
+
 # Sort keys of the slot-history section, over the merged sightings.
 _SLOT_SORT = {
     HistorySlotSort.seen_from: lambda s: s["seen_from"],
@@ -1301,14 +1311,8 @@ def _history_slots(
             int((s["seen_until"] - s["seen_from"]).total_seconds())
             if s["seen_until"] is not None else None
         )
-
-    # seen_from first so equal keys keep time order (the sorts are stable),
-    # then the key itself with empty values last in either direction.
-    desc = sort_dir is SortDir.desc
-    key = _SLOT_SORT[sort_by]
-    sightings.sort(key=lambda s: s["seen_from"] or datetime.min, reverse=desc)
-    sightings = (sorted((s for s in sightings if key(s) is not None), key=key, reverse=desc)
-                 + [s for s in sightings if key(s) is None])
+    sightings = _sort_nulls_last(sightings, _SLOT_SORT[sort_by], sort_dir is SortDir.desc,
+                                 lambda s: s["seen_from"] or datetime.min)
     shown = sightings if limit is None else sightings[:limit]
     return HistorySection[SlotSighting](total=len(sightings), items=[
         SlotSighting(
@@ -1432,13 +1436,32 @@ def _history_vehicle(db: Session, forms: list[str]) -> Optional[VehicleRef]:
     return VehicleRef(**{**v, "is_registered": bool(v.get("is_registered"))})
 
 
+# Rank, so desc = most severe first. Legacy warning/info rank as medium/low.
+_SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "warning": 2, "low": 1, "info": 1}
+
+# The timeline table's columns -> sort key of one item. None = empty, sorts last.
+_TIMELINE_SORT = {
+    HistoryTimelineSort.time: lambda t: t.at,
+    HistoryTimelineSort.event: lambda t: t.kind,
+    HistoryTimelineSort.details: lambda t: t.text.casefold() if t.text else None,
+    HistoryTimelineSort.location: lambda t: ((t.floor or "", t.slot_id or "")
+                                             if t.floor or t.slot_id else None),
+    HistoryTimelineSort.camera: lambda t: t.camera_id or None,
+    HistoryTimelineSort.severity: lambda t: _SEVERITY_RANK.get(t.severity or ""),
+}
+
+
 def _history_timeline(
-    sections: dict[str, HistorySection], limit: Optional[int], sort_dir: SortDir = SortDir.desc,
+    sections: dict[str, HistorySection], limit: Optional[int],
+    sort_by: HistoryTimelineSort = HistoryTimelineSort.time, sort_dir: SortDir = SortDir.desc,
 ) -> list[VehicleTimelineItem]:
-    """All sections merged in time order, newest first by default. Built from
-    each section's first `limit` rows in that same time order, which hold the
-    first `limit` events overall (newest first, an exit or resolution of an
-    older visit / alert is the one edge left out)."""
+    """All sections merged, sorted by `sort_by` (newest first by default),
+    then cut to `limit`.
+
+    By time, each section's first `limit` rows in that same time order hold
+    the first `limit` events overall (newest first, an exit or resolution of
+    an older visit / alert is the one edge left out). Any other column needs
+    the sections in full (`limit=None`), so the cut sees every event."""
     out: list[VehicleTimelineItem] = []
     for e in sections["sessions"].items:
         out.append(VehicleTimelineItem(
@@ -1475,8 +1498,8 @@ def _history_timeline(
             text=f"Seen in {s.slot_name or s.slot_id}"
                  + (f" for {_fmt_duration(s.duration_seconds)}" if s.duration_seconds is not None else ""),
         ))
-    out = [t for t in out if t.at is not None]
-    out.sort(key=lambda t: t.at, reverse=sort_dir is SortDir.desc)
+    out = _sort_nulls_last([t for t in out if t.at is not None], _TIMELINE_SORT[sort_by],
+                           sort_dir is SortDir.desc, lambda t: t.at)
     return out if limit is None else out[:limit]
 
 
@@ -1510,7 +1533,12 @@ _RESOLVED_Q = Query(None, description="Alerts only. Omit for both.")
 _FLOOR_Q = Query(None, description="Visits, alerts and slot history.")
 _FLOOR_ID_Q = Query(None, description="Visits, alerts and slot history; wins over `floor`.")
 _SORT_DIR_Q = "asc | desc (default)."
-_TIMELINE_DIR_Q = Query(SortDir.desc, description="Timeline order by time: asc (oldest first) | desc (default).")
+_TIMELINE_SORT_Q = Query(
+    HistoryTimelineSort.time,
+    description="Timeline column: time (default) | event | details | location (floor, then "
+                "slot) | camera | severity (desc = critical first; non-alerts last). Applied "
+                "before `limit`. Empty values sort last either way.")
+_TIMELINE_DIR_Q = Query(SortDir.desc, description="asc | desc (default; with time = newest first).")
 
 # The time key of each section: what the timeline is merged from.
 _TIME_SORT = {
@@ -1555,6 +1583,7 @@ async def vehicle_history(
         description="Slot history: seen_from (default) | seen_until (still there last) | "
                     "duration | slot | observations. Empty values sort last either way."),
     slots_sort_dir: SortDir = Query(SortDir.desc, description=_SORT_DIR_Q),
+    timeline_sort_by: HistoryTimelineSort = _TIMELINE_SORT_Q,
     timeline_sort_dir: SortDir = _TIMELINE_DIR_Q,
     db: Session = Depends(get_db),
 ):
@@ -1570,8 +1599,8 @@ async def vehicle_history(
       `duration` desc is the longest stays of the whole range. Null when not
       in `include`.
     - `timeline`: only with `include=timeline`; the same records merged into
-      one list by time (`timeline_sort_dir`), capped at `limit`. The section
-      sorts do not change it.
+      one list, sorted by `timeline_sort_by` / `timeline_sort_dir` (newest
+      first by default), capped at `limit`. The section sorts do not change it.
     """
     wanted = _parse_include(include)
     q = _history_query(plate, date_from, date_to, session_status, alert_type, severity,
@@ -1579,11 +1608,11 @@ async def vehicle_history(
 
     fetched: dict[tuple, HistorySection] = {}
 
-    def section(name: str, sort_by, sort_dir: SortDir) -> HistorySection:
-        # A section sorted by time in the timeline's direction is fetched once.
-        if (name, sort_by, sort_dir) not in fetched:
-            fetched[(name, sort_by, sort_dir)] = _TIME_SORT[name][1](db, q, limit, sort_by, sort_dir)
-        return fetched[(name, sort_by, sort_dir)]
+    def section(name: str, sort_by, sort_dir: SortDir, n: Optional[int] = limit) -> HistorySection:
+        # A section the timeline needs in the same order and size is fetched once.
+        if (name, sort_by, sort_dir, n) not in fetched:
+            fetched[(name, sort_by, sort_dir, n)] = _TIME_SORT[name][1](db, q, n, sort_by, sort_dir)
+        return fetched[(name, sort_by, sort_dir, n)]
 
     sorts = {"sessions": (sessions_sort_by, sessions_sort_dir),
              "alerts": (alerts_sort_by, alerts_sort_dir),
@@ -1591,9 +1620,14 @@ async def vehicle_history(
     sections = {name: section(name, *sorts[name]) for name in wanted & set(_HISTORY_SECTIONS)}
     timeline = None
     if "timeline" in wanted:
+        # By time, each section's first `limit` rows are enough; any other
+        # column must see every event before the cut.
+        by_time = timeline_sort_by is HistoryTimelineSort.time
         timeline = _history_timeline(
-            {name: section(name, key, timeline_sort_dir) for name, (key, _) in _TIME_SORT.items()},
-            limit, timeline_sort_dir,
+            {name: section(name, key, timeline_sort_dir if by_time else SortDir.desc,
+                           limit if by_time else None)
+             for name, (key, _) in _TIME_SORT.items()},
+            limit, timeline_sort_by, timeline_sort_dir,
         )
 
     vehicle = _history_vehicle(db, q.forms)
@@ -1637,11 +1671,13 @@ async def export_vehicle_history_csv(
     resolved: Optional[bool] = _RESOLVED_Q,
     floor: Optional[str] = _FLOOR_Q,
     floor_id: Optional[int] = _FLOOR_ID_Q,
+    timeline_sort_by: HistoryTimelineSort = _TIMELINE_SORT_Q,
     timeline_sort_dir: SortDir = _TIMELINE_DIR_Q,
     db: Session = Depends(get_db),
 ):
     """The full timeline (no `limit`) for the same plate, range and filters
-    as GET /vehicles/history, one row per event, in `timeline_sort_dir` order."""
+    as GET /vehicles/history, one row per event, in the table's
+    `timeline_sort_by` / `timeline_sort_dir` order."""
     q = _history_query(plate, date_from, date_to, session_status, alert_type, severity,
                        resolved, floor, floor_id, db)
     sections = {name: fetch(db, q, None) for name, (_, fetch) in _TIME_SORT.items()}
@@ -1651,7 +1687,7 @@ async def export_vehicle_history_csv(
             "Event": t.kind, "Reference": t.ref_id, "Details": t.text,
             "Camera": t.camera_id, "Slot": t.slot_id, "Floor": t.floor, "Severity": t.severity,
         }
-        for t in _history_timeline(sections, None, timeline_sort_dir)
+        for t in _history_timeline(sections, None, timeline_sort_by, timeline_sort_dir)
     ]
     headers = ["Time", "Event", "Reference", "Details", "Camera", "Slot", "Floor", "Severity"]
     safe = normalize_plate_term(plate) or "plate"

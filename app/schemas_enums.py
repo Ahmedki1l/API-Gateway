@@ -181,6 +181,17 @@ class HistorySessionSort(str, Enum):
     status = "status"               # asc: open, overstay, closed, unknown_exit
 
 
+class HistoryTimelineSort(str, Enum):
+    """Sortable columns of the vehicle-history timeline table and its CSV
+    (`timeline_sort_by`). Empty values sort last in either direction."""
+    time = "time"                   # default
+    event = "event"                 # kind: alert, alert_resolved, entry, exit, parked, slot
+    details = "details"             # the text, case-insensitive
+    location = "location"           # floor, then slot
+    camera = "camera"
+    severity = "severity"           # desc: critical, high, medium, low; non-alerts last
+
+
 class HistorySlotSort(str, Enum):
     """Sort of the `slot_history` section of GET /vehicles/history
     (`slots_sort_by`). Empty values sort last in either direction."""
